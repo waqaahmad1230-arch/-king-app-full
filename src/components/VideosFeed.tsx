@@ -35,6 +35,12 @@ import {
   recordUniqueVideoView 
 } from "../services/videoSocialService";
 import LikedByModal from "./LikedByModal";
+import {
+  applyVideoOpenGraphMeta,
+  buildVideoShareText,
+  getWatchUrl,
+  resetDefaultOpenGraphMeta,
+} from "../utils/videoShareUtils";
 
 // Format views into YouTube-style compact numbers (e.g. 1.2K, 3.4M)
 function formatViews(count: any): string {
@@ -135,6 +141,7 @@ export default function VideosFeed({
   const [creatorWhatsApp, setCreatorWhatsApp] = useState<string | null>(null);
   const hideControlsTimerRef = useRef<NodeJS.Timeout | null>(null);
   const reelTouchStartYRef = useRef<number | null>(null);
+  const handledUrlVideoRef = useRef<string | null>(null);
 
   // Social Likes & Views States
   const [isLikedByMe, setIsLikedByMe] = useState(false);
@@ -407,10 +414,14 @@ export default function VideosFeed({
     const urlVideoId = typeof window !== 'undefined'
       ? new URLSearchParams(window.location.search).get('video')
       : null;
-    const targetId = sessionStorage.getItem('selected_video_id') || urlVideoId;
+    const sessionVideoId = sessionStorage.getItem('selected_video_id');
+    const targetId = sessionVideoId || (urlVideoId && handledUrlVideoRef.current !== urlVideoId ? urlVideoId : null);
     if (targetId) {
-      sessionStorage.removeItem('selected_video_id');
-      const foundIdx = videos.findIndex((v) => v.id === targetId);
+      if (sessionVideoId) sessionStorage.removeItem('selected_video_id');
+      if (urlVideoId) handledUrlVideoRef.current = urlVideoId;
+      const foundIdx = videos.findIndex(
+        (v) => v.id === targetId || (typeof v.videoUrl === 'string' && v.videoUrl.includes(targetId))
+      );
       if (foundIdx !== -1) {
         handleOpenPlayer(videos[foundIdx], foundIdx);
       }
@@ -570,6 +581,9 @@ export default function VideosFeed({
     saveToHistory(v);
     scrollToPlayerTop();
     startHideTimer();
+    if (v?.id) {
+      applyVideoOpenGraphMeta(v, getWatchUrl(v.id));
+    }
   };
 
   const handleSelectNextVideo = (nextV: any, index: number) => {
@@ -582,6 +596,9 @@ export default function VideosFeed({
     saveToHistory(nextV);
     scrollToPlayerTop();
     startHideTimer();
+    if (nextV?.id) {
+      applyVideoOpenGraphMeta(nextV, getWatchUrl(nextV.id));
+    }
   };
 
   const handleClosePlayer = () => {
@@ -589,6 +606,7 @@ export default function VideosFeed({
     setActiveVideoIndex(-1);
     setIsMinimized(false);
     setIsLocked(false);
+    resetDefaultOpenGraphMeta();
   };
 
   const handlePlayNext = () => {
@@ -616,24 +634,12 @@ export default function VideosFeed({
     scrollToPlayerTop();
   };
 
-  const buildCleanShareText = (video: any) => {
-    const fullUrl = video?.videoUrl || video?.url || video?.uri || '';
-    const cleanBaseUrl = fullUrl.split('?')[0];
-    const fileName = (cleanBaseUrl.split('/').pop() || '').replace(/\.[^/.]+$/, '');
-    const shortLink =
-      cleanBaseUrl.includes('res.cloudinary.com') && fileName
-        ? `https://res.cloudinary.com/xb0o3xwi/video/upload/${fileName}.mp4`
-        : cleanBaseUrl;
-
-    const displayId = fileName || video?.title || video?.id || 'KING Video';
-    return `👑 KING App\n\n🎬 ${displayId}\n\n▶️ Watch Now:\n${shortLink}`;
-  };
+  const buildCleanShareText = (video: any) => buildVideoShareText(video);
 
   const handleVideoShare = (video: any, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     try {
-      const fullUrl = video?.videoUrl || video?.url || '';
-      if (!fullUrl) return;
+      if (!video) return;
       const text = buildCleanShareText(video);
       window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank', 'noopener,noreferrer');
     } catch (err) {
@@ -645,7 +651,10 @@ export default function VideosFeed({
     if (e) e.stopPropagation();
     const shareText = buildCleanShareText(video);
     if (navigator.share) {
-      navigator.share({ text: shareText }).catch(() => {});
+      navigator.share({
+        title: `${video?.title || 'Viral Video'} - KING App`,
+        text: shareText,
+      }).catch(() => {});
     } else if (navigator.clipboard) {
       navigator.clipboard.writeText(shareText).then(() => {
         setCopiedLink(true);

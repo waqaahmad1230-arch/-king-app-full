@@ -10,6 +10,7 @@ import GamePixZoneView from './components/GamePixZoneView';
 import VideosView from './components/VideosView';
 import LibraryView from './components/LibraryView';
 import CatalogView from './components/CatalogView';
+import WatchPage from './components/WatchPage';
 
 import QRScannerModal from './components/QRScannerModal';
 import SearchModal from './components/SearchModal';
@@ -24,18 +25,44 @@ import BottomNavigation from './components/BottomNavigation';
 export default function App() {
   const { user, isAuthModalOpen, closeAuthModal } = useAuth();
 
-  const [showSplash, setShowSplash] = useState(true);
+  const extractWatchVideoId = (pathname: string, search: string): string | null => {
+    const match = pathname.match(/^\/watch\/([^/?#]+)/i);
+    if (match && match[1]) {
+      try {
+        return decodeURIComponent(match[1]);
+      } catch {
+        return match[1];
+      }
+    }
+    const videoParam = new URLSearchParams(search).get('video');
+    return videoParam ? videoParam.trim() : null;
+  };
+
+  const [watchVideoId, setWatchVideoId] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    return extractWatchVideoId(window.location.pathname, window.location.search);
+  });
+
+  const [showSplash, setShowSplash] = useState(() => {
+    if (typeof window !== 'undefined' && /^\/watch\/[^/?#]+/i.test(window.location.pathname)) {
+      return false;
+    }
+    return true;
+  });
   useEffect(() => {
+    if (!showSplash) return;
     const timer = setTimeout(() => {
       setShowSplash(false);
     }, 1500);
     return () => clearTimeout(timer);
-  }, []);
+  }, [showSplash]);
 
   const [activeTab, setActiveTab] = useState<string>(() => {
     const path = typeof window !== 'undefined' ? window.location.pathname.toLowerCase() : '';
-    const videoParam = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('video') : null;
-    if (videoParam) return 'VIDEOS';
+    const initialWatchId = typeof window !== 'undefined'
+      ? extractWatchVideoId(window.location.pathname, window.location.search)
+      : null;
+    if (initialWatchId) return 'WATCH';
     if (path === '/gamepix') return 'GAMEPIX';
     if (path === '/catalog' || path === '/shop') return 'CATALOG';
     if (path === '/privacy-policy') return 'PRIVACY_POLICY';
@@ -46,11 +73,18 @@ export default function App() {
   React.useEffect(() => {
     const handlePopState = () => {
       const path = window.location.pathname.toLowerCase();
-      if (path === '/gamepix') {
+      const poppedWatchId = extractWatchVideoId(window.location.pathname, window.location.search);
+      if (poppedWatchId) {
+        setWatchVideoId(poppedWatchId);
+        setActiveTab('WATCH');
+      } else if (path === '/gamepix') {
+        setWatchVideoId(null);
         setActiveTab('GAMEPIX');
       } else if (path === '/catalog' || path === '/shop') {
+        setWatchVideoId(null);
         setActiveTab('CATALOG');
       } else {
+        setWatchVideoId(null);
         setActiveTab('HOME');
       }
     };
@@ -114,6 +148,26 @@ export default function App() {
             }}
           />
         );
+      case 'WATCH':
+        return (
+          <WatchPage
+            videoId={watchVideoId || ''}
+            onBackToFeed={() => {
+              setWatchVideoId(null);
+              setActiveTab('VIDEOS');
+              if (
+                window.location.pathname.toLowerCase().startsWith('/watch') ||
+                window.location.search.includes('video=')
+              ) {
+                window.history.pushState({}, '', '/');
+              }
+            }}
+            onOpenCreatorProfile={(creatorUid) => {
+              setViewingProfileUserId(creatorUid);
+              setIsProfileOpen(true);
+            }}
+          />
+        );
       case 'VIDEOS':
         return (
           <VideosView
@@ -167,7 +221,9 @@ export default function App() {
 
   const isCatalogPage =
     activeTab.toUpperCase() === 'CATALOG' || activeTab.toUpperCase() === 'SHOP';
-  const hideHeaderForFullScreenVideo = activeTab.toUpperCase() === 'VIDEOS' && isVideoFullScreen;
+  const hideHeaderForFullScreenVideo =
+    activeTab.toUpperCase() === 'WATCH' ||
+    (activeTab.toUpperCase() === 'VIDEOS' && isVideoFullScreen);
 
   return (
     <div className={`app-container min-h-screen m-0 p-0 ${isCatalogPage ? 'bg-[#0A0A0A]' : 'bg-[#040812]'} text-white flex flex-col font-sans selection:bg-cyan-500/30`}>

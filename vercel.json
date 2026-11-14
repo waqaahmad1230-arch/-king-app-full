@@ -1,0 +1,19 @@
+{
+  "rewrites": [
+    {
+      "source": "/watch/:id",
+      "has": [
+        {
+          "type": "header",
+          "key": "user-agent",
+          "value": ".*(WhatsApp|facebookexternalhit|Facebot|Twitterbot|TelegramBot|Slackbot|Discordbot|LinkedInBot|Googlebot|bingbot|Applebot|Pinterest|vkShare).*"
+        }
+      ],
+      "destination": "/api/watch?id=:id"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}

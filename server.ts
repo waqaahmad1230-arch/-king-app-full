@@ -350,19 +350,152 @@ app.get('/ads.txt', (_req, res) => {
 // Explicitly serve public assets
 app.use('/public', express.static(path.resolve(process.cwd(), 'public')));
 
+const FIRESTORE_DATABASE_ID = 'ai-studio-king-4e115b8f-6ca5-4501-8ff0-73c2c7c21a47';
+const CANONICAL_APP_ORIGIN = 'https://king-app-full.vercel.app';
+
+function escapeOgHtml(str: string): string {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function formatOgViews(raw: any): string {
+  const num = Number(raw) || 0;
+  if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(1).replace(/\.0$/, '')}M views`;
+  if (num >= 1_000) return `${(num / 1_000).toFixed(1).replace(/\.0$/, '')}K views`;
+  return `${num} ${num === 1 ? 'view' : 'views'}`;
+}
+
+function extractFirestoreField(field: any): string | number | undefined {
+  if (!field) return undefined;
+  if (typeof field.stringValue === 'string') return field.stringValue;
+  if (field.integerValue !== undefined) return Number(field.integerValue);
+  if (field.doubleValue !== undefined) return Number(field.doubleValue);
+  return undefined;
+}
+
+async function fetchVideoMetadataForOg(videoId: string) {
+  let title = 'Watch Viral Video';
+  let viewsLabel = '0 views';
+  let thumbnail = `${CANONICAL_APP_ORIGIN}/icon.png`;
+  let videoUrl = '';
+
+  if (!videoId) return { title, viewsLabel, thumbnail, videoUrl };
+
+  try {
+    const restUrl = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/${FIRESTORE_DATABASE_ID}/documents/videos/${encodeURIComponent(
+      videoId
+    )}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    const resp = await fetch(restUrl, { signal: controller.signal });
+    clearTimeout(timer);
+
+    if (resp.ok) {
+      const json = (await resp.json()) as { fields?: Record<string, any> };
+      const fields = json?.fields || {};
+      const titleVal = extractFirestoreField(fields.title);
+      if (typeof titleVal === 'string' && titleVal.trim()) title = titleVal.trim();
+
+      viewsLabel = formatOgViews(extractFirestoreField(fields.views));
+
+      const rawVid = extractFirestoreField(fields.videoUrl) || extractFirestoreField(fields.url);
+      if (typeof rawVid === 'string' && rawVid.trim()) videoUrl = rawVid.trim();
+
+      const rawThumb =
+        extractFirestoreField(fields.thumbnailUrl) ||
+        extractFirestoreField(fields.thumbnail) ||
+        extractFirestoreField(fields.img);
+      if (typeof rawThumb === 'string' && rawThumb.trim()) {
+        thumbnail = rawThumb.trim();
+      } else if (videoUrl && videoUrl.includes('res.cloudinary.com')) {
+        thumbnail = videoUrl.split('?')[0].replace(/\.[^/.]+$/, '.jpg');
+      }
+    }
+  } catch (err) {
+    console.warn('[OG Metadata] Video fetch notice:', err);
+  }
+
+  return { title, viewsLabel, thumbnail, videoUrl };
+}
+
+function injectDynamicVideoOgTags(html: string, videoId: string, meta: {
+  title: string;
+  viewsLabel: string;
+  thumbnail: string;
+  videoUrl: string;
+}): string {
+  const ogTitle = escapeOgHtml(`${meta.title} - KING App`);
+  const ogDesc = escapeOgHtml(`Watch on KING App - ${meta.viewsLabel}`);
+  const ogImage = escapeOgHtml(meta.thumbnail);
+  const ogUrl = escapeOgHtml(`${CANONICAL_APP_ORIGIN}/watch/${encodeURIComponent(videoId)}`);
+  const ogVideo = meta.videoUrl ? escapeOgHtml(meta.videoUrl) : '';
+
+  const cleanedHtml = html
+    .replace(/<title>[\s\S]*?<\/title>/i, '')
+    .replace(/<meta[^>]+name=["']description["'][^>]*>\s*/gi, '')
+    .replace(/<meta[^>]+property=["']og:[^"']+["'][^>]*>\s*/gi, '')
+    .replace(/<meta[^>]+name=["']twitter:[^"']+["'][^>]*>\s*/gi, '');
+
+  const dynamicTags = `
+    <title>${ogTitle}</title>
+    <meta name="description" content="${ogDesc}" />
+    <meta property="og:site_name" content="KING App" />
+    <meta property="og:title" content="${ogTitle}" />
+    <meta property="og:description" content="${ogDesc}" />
+    <meta property="og:image" content="${ogImage}" />
+    <meta property="og:image:secure_url" content="${ogImage}" />
+    <meta property="og:image:width" content="720" />
+    <meta property="og:image:height" content="1280" />
+    <meta property="og:url" content="${ogUrl}" />
+    <meta property="og:type" content="video.other" />
+    ${
+      ogVideo
+        ? `<meta property="og:video" content="${ogVideo}" />
+    <meta property="og:video:secure_url" content="${ogVideo}" />
+    <meta property="og:video:type" content="video/mp4" />
+    <meta property="og:video:width" content="720" />
+    <meta property="og:video:height" content="1280" />`
+        : ''
+    }
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="${ogTitle}" />
+    <meta name="twitter:description" content="${ogDesc}" />
+    <meta name="twitter:image" content="${ogImage}" />`;
+
+  return cleanedHtml.replace(/<head([^>]*)>/i, `<head$1>${dynamicTags}`);
+}
+
 async function startServer() {
   const PORT = Number(process.env.PORT) || 3000;
   const isProduction = process.env.NODE_ENV === 'production';
   const distPath = path.resolve(process.cwd(), 'dist');
 
   if (isProduction && fs.existsSync(distPath)) {
+    const prodIndexPath = path.resolve(distPath, 'index.html');
+
+    app.get('/watch/:videoId', async (req, res) => {
+      try {
+        const videoId = String(req.params.videoId || '').trim();
+        const meta = await fetchVideoMetadataForOg(videoId);
+        const template = fs.readFileSync(prodIndexPath, 'utf-8');
+        const html = injectDynamicVideoOgTags(template, videoId, meta);
+        res.status(200).setHeader('Content-Type', 'text/html; charset=utf-8').send(html);
+      } catch {
+        res.sendFile(prodIndexPath);
+      }
+    });
+
     // In production, serve the pre-built static bundle
     app.use(express.static(distPath));
     app.get('*', (req, res, next) => {
       if (req.path.startsWith('/api')) {
         return next();
       }
-      res.sendFile(path.resolve(distPath, 'index.html'));
+      res.sendFile(prodIndexPath);
     });
   } else {
     // In development, mount Vite middleware mode with unrestricted hosts
@@ -374,6 +507,22 @@ async function startServer() {
       },
       appType: 'spa',
     });
+
+    app.get('/watch/:videoId', async (req, res, next) => {
+      try {
+        const videoId = String(req.params.videoId || '').trim();
+        const [meta, rawTemplate] = await Promise.all([
+          fetchVideoMetadataForOg(videoId),
+          fs.promises.readFile(path.resolve(process.cwd(), 'index.html'), 'utf-8'),
+        ]);
+        const withOg = injectDynamicVideoOgTags(rawTemplate, videoId, meta);
+        const html = await vite.transformIndexHtml(req.originalUrl, withOg);
+        res.status(200).setHeader('Content-Type', 'text/html; charset=utf-8').send(html);
+      } catch (err) {
+        next(err);
+      }
+    });
+
     app.use(vite.middlewares);
   }
 

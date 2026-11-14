@@ -148,21 +148,18 @@ export default function LibraryView() {
       e.preventDefault();
     }
     setActiveMenuVideoId(null);
-    const fullUrl = video.videoUrl || '';
-    const cleanBaseUrl = fullUrl.split('?')[0];
-    const parts = cleanBaseUrl.split('/');
-    const lastPart = parts[parts.length - 1] || '';
-    const publicId = lastPart.split('.')[0];
-    const shortLink =
-      cleanBaseUrl.includes('res.cloudinary.com') && publicId
-        ? `https://res.cloudinary.com/xb0o3xwi/video/upload/${publicId}.mp4`
-        : cleanBaseUrl || window.location.href;
-    const displayId = publicId || video.title || video.videoId || 'KING Video';
-    const shareText = `👑 KING App\n\n🎬 ${displayId}\n\n▶️ Watch Now:\n${shortLink}`;
+    const videoId = video.videoId || '';
+    const watchUrl = videoId
+      ? `https://king-app-full.vercel.app/watch/${encodeURIComponent(videoId)}`
+      : 'https://king-app-full.vercel.app';
+    const shareText = `👑 KING App\n🎬 Watch this viral video on KING App\n${watchUrl}`;
 
     try {
       if (navigator.share) {
-        await navigator.share({ text: shareText });
+        await navigator.share({
+          title: `${video.title || 'Viral Video'} - KING App`,
+          text: shareText,
+        });
         showToast("Shared successfully!");
         return;
       }
@@ -185,7 +182,7 @@ export default function LibraryView() {
       }
       showToast("Link Copied! Paste in WhatsApp");
     } catch {
-      showToast("Link: " + shortLink);
+      showToast("Link: " + watchUrl);
     }
   };
 
@@ -240,23 +237,23 @@ export default function LibraryView() {
   const handleBulkShare = async () => {
     const selectedItems = downloadsList.filter(v => selectedVideoIds.includes(v.videoId));
     if (selectedItems.length === 0) return;
-    const formatShortLink = (url: string) => {
-      const clean = (url || '').split('?')[0];
-      const parts = clean.split('/');
-      const lastPart = parts[parts.length - 1] || '';
-      const publicId = lastPart.split('.')[0];
-      return clean.includes('res.cloudinary.com') && publicId
-        ? `https://res.cloudinary.com/xb0o3xwi/video/upload/${publicId}.mp4`
-        : clean;
-    };
+    const formatWatchLink = (videoId?: string) =>
+      videoId
+        ? `https://king-app-full.vercel.app/watch/${encodeURIComponent(videoId)}`
+        : 'https://king-app-full.vercel.app';
     try {
       if (navigator.share && selectedItems.length === 1) {
         const item = selectedItems[0];
-        const shareText = `👑 KING - Blue Official\n${item.title || item.videoId || 'KING Video'}\n\n${formatShortLink(item.videoUrl)}`;
-        await navigator.share({ text: shareText });
+        const shareText = `👑 KING App\n🎬 Watch this viral video on KING App\n${formatWatchLink(item.videoId)}`;
+        await navigator.share({
+          title: `${item.title || 'Viral Video'} - KING App`,
+          text: shareText,
+        });
         showToast("Shared successfully!");
       } else {
-        const urls = selectedItems.map(i => `${i.title}: ${formatShortLink(i.videoUrl)}`).join('\n');
+        const urls = selectedItems
+          .map(i => `👑 KING App\n🎬 Watch this viral video on KING App\n${formatWatchLink(i.videoId)}`)
+          .join('\n\n');
         await navigator.clipboard.writeText(urls);
         showToast(`${selectedItems.length} links copied to clipboard`);
       }
@@ -451,19 +448,16 @@ export default function LibraryView() {
 
   const handleShare = (v: any, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
-    const fullUrl = v?.videoUrl || v?.url || '';
-    const cleanBaseUrl = fullUrl.split('?')[0];
-    const parts = cleanBaseUrl.split('/');
-    const lastPart = parts[parts.length - 1] || '';
-    const publicId = lastPart.split('.')[0];
-    const shortLink =
-      cleanBaseUrl.includes('res.cloudinary.com') && publicId
-        ? `https://res.cloudinary.com/xb0o3xwi/video/upload/${publicId}.mp4`
-        : cleanBaseUrl || window.location.href;
-    const displayId = publicId || v?.title || v?.id || 'KING Video';
-    const shareText = `👑 KING App\n\n🎬 ${displayId}\n\n▶️ Watch Now:\n${shortLink}`;
+    const videoId = v?.id || v?.videoId || '';
+    const watchUrl = videoId
+      ? `https://king-app-full.vercel.app/watch/${encodeURIComponent(videoId)}`
+      : 'https://king-app-full.vercel.app';
+    const shareText = `👑 KING App\n🎬 Watch this viral video on KING App\n${watchUrl}`;
     if (navigator.share) {
-      navigator.share({ text: shareText }).catch(() => {});
+      navigator.share({
+        title: `${v?.title || 'Viral Video'} - KING App`,
+        text: shareText,
+      }).catch(() => {});
     } else {
       navigator.clipboard?.writeText(shareText);
       showToast("Link Copied! Paste in WhatsApp");
