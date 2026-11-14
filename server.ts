@@ -378,10 +378,10 @@ function extractFirestoreField(field: any): string | number | undefined {
 }
 
 async function fetchVideoMetadataForOg(videoId: string) {
-  let title = 'Viral Video';
+  let title = 'Watch Viral Videos';
   let viewsLabel = '0 views';
   let likesLabel = '0 likes';
-  let thumbnail = `${CANONICAL_APP_ORIGIN}/icon-512.png`;
+  let thumbnail = `${CANONICAL_APP_ORIGIN}/king-logo.png`;
   let videoUrl = '';
 
   if (!videoId) return { title, viewsLabel, likesLabel, thumbnail, videoUrl };

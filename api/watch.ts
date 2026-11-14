@@ -47,10 +47,10 @@ export default async function handler(
   const videoId = decodeURIComponent((rawId || '').trim());
   const watchUrl = videoId ? `${APP_ORIGIN}/watch/${encodeURIComponent(videoId)}` : APP_ORIGIN;
 
-  let videoTitle = 'Viral Video';
+  let videoTitle = 'Watch Viral Videos';
   let viewsLabel = '0 views';
   let likesLabel = '0 likes';
-  let thumbnailUrl = `${APP_ORIGIN}/icon-512.png`;
+  let thumbnailUrl = `${APP_ORIGIN}/king-logo.png`;
   let videoUrl = '';
 
   if (videoId) {
