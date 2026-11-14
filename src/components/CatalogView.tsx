@@ -23,7 +23,7 @@ import {
 import { Html5Qrcode } from 'html5-qrcode';
 import kingLogo from '../assets/king-logo.png';
 import { CatalogProduct } from '../types/catalog';
-import { subscribeCatalogProducts, generateWhatsAppOrderUrl, openWhatsAppOrder, markCatalogAsSeen } from '../services/catalogService';
+import { subscribeCatalogProducts, orderOnWhatsApp, markCatalogAsSeen } from '../services/catalogService';
 
 interface CatalogViewProps {
   onBackToHome?: () => void;
@@ -604,21 +604,16 @@ export default function CatalogView({ onBackToHome, onOpenSecretAdminTrigger }: 
 
               {/* Direct WhatsApp Order Action */}
               <div className="pt-2 space-y-1.5">
-                <a
-                  href={generateWhatsAppOrderUrl(selectedProduct)}
-                  onClick={(e) => {
-                    e.preventDefault();
-                    openWhatsAppOrder(selectedProduct);
-                  }}
-                  target="_blank"
-                  rel="noopener noreferrer"
+                <button
+                  type="button"
+                  onClick={() => orderOnWhatsApp(selectedProduct)}
                   className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-emerald-600 via-emerald-500 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-black text-sm uppercase tracking-wider shadow-lg shadow-emerald-900/40 flex items-center justify-center gap-2 active:scale-95 transition cursor-pointer"
                 >
                   <MessageCircle className="w-5 h-5 fill-white text-emerald-600 shrink-0" />
                   <span>Order via WhatsApp Now</span>
-                </a>
+                </button>
                 <p className="text-[10px] font-bold text-slate-400 text-center">
-                  ⚡ Opens native WhatsApp app directly to chat with owner <span className="font-mono text-emerald-400">(923258448284)</span>
+                  ⚡ Opens native WhatsApp chat directly with owner <span className="font-mono text-emerald-400">(923258448284)</span>
                 </p>
               </div>
 

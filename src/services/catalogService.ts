@@ -88,7 +88,7 @@ export const DEFAULT_DEMO_PRODUCTS: CatalogProduct[] = [
 ];
 
 export const KING_SHOP_WHATSAPP_NUMBER = '923258448284';
-export const KING_GOLDEN_LOGO_URL = 'https://res.cloudinary.com/xb0o3xwi/image/upload/king-golden-logo.png';
+export const OWNER_WHATSAPP = '923258448284';
 
 /**
  * Subscribe to real-time catalog products list from Firestore catalog_products collection
@@ -351,108 +351,46 @@ export async function deleteCatalogProduct(productId: string): Promise<void> {
   }
 }
 
-function getProductImageUrl(product: CatalogProduct): string {
-  const candidate = product as CatalogProduct & {
-    imageUrl?: string;
-    image?: string;
-    thumbnail?: string;
-  };
-  return (
-    candidate.imageUrl ||
-    candidate.image ||
-    candidate.thumbnail ||
-    (Array.isArray(candidate.imageUrls) && candidate.imageUrls.length > 0
-      ? candidate.imageUrls[0]
-      : '') ||
-    ''
-  );
-}
-
 function buildWhatsAppOrderMessage(product: CatalogProduct): string {
   const effectivePrice =
     product.discountPrice && product.discountPrice > 0
       ? product.discountPrice
       : product.originalPrice;
-  const price = effectivePrice.toLocaleString();
-  const productImageUrl = getProductImageUrl(product);
-  const cleanImgUrl = productImageUrl.split('?')[0];
-  const shortImg = cleanImgUrl.split('/').pop() || '';
-  const shortLink =
-    cleanImgUrl.includes('res.cloudinary.com') && shortImg
-      ? `https://res.cloudinary.com/xb0o3xwi/image/upload/${shortImg}`
-      : productImageUrl;
+  const price = (product as any).price ?? effectivePrice.toLocaleString();
 
   return `Hello KING SHOP! 👑
 I want to order:
-
 🛍️ Product: ${product.name}
 💰 Price: Rs. ${price}
 🏷️ Category: ${product.category}
-
-🖼️ Image:
-${shortLink}
-
-👑 Official:
-${KING_GOLDEN_LOGO_URL}
-
-Please confirm!`;
+Please confirm order!`;
 }
 
 /**
- * Helper to generate direct WhatsApp Order Link for a product
+ * Helper to generate direct WhatsApp Order Link for a product (text-only, zero URLs)
  */
 export function generateWhatsAppOrderUrl(
-  product: CatalogProduct, 
-  customNumber?: string, 
+  product: CatalogProduct,
+  customNumber?: string,
   useAppIntent = false
 ): string {
-  const phone = (customNumber || KING_SHOP_WHATSAPP_NUMBER).replace(/[^0-9]/g, '');
+  const phone = (customNumber || OWNER_WHATSAPP).replace(/[^0-9]/g, '');
   const message = buildWhatsAppOrderMessage(product);
   const encoded = encodeURIComponent(message);
-
   if (useAppIntent) {
     return `whatsapp://send?phone=${phone}&text=${encoded}`;
   }
-
   return `https://wa.me/${phone}?text=${encoded}`;
 }
 
 /**
- * Smart WhatsApp Direct App Opener (Android deep-link intent with web fallback)
+ * Direct WhatsApp chat redirect to owner (NO sharing popup, NO navigator.share, NO links in text)
  */
-export function openWhatsAppOrder(product: CatalogProduct, customNumber?: string): void {
-  const phone = (customNumber || KING_SHOP_WHATSAPP_NUMBER).replace(/[^0-9]/g, '');
-  const message = buildWhatsAppOrderMessage(product);
-  const encoded = encodeURIComponent(message);
-
-  const primaryIntent = `whatsapp://send?phone=${phone}&text=${encoded}`;
-  const fallbackWeb = `https://wa.me/${phone}?text=${encoded}`;
-
+export function orderOnWhatsApp(product: CatalogProduct, customNumber?: string): void {
   if (typeof window === 'undefined') return;
-
-  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-
-  if (isMobile) {
-    let appDidOpen = false;
-
-    const onBlur = () => {
-      appDidOpen = true;
-    };
-
-    window.addEventListener('blur', onBlur);
-
-    // Primary Android / Mobile Intent: Opens installed native WhatsApp app directly
-    window.location.href = primaryIntent;
-
-    // Fallback after 1200ms if native app did not handle intent
-    setTimeout(() => {
-      window.removeEventListener('blur', onBlur);
-      if (!appDidOpen) {
-        window.open(fallbackWeb, '_blank');
-      }
-    }, 1200);
-  } else {
-    // Desktop / non-mobile fallback
-    window.open(fallbackWeb, '_blank');
-  }
+  const url = generateWhatsAppOrderUrl(product, customNumber);
+  window.location.href = url;
 }
+
+export const handleOrderWhatsApp = orderOnWhatsApp;
+export const openWhatsAppOrder = orderOnWhatsApp;
