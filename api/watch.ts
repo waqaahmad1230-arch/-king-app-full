@@ -103,8 +103,8 @@ export default async function handler(
     }
   }
 
-  const ogTitle = escapeHtml(`👑 KING App - ${videoTitle}`);
-  const ogDescription = escapeHtml(`${viewsLabel} • ${likesLabel} | Reel by KING App`);
+  const ogTitle = 'KING App';
+  const ogDescription = escapeHtml(`${videoTitle} • ${viewsLabel} • ${likesLabel} | Reel by KING App`);
   const ogImage = escapeHtml(thumbnailUrl);
   const ogUrl = escapeHtml(watchUrl);
   const ogVideo = videoUrl ? escapeHtml(videoUrl) : '';

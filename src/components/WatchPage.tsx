@@ -279,17 +279,12 @@ export default function WatchPage({
   const handleShare = (e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     const targetObj = video || { id: videoId };
-    const shareText = buildVideoShareText(targetObj);
+    const shareUrl = buildVideoShareText(targetObj);
     if (navigator.share) {
-      navigator
-        .share({
-          title: `${video?.title || 'Viral Video'} - KING App`,
-          text: shareText,
-        })
-        .catch(() => {});
+      navigator.share({ url: shareUrl }).catch(() => {});
     } else if (navigator.clipboard) {
       navigator.clipboard
-        .writeText(shareText)
+        .writeText(shareUrl)
         .then(() => {
           setCopiedToast(true);
           setTimeout(() => setCopiedToast(false), 2000);
@@ -301,8 +296,8 @@ export default function WatchPage({
   const handleWhatsAppShare = (e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     const targetObj = video || { id: videoId };
-    const text = buildVideoShareText(targetObj);
-    window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank', 'noopener,noreferrer');
+    const shareUrl = buildVideoShareText(targetObj);
+    window.open(`https://wa.me/?text=${encodeURIComponent(shareUrl)}`, '_blank', 'noopener,noreferrer');
   };
 
   const handleTimeUpdate = (e: React.SyntheticEvent<HTMLVideoElement>) => {

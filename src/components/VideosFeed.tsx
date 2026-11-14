@@ -652,8 +652,8 @@ export default function VideosFeed({
     if (e) e.stopPropagation();
     try {
       if (!video) return;
-      const text = buildCleanShareText(video);
-      window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank', 'noopener,noreferrer');
+      const shareUrl = buildCleanShareText(video);
+      window.open(`https://wa.me/?text=${encodeURIComponent(shareUrl)}`, '_blank', 'noopener,noreferrer');
     } catch (err) {
       console.log(err);
     }
@@ -661,14 +661,11 @@ export default function VideosFeed({
 
   const handleShare = (video: any, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
-    const shareText = buildCleanShareText(video);
+    const shareUrl = buildCleanShareText(video);
     if (navigator.share) {
-      navigator.share({
-        title: `${video?.title || 'Viral Video'} - KING App`,
-        text: shareText,
-      }).catch(() => {});
+      navigator.share({ url: shareUrl }).catch(() => {});
     } else if (navigator.clipboard) {
-      navigator.clipboard.writeText(shareText).then(() => {
+      navigator.clipboard.writeText(shareUrl).then(() => {
         setCopiedLink(true);
         setTimeout(() => setCopiedLink(false), 2000);
       }).catch(() => {});

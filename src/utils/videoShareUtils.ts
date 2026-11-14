@@ -10,8 +10,7 @@ export function getWatchUrl(videoId?: string | null): string {
 
 export function buildVideoShareText(video: any): string {
   const videoId = video?.id || video?.videoId || '';
-  const shareUrl = getWatchUrl(videoId);
-  return `👑 KING App\n🎬 Watch viral video\n${shareUrl}`;
+  return getWatchUrl(videoId);
 }
 
 export function getVideoThumbnailUrl(video: any): string {
@@ -59,25 +58,24 @@ function upsertMetaTag(attrName: 'property' | 'name', attrValue: string, content
 export function applyVideoOpenGraphMeta(video: any, watchUrlOverride?: string) {
   if (typeof document === 'undefined' || !video) return;
 
-  const title = (video?.title && String(video.title).trim()) || 'Watch Viral Videos';
-  const fullTitle = `👑 KING App - ${title}`;
+  const videoTitle = (video?.title && String(video.title).trim()) || String(video?.id || video?.videoId || 'KING Video');
   const viewsText = formatMetaCount(video?.views, 'view', 'views');
   const likesText = formatMetaCount(video?.likes, 'like', 'likes');
-  const description = `${viewsText} • ${likesText} | Watch viral videos on KING App`;
+  const description = `${videoTitle} • ${viewsText} • ${likesText} | Reel by KING App`;
   const imageUrl = getVideoThumbnailUrl(video);
   const watchUrl = watchUrlOverride || getWatchUrl(video?.id || video?.videoId);
   const videoUrl = (video?.videoUrl || video?.url || '').trim();
 
-  document.title = fullTitle;
+  document.title = 'KING App';
   upsertMetaTag('name', 'description', description);
   upsertMetaTag('property', 'og:site_name', 'KING App');
-  upsertMetaTag('property', 'og:title', fullTitle);
+  upsertMetaTag('property', 'og:title', 'KING App');
   upsertMetaTag('property', 'og:description', description);
   upsertMetaTag('property', 'og:image', imageUrl);
   upsertMetaTag('property', 'og:url', watchUrl);
   upsertMetaTag('property', 'og:type', 'video.other');
   upsertMetaTag('name', 'twitter:card', 'summary_large_image');
-  upsertMetaTag('name', 'twitter:title', fullTitle);
+  upsertMetaTag('name', 'twitter:title', 'KING App');
   upsertMetaTag('name', 'twitter:description', description);
   upsertMetaTag('name', 'twitter:image', imageUrl);
 
@@ -90,8 +88,8 @@ export function applyVideoOpenGraphMeta(video: any, watchUrlOverride?: string) {
 
 export function resetDefaultOpenGraphMeta() {
   if (typeof document === 'undefined') return;
-  const defaultTitle = '👑 KING App - Watch Viral Videos';
-  const defaultDesc = '12M views • 228K likes | Watch viral videos on KING App';
+  const defaultTitle = 'KING App';
+  const defaultDesc = 'Watch viral videos | Reel by KING App';
 
   document.title = defaultTitle;
   upsertMetaTag('name', 'description', defaultDesc);
@@ -100,7 +98,7 @@ export function resetDefaultOpenGraphMeta() {
   upsertMetaTag('property', 'og:description', defaultDesc);
   upsertMetaTag('property', 'og:image', DEFAULT_KING_OG_IMAGE);
   upsertMetaTag('property', 'og:url', `${APP_SHARE_ORIGIN}/`);
-  upsertMetaTag('property', 'og:type', 'website');
+  upsertMetaTag('property', 'og:type', 'video.other');
   upsertMetaTag('name', 'twitter:title', defaultTitle);
   upsertMetaTag('name', 'twitter:description', defaultDesc);
   upsertMetaTag('name', 'twitter:image', DEFAULT_KING_OG_IMAGE);

@@ -31,8 +31,18 @@
             thumb = 'https://res.cloudinary.com/xb0o3xwi/video/upload/so_0,w_600,h_800,c_fill/' + encodeURIComponent(id) + '.jpg';
           }
 
+          var fmtCount = function (val, sing, plur) {
+            var n = Number(val) || 0;
+            if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M ' + plur;
+            if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K ' + plur;
+            return n + ' ' + (n === 1 ? sing : plur);
+          };
+          var vTitle = (video && video.title && String(video.title).trim()) || id;
+          var desc = vTitle + ' • ' + fmtCount(video && video.views, 'view', 'views') + ' • ' + fmtCount(video && video.likes, 'like', 'likes') + ' | Reel by KING App';
           var ogUrl = 'https://king-app-full.vercel.app/watch/' + encodeURIComponent(id);
+
           var applyWatchMeta = function () {
+            document.title = 'KING App';
             var setMeta = function (attr, key, content) {
               var el = document.querySelector('meta[' + attr + '="' + key + '"]');
               if (!el) {
@@ -43,13 +53,15 @@
               el.setAttribute('content', content);
             };
             setMeta('property', 'og:image', thumb);
-            setMeta('property', 'og:title', '👑 KING App - Viral Video');
-            setMeta('property', 'og:description', '12M views • 228K likes | Reel by KING App');
+            setMeta('property', 'og:image:width', '600');
+            setMeta('property', 'og:image:height', '800');
+            setMeta('property', 'og:title', 'KING App');
+            setMeta('property', 'og:description', desc);
             setMeta('property', 'og:url', ogUrl);
             setMeta('property', 'og:type', 'video.other');
             setMeta('name', 'twitter:image', thumb);
-            setMeta('name', 'twitter:title', '👑 KING App - Viral Video');
-            setMeta('name', 'twitter:description', '12M views • 228K likes | Reel by KING App');
+            setMeta('name', 'twitter:title', 'KING App');
+            setMeta('name', 'twitter:description', desc);
           };
 
           applyWatchMeta();
@@ -57,19 +69,19 @@
         }
       })();
     </script>
-    <title>👑 KING App - Watch Viral Videos</title>
-    <meta name="description" content="12M views • 228K likes | Viral on KING App" />
+    <title>KING App</title>
+    <meta name="description" content="Watch viral videos | Reel by KING App" />
     <meta property="og:image" content="https://king-app-full.vercel.app/king-logo.png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
-    <meta property="og:title" content="👑 KING App - Watch Viral Videos" />
-    <meta property="og:description" content="12M views • 228K likes | Viral on KING App" />
+    <meta property="og:title" content="KING App" />
+    <meta property="og:description" content="Watch viral videos | Reel by KING App" />
     <meta property="og:url" content="https://king-app-full.vercel.app/" />
     <meta property="og:type" content="video.other" />
     <meta property="og:site_name" content="KING App" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="👑 KING App - Watch Viral Videos" />
-    <meta name="twitter:description" content="12M views • 228K likes | Viral on KING App" />
+    <meta name="twitter:title" content="KING App" />
+    <meta name="twitter:description" content="Watch viral videos | Reel by KING App" />
     <meta name="twitter:image" content="https://king-app-full.vercel.app/king-logo.png" />
     <script>
       // Catch and suppress external adsbygoogle errors (e.g. availableWidth=0)

@@ -440,8 +440,8 @@ function injectDynamicVideoOgTags(html: string, videoId: string, meta: {
   thumbnail: string;
   videoUrl: string;
 }): string {
-  const ogTitle = escapeOgHtml(`👑 KING App - ${meta.title}`);
-  const ogDesc = escapeOgHtml(`${meta.viewsLabel} • ${meta.likesLabel} | Reel by KING App`);
+  const ogTitle = 'KING App';
+  const ogDesc = escapeOgHtml(`${meta.title} • ${meta.viewsLabel} • ${meta.likesLabel} | Reel by KING App`);
   const ogImage = escapeOgHtml(meta.thumbnail);
   const ogUrl = escapeOgHtml(`${CANONICAL_APP_ORIGIN}/watch/${encodeURIComponent(videoId)}`);
   const ogVideo = meta.videoUrl ? escapeOgHtml(meta.videoUrl) : '';

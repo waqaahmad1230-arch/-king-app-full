@@ -151,14 +151,10 @@ export default function LibraryView() {
     setActiveMenuVideoId(null);
     const videoId = video.videoId || '';
     const watchUrl = getWatchUrl(videoId);
-    const shareText = buildVideoShareText({ id: videoId, videoId });
 
     try {
       if (navigator.share) {
-        await navigator.share({
-          title: `${video.title || 'Viral Video'} - KING App`,
-          text: shareText,
-        });
+        await navigator.share({ url: watchUrl });
         showToast("Shared successfully!");
         return;
       }
@@ -170,16 +166,16 @@ export default function LibraryView() {
     // Fallback: Copy to clipboard
     try {
       if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(shareText);
+        await navigator.clipboard.writeText(watchUrl);
       } else {
         const textArea = document.createElement("textarea");
-        textArea.value = shareText;
+        textArea.value = watchUrl;
         document.body.appendChild(textArea);
         textArea.select();
         document.execCommand("copy");
         document.body.removeChild(textArea);
       }
-      showToast("Link Copied! Paste in WhatsApp");
+      showToast("Link Copied!");
     } catch {
       showToast("Link: " + watchUrl);
     }
@@ -239,16 +235,13 @@ export default function LibraryView() {
     try {
       if (navigator.share && selectedItems.length === 1) {
         const item = selectedItems[0];
-        const shareText = buildVideoShareText(item);
-        await navigator.share({
-          title: `${item.title || 'Viral Video'} - KING App`,
-          text: shareText,
-        });
+        const shareUrl = buildVideoShareText(item);
+        await navigator.share({ url: shareUrl });
         showToast("Shared successfully!");
       } else {
         const urls = selectedItems
           .map(i => buildVideoShareText(i))
-          .join('\n\n');
+          .join('\n');
         await navigator.clipboard.writeText(urls);
         showToast(`${selectedItems.length} links copied to clipboard`);
       }
@@ -443,15 +436,12 @@ export default function LibraryView() {
 
   const handleShare = (v: any, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
-    const shareText = buildVideoShareText(v);
+    const shareUrl = buildVideoShareText(v);
     if (navigator.share) {
-      navigator.share({
-        title: `${v?.title || 'Viral Video'} - KING App`,
-        text: shareText,
-      }).catch(() => {});
+      navigator.share({ url: shareUrl }).catch(() => {});
     } else {
-      navigator.clipboard?.writeText(shareText);
-      showToast("Link Copied! Paste in WhatsApp");
+      navigator.clipboard?.writeText(shareUrl);
+      showToast("Link Copied!");
     }
   };
 
