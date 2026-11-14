@@ -24,7 +24,9 @@ export function getVideoThumbnailUrl(video: any): string {
   const rawVideoUrl = video?.videoUrl || video?.url || video?.uri || '';
   if (typeof rawVideoUrl === 'string' && rawVideoUrl.includes('res.cloudinary.com')) {
     const cleanUrl = rawVideoUrl.split('?')[0];
-    return cleanUrl.replace(/\.[^/.]+$/, '.jpg');
+    return cleanUrl
+      .replace(/\.[^/.]+$/, '.jpg')
+      .replace('/video/upload/', '/video/upload/so_0,w_600,h_800,c_fill/');
   }
   return DEFAULT_KING_OG_IMAGE;
 }

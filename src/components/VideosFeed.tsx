@@ -400,6 +400,18 @@ export default function VideosFeed({
       (snap) => {
         const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
         setVideos(list);
+        try {
+          const compact = list.map((v: any) => ({
+            id: v.id,
+            title: v.title || '',
+            url: v.url || v.videoUrl || '',
+            videoUrl: v.videoUrl || v.url || '',
+            thumbnailUrl: v.thumbnailUrl || v.thumbnail || v.img || '',
+            views: v.views || 0,
+            likes: v.likes || 0,
+          }));
+          localStorage.setItem('king_videos', JSON.stringify(compact));
+        } catch {}
       },
       (err) => {
         console.warn("[VideosFeed] Videos snapshot notice:", err);

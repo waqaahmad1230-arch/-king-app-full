@@ -420,7 +420,10 @@ async function fetchVideoMetadataForOg(videoId: string) {
       if (typeof rawThumb === 'string' && rawThumb.trim()) {
         thumbnail = rawThumb.trim();
       } else if (videoUrl && videoUrl.includes('res.cloudinary.com')) {
-        thumbnail = videoUrl.split('?')[0].replace(/\.[^/.]+$/, '.jpg');
+        thumbnail = videoUrl
+          .split('?')[0]
+          .replace(/\.[^/.]+$/, '.jpg')
+          .replace('/video/upload/', '/video/upload/so_0,w_600,h_800,c_fill/');
       }
     }
   } catch (err) {
@@ -438,10 +441,13 @@ function injectDynamicVideoOgTags(html: string, videoId: string, meta: {
   videoUrl: string;
 }): string {
   const ogTitle = escapeOgHtml(`👑 KING App - ${meta.title}`);
-  const ogDesc = escapeOgHtml(`${meta.viewsLabel} • ${meta.likesLabel} | Viral on KING App`);
+  const ogDesc = escapeOgHtml(`${meta.viewsLabel} • ${meta.likesLabel} | Reel by KING App`);
   const ogImage = escapeOgHtml(meta.thumbnail);
   const ogUrl = escapeOgHtml(`${CANONICAL_APP_ORIGIN}/watch/${encodeURIComponent(videoId)}`);
   const ogVideo = meta.videoUrl ? escapeOgHtml(meta.videoUrl) : '';
+  const isFallbackLogo = meta.thumbnail.endsWith('/king-logo.png');
+  const ogImageWidth = isFallbackLogo ? '1200' : '600';
+  const ogImageHeight = isFallbackLogo ? '630' : '800';
 
   const cleanedHtml = html
     .replace(/<title>[\s\S]*?<\/title>/i, '')
@@ -457,8 +463,8 @@ function injectDynamicVideoOgTags(html: string, videoId: string, meta: {
     <meta property="og:description" content="${ogDesc}" />
     <meta property="og:image" content="${ogImage}" />
     <meta property="og:image:secure_url" content="${ogImage}" />
-    <meta property="og:image:width" content="720" />
-    <meta property="og:image:height" content="1280" />
+    <meta property="og:image:width" content="${ogImageWidth}" />
+    <meta property="og:image:height" content="${ogImageHeight}" />
     <meta property="og:url" content="${ogUrl}" />
     <meta property="og:type" content="video.other" />
     ${

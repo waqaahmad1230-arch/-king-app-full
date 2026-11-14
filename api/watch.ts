@@ -92,7 +92,10 @@ export default async function handler(
         if (typeof thumbVal === 'string' && thumbVal.trim()) {
           thumbnailUrl = thumbVal.trim();
         } else if (videoUrl && videoUrl.includes('res.cloudinary.com')) {
-          thumbnailUrl = videoUrl.split('?')[0].replace(/\.[^/.]+$/, '.jpg');
+          thumbnailUrl = videoUrl
+            .split('?')[0]
+            .replace(/\.[^/.]+$/, '.jpg')
+            .replace('/video/upload/', '/video/upload/so_0,w_600,h_800,c_fill/');
         }
       }
     } catch {
@@ -101,10 +104,13 @@ export default async function handler(
   }
 
   const ogTitle = escapeHtml(`👑 KING App - ${videoTitle}`);
-  const ogDescription = escapeHtml(`${viewsLabel} • ${likesLabel} | Viral on KING App`);
+  const ogDescription = escapeHtml(`${viewsLabel} • ${likesLabel} | Reel by KING App`);
   const ogImage = escapeHtml(thumbnailUrl);
   const ogUrl = escapeHtml(watchUrl);
   const ogVideo = videoUrl ? escapeHtml(videoUrl) : '';
+  const isFallbackLogo = thumbnailUrl.endsWith('/king-logo.png');
+  const ogImageWidth = isFallbackLogo ? '1200' : '600';
+  const ogImageHeight = isFallbackLogo ? '630' : '800';
 
   const html = `<!doctype html>
 <html lang="en">
@@ -118,8 +124,8 @@ export default async function handler(
     <meta property="og:description" content="${ogDescription}" />
     <meta property="og:image" content="${ogImage}" />
     <meta property="og:image:secure_url" content="${ogImage}" />
-    <meta property="og:image:width" content="720" />
-    <meta property="og:image:height" content="1280" />
+    <meta property="og:image:width" content="${ogImageWidth}" />
+    <meta property="og:image:height" content="${ogImageHeight}" />
     <meta property="og:url" content="${ogUrl}" />
     <meta property="og:type" content="video.other" />
     ${
