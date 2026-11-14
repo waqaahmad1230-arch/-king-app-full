@@ -1,0 +1,6 @@
+{
+  "name": "KING",
+  "description": "KING App - Mobile deals, games, and videos.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

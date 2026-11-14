@@ -1,0 +1,246 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // --- Helper Functions ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Single Authorized Super Admin Email
+    function isSuperAdmin() {
+      return request.auth != null && request.auth.token.email == "waqaahmad1230@gmail.com";
+    }
+
+    function isAdmin() {
+      return isSuperAdmin();
+    }
+
+    // Safe ownership check supporting legacy 'uid' and standard 'userId' without missing-field crashes
+    function isVideoOwner(videoData) {
+      return isSignedIn() && videoData != null && (
+        (('userId' in videoData) && videoData.userId == request.auth.uid) ||
+        (('uid' in videoData) && videoData.uid == request.auth.uid)
+      );
+    }
+
+    // Safe numeric extraction for likes (handles missing, null, or number type)
+    function getDocLikes(docData) {
+      return (docData != null && ('likes' in docData) && docData.likes is number) ? docData.likes : 0;
+    }
+
+    // Safe numeric extraction for views (handles missing, null, or number type)
+    function getDocViews(docData) {
+      return (docData != null && ('views' in docData) && docData.views is number) ? docData.views : 0;
+    }
+
+    // --- catalog_products Collection ---
+    // Public can see King Catalog; writes strictly restricted to Super Admin
+    match /catalog_products/{productId} {
+      allow read: if true;
+      allow create, update, delete: if isSuperAdmin();
+    }
+
+    // --- Users Collection ---
+    match /users/{userId} {
+      // Owner can get their own document; only Super Admin can list all users
+      allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isSignedIn() && (request.auth.uid == userId || isAdmin()) &&
+        !request.resource.data.keys().hasAny(['isAdmin', 'admin', 'role', 'permissions', 'isSuperAdmin']);
+      allow update: if isAdmin() || (
+        isSignedIn() && request.auth.uid == userId &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['isAdmin', 'admin', 'role', 'permissions', 'isSuperAdmin'])
+      );
+      allow delete: if isAdmin();
+
+      // Nested Subcollection: /users/{userId}/channel_uploads/{uploadId}
+      match /channel_uploads/{uploadId} {
+        allow read: if true;
+        allow create, update, delete: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      }
+
+      // Nested Subcollection: /users/{userId}/downloads/{downloadId}
+      match /downloads/{downloadId} {
+        allow read, write: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      }
+    }
+
+    // --- Public Profiles Collection ---
+    match /publicProfiles/{userId} {
+      allow read: if true;
+      allow create: if isSignedIn() && (request.auth.uid == userId || isAdmin()) &&
+        !request.resource.data.keys().hasAny(['isAdmin', 'admin', 'role', 'permissions', 'isSuperAdmin']);
+      allow update: if isAdmin() || (
+        isSignedIn() && request.auth.uid == userId &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['isAdmin', 'admin', 'role', 'permissions', 'isSuperAdmin'])
+      );
+      allow delete: if isAdmin();
+    }
+
+    // --- Videos Collection ---
+    match /videos/{videoId} {
+      // 1. Public can read all videos
+      allow read: if true;
+
+      // 2. Authenticated user can create their own video
+      allow create: if isSignedIn() && (
+        (('userId' in request.resource.data && request.resource.data.userId == request.auth.uid) ||
+         ('uid' in request.resource.data && request.resource.data.uid == request.auth.uid)) ||
+        isAdmin()
+      );
+
+      // 3. Strict update logic: exactly one branch must be satisfied
+      allow update: if (
+        // Branch A: Super Admin full access
+        isAdmin() ||
+
+        // Branch B: Video creator metadata update (strictly excludes ownership, URLs, createdAt, and counters)
+        (
+          isVideoOwner(resource.data) &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+            'userId', 'uid', 'url', 'videoUrl', 'createdAt', 'likes', 'views'
+          ])
+        ) ||
+
+        // Branch C1: Atomic Like increment (+1) coupled with like document creation
+        (
+          isSignedIn() &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes']) &&
+          request.resource.data.likes == (getDocLikes(resource.data) + 1) &&
+          !exists(/databases/$(database)/documents/videos/$(videoId)/likes/$(request.auth.uid)) &&
+          existsAfter(/databases/$(database)/documents/videos/$(videoId)/likes/$(request.auth.uid))
+        ) ||
+
+        // Branch C2: Atomic Unlike decrement (-1) coupled with like document deletion
+        (
+          isSignedIn() &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes']) &&
+          request.resource.data.likes == (getDocLikes(resource.data) > 0 ? getDocLikes(resource.data) - 1 : 0) &&
+          exists(/databases/$(database)/documents/videos/$(videoId)/likes/$(request.auth.uid)) &&
+          !existsAfter(/databases/$(database)/documents/videos/$(videoId)/likes/$(request.auth.uid))
+        ) ||
+
+        // Branch D: Atomic View increment (+1) strictly requiring authenticated viewer and view doc creation
+        (
+          isSignedIn() &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['views']) &&
+          request.resource.data.views == (getDocViews(resource.data) + 1) &&
+          !exists(/databases/$(database)/documents/videos/$(videoId)/views/$(request.auth.uid)) &&
+          existsAfter(/databases/$(database)/documents/videos/$(videoId)/views/$(request.auth.uid))
+        )
+      );
+
+      // 4. Video deletion (Creator or Super Admin only)
+      allow delete: if isSignedIn() && (isVideoOwner(resource.data) || isAdmin());
+
+      // --- Likes Subcollection: /videos/{videoId}/likes/{userId} ---
+      match /likes/{userId} {
+        allow read: if true;
+
+        // Atomic Like creation: caller must own the like document, fields whitelist, and parent video must exist
+        // Note: The atomic +1 increment and existsAfter pairing is strictly verified by the parent video rule
+        allow create: if isSignedIn() &&
+          request.auth.uid == userId &&
+          request.resource.data.userId == request.auth.uid &&
+          request.resource.data.keys().hasOnly(['userId', 'displayName', 'photoURL', 'createdAt']) &&
+          exists(/databases/$(database)/documents/videos/$(videoId));
+
+        // Atomic Unlike deletion: must be like owner (or Super Admin)
+        allow delete: if isAdmin() || (
+          isSignedIn() &&
+          request.auth.uid == userId
+        );
+
+        allow update: if false;
+      }
+
+      // --- Views Subcollection: /videos/{videoId}/views/{viewerId} ---
+      match /views/{viewerId} {
+        allow read: if (isSignedIn() && request.auth.uid == viewerId) || isAdmin();
+
+        // Atomic View creation: authenticated viewer only, viewerId matches caller, parent video must exist
+        // Note: The atomic +1 view count increment and existsAfter pairing is strictly verified by the parent video rule
+        allow create: if isSignedIn() &&
+          request.auth.uid == viewerId &&
+          request.resource.data.viewerId == request.auth.uid &&
+          exists(/databases/$(database)/documents/videos/$(videoId));
+
+        allow update: if false;
+        allow delete: if isAdmin();
+      }
+    }
+
+    // --- king_games Collection ---
+    // Public read; writes strictly restricted to Super Admin
+    match /king_games/{gameId} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // --- user_uploaded_games Collection ---
+    // User submits game drafts for review; protected by creation and update whitelists; Admin approves or rejects
+    match /user_uploaded_games/{gameId} {
+      allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+
+      allow create: if isSignedIn() &&
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.keys().hasOnly([
+          'userId', 'userEmail', 'title', 'category', 'description', 'thumbnailUrl', 'gameUrl',
+          'status', 'createdAt', 'plays', 'earnings',
+          'gameOverText', 'template', 'speed', 'jump', 'gap', 'difficulty', 'control',
+          'bgColor', 'map', 'pipeStyle', 'building', 'decoration', 'isEngineGame', 'isPhase2',
+          'playerEmoji', 'playerBase64', 'bgBase64', 'obstacleType', 'gapSize', 'levels'
+        ]) &&
+        (!('plays' in request.resource.data) || (request.resource.data.plays is number && request.resource.data.plays == 0)) &&
+        (!('earnings' in request.resource.data) || (request.resource.data.earnings is number && request.resource.data.earnings == 0));
+
+      allow update: if isAdmin() || (
+        isSignedIn() &&
+        resource.data.userId == request.auth.uid &&
+        resource.data.status == 'pending' &&
+        request.resource.data.userId == resource.data.userId &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'title', 'category', 'description', 'thumbnailUrl', 'gameUrl',
+          'gameOverText', 'template', 'speed', 'jump', 'gap', 'difficulty', 'control',
+          'bgColor', 'map', 'pipeStyle', 'building', 'decoration', 'isEngineGame', 'isPhase2',
+          'playerEmoji', 'playerBase64', 'bgBase64', 'obstacleType', 'gapSize', 'levels'
+        ])
+      );
+
+      allow delete: if isAdmin() || (
+        isSignedIn() &&
+        resource.data.userId == request.auth.uid &&
+        resource.data.status == 'pending'
+      );
+    }
+
+    // --- user_notifications Collection ---
+    // User reads own notifications and can update only 'read' to boolean; Admin creates/deletes
+    match /user_notifications/{notificationId} {
+      allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAdmin();
+      allow update: if isAdmin() || (
+        isSignedIn() &&
+        resource.data.userId == request.auth.uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']) &&
+        request.resource.data.read is bool
+      );
+      allow delete: if isAdmin();
+    }
+
+    // --- king_affiliates Collection ---
+    // Public reads Daraz carousel banners; writes strictly restricted to Super Admin
+    match /king_affiliates/{affiliateId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // --- Bottom Fallback Rule ---
+    // Restricted to Super Admin to protect private user data (emails, notifications, drafts)
+    match /{document=**} {
+      allow read, write: if isSuperAdmin();
+    }
+  }
+}

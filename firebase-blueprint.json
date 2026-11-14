@@ -1,0 +1,220 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile with Facebook auto-ads consent",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "provider": { "type": "string" },
+        "fb_auto_ads": { "type": "boolean" },
+        "consentedAt": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "lastLogin": { "type": "string" }
+      },
+      "required": ["uid"]
+    },
+    "PublicProfile": {
+      "title": "PublicProfile",
+      "description": "Public profile details of a KING channel creator, including name, photo, and social links",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "displayName": { "type": "string" },
+        "name": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "bio": { "type": "string" },
+        "subscribersCount": { "type": "number" },
+        "socialLinks": { "type": "object" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["uid"]
+    },
+    "Download": {
+      "title": "Download",
+      "description": "Video download record for offline or library viewing",
+      "type": "object",
+      "properties": {
+        "videoId": { "type": "string" },
+        "title": { "type": "string" },
+        "thumbnailUrl": { "type": "string" },
+        "videoUrl": { "type": "string" },
+        "downloadedAt": { "type": "string" },
+        "userId": { "type": "string" }
+      },
+      "required": ["videoId", "title", "downloadedAt"]
+    },
+    "KingGame": {
+      "title": "KingGame",
+      "description": "HTML5 game item, including GamePix property PN8G3 instant games",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "source": { "type": "string" },
+        "url": { "type": "string" },
+        "link": { "type": "string" },
+        "thumbnail": { "type": "string" },
+        "image": { "type": "string" },
+        "description": { "type": "string" },
+        "rating": { "type": "number" },
+        "plays": { "type": "string" },
+        "status": { "type": "string" },
+        "approved": { "type": "boolean" },
+        "isApproved": { "type": "boolean" },
+        "featuredOnHome": { "type": "boolean" },
+        "discoveredAt": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["title", "url", "category"]
+    },
+    "UserUploadedGame": {
+      "title": "UserUploadedGame",
+      "description": "Game submitted by user for review",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "category": { "type": "string" },
+        "description": { "type": "string" },
+        "thumbnailUrl": { "type": "string" },
+        "gameFileUrl": { "type": "string" },
+        "gameUrl": { "type": "string" },
+        "userId": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "status": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "plays": { "type": "number" },
+        "earnings": { "type": "number" }
+      },
+      "required": ["title", "userId", "status", "createdAt"]
+    },
+    "UserNotification": {
+      "title": "UserNotification",
+      "description": "Admin notifications for user uploads",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "message": { "type": "string" },
+        "gameId": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "read": { "type": "boolean" }
+      },
+      "required": ["userId", "message", "timestamp", "read"]
+    },
+    "Video": {
+      "title": "Video",
+      "description": "Video document with numeric likes and views counters",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "url": { "type": "string" },
+        "videoUrl": { "type": "string" },
+        "thumbnailUrl": { "type": "string" },
+        "userId": { "type": "string" },
+        "uid": { "type": "string" },
+        "uploaderName": { "type": "string" },
+        "channelName": { "type": "string" },
+        "uploaderPhoto": { "type": "string" },
+        "channelAvatar": { "type": "string" },
+        "views": { "type": "number" },
+        "likes": { "type": "number" },
+        "createdAt": { "type": "string" },
+        "type": { "type": "string" }
+      },
+      "required": ["title", "userId"]
+    },
+    "VideoLike": {
+      "title": "VideoLike",
+      "description": "Unique like record per user for a video",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["userId"]
+    },
+    "VideoView": {
+      "title": "VideoView",
+      "description": "Unique view record per viewer (authenticated UID or session guest ID) for a video",
+      "type": "object",
+      "properties": {
+        "viewerId": { "type": "string" },
+        "isGuest": { "type": "boolean" },
+        "viewedAt": { "type": "string" }
+      },
+      "required": ["viewerId"]
+    },
+    "CatalogProduct": {
+      "title": "CatalogProduct",
+      "description": "Product item for KING Shop shopping catalog",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "originalPrice": { "type": "number" },
+        "discountPrice": { "type": "number" },
+        "stock": { "type": "number" },
+        "category": { "type": "string" },
+        "imageUrls": {
+          "type": "array"
+        },
+        "videoUrls": {
+          "type": "array"
+        },
+        "isActive": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["name", "originalPrice", "stock", "category", "imageUrls", "isActive"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile and ad consent document"
+    },
+    "/publicProfiles/{userId}": {
+      "schema": "PublicProfile",
+      "description": "Public channel profile and social catalog links for a user"
+    },
+    "/users/{userId}/downloads/{downloadId}": {
+      "schema": "Download",
+      "description": "Video download record for a user"
+    },
+    "/videos/{videoId}": {
+      "schema": "Video",
+      "description": "Uploaded video post with atomic likes and views counters"
+    },
+    "/videos/{videoId}/likes/{userId}": {
+      "schema": "VideoLike",
+      "description": "Unique like by a user on a video"
+    },
+    "/videos/{videoId}/views/{viewerId}": {
+      "schema": "VideoView",
+      "description": "Unique view by a user or guest on a video"
+    },
+    "/king_games/{gameId}": {
+      "schema": "KingGame",
+      "description": "Catalog of verified and pending HTML5 games including GamePix PN8G3"
+    },
+    "/user_uploaded_games/{gameId}": {
+      "schema": "UserUploadedGame",
+      "description": "Games submitted by users for approval"
+    },
+    "/user_notifications/{notificationId}": {
+      "schema": "UserNotification",
+      "description": "Notifications for users"
+    },
+    "/catalog_products/{productId}": {
+      "schema": "CatalogProduct",
+      "description": "Shopping catalog products collection"
+    }
+  }
+}
