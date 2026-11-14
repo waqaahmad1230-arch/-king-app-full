@@ -47,9 +47,10 @@ export default async function handler(
   const videoId = decodeURIComponent((rawId || '').trim());
   const watchUrl = videoId ? `${APP_ORIGIN}/watch/${encodeURIComponent(videoId)}` : APP_ORIGIN;
 
-  let videoTitle = 'Watch Viral Video';
+  let videoTitle = 'Viral Video';
   let viewsLabel = '0 views';
-  let thumbnailUrl = `${APP_ORIGIN}/icon.png`;
+  let likesLabel = '0 likes';
+  let thumbnailUrl = `${APP_ORIGIN}/icon-512.png`;
   let videoUrl = '';
 
   if (videoId) {
@@ -71,6 +72,13 @@ export default async function handler(
         }
         const viewsVal = readFirestoreValue(fields.views);
         viewsLabel = formatViewsLabel(viewsVal);
+        const likesNum = Number(readFirestoreValue(fields.likes)) || 0;
+        likesLabel =
+          likesNum >= 1_000_000
+            ? `${(likesNum / 1_000_000).toFixed(1).replace(/\.0$/, '')}M likes`
+            : likesNum >= 1_000
+            ? `${(likesNum / 1_000).toFixed(1).replace(/\.0$/, '')}K likes`
+            : `${likesNum} ${likesNum === 1 ? 'like' : 'likes'}`;
 
         const vidVal = readFirestoreValue(fields.videoUrl) || readFirestoreValue(fields.url);
         if (typeof vidVal === 'string' && vidVal.trim()) {
@@ -92,8 +100,8 @@ export default async function handler(
     }
   }
 
-  const ogTitle = escapeHtml(`${videoTitle} - KING App`);
-  const ogDescription = escapeHtml(`Watch on KING App - ${viewsLabel}`);
+  const ogTitle = escapeHtml(`👑 KING App - ${videoTitle}`);
+  const ogDescription = escapeHtml(`${viewsLabel} • ${likesLabel} | Viral on KING App`);
   const ogImage = escapeHtml(thumbnailUrl);
   const ogUrl = escapeHtml(watchUrl);
   const ogVideo = videoUrl ? escapeHtml(videoUrl) : '';

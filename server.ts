@@ -378,12 +378,13 @@ function extractFirestoreField(field: any): string | number | undefined {
 }
 
 async function fetchVideoMetadataForOg(videoId: string) {
-  let title = 'Watch Viral Video';
+  let title = 'Viral Video';
   let viewsLabel = '0 views';
-  let thumbnail = `${CANONICAL_APP_ORIGIN}/icon.png`;
+  let likesLabel = '0 likes';
+  let thumbnail = `${CANONICAL_APP_ORIGIN}/icon-512.png`;
   let videoUrl = '';
 
-  if (!videoId) return { title, viewsLabel, thumbnail, videoUrl };
+  if (!videoId) return { title, viewsLabel, likesLabel, thumbnail, videoUrl };
 
   try {
     const restUrl = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/${FIRESTORE_DATABASE_ID}/documents/videos/${encodeURIComponent(
@@ -401,6 +402,13 @@ async function fetchVideoMetadataForOg(videoId: string) {
       if (typeof titleVal === 'string' && titleVal.trim()) title = titleVal.trim();
 
       viewsLabel = formatOgViews(extractFirestoreField(fields.views));
+      const likesNum = Number(extractFirestoreField(fields.likes)) || 0;
+      likesLabel =
+        likesNum >= 1_000_000
+          ? `${(likesNum / 1_000_000).toFixed(1).replace(/\.0$/, '')}M likes`
+          : likesNum >= 1_000
+          ? `${(likesNum / 1_000).toFixed(1).replace(/\.0$/, '')}K likes`
+          : `${likesNum} ${likesNum === 1 ? 'like' : 'likes'}`;
 
       const rawVid = extractFirestoreField(fields.videoUrl) || extractFirestoreField(fields.url);
       if (typeof rawVid === 'string' && rawVid.trim()) videoUrl = rawVid.trim();
@@ -419,17 +427,18 @@ async function fetchVideoMetadataForOg(videoId: string) {
     console.warn('[OG Metadata] Video fetch notice:', err);
   }
 
-  return { title, viewsLabel, thumbnail, videoUrl };
+  return { title, viewsLabel, likesLabel, thumbnail, videoUrl };
 }
 
 function injectDynamicVideoOgTags(html: string, videoId: string, meta: {
   title: string;
   viewsLabel: string;
+  likesLabel: string;
   thumbnail: string;
   videoUrl: string;
 }): string {
-  const ogTitle = escapeOgHtml(`${meta.title} - KING App`);
-  const ogDesc = escapeOgHtml(`Watch on KING App - ${meta.viewsLabel}`);
+  const ogTitle = escapeOgHtml(`👑 KING App - ${meta.title}`);
+  const ogDesc = escapeOgHtml(`${meta.viewsLabel} • ${meta.likesLabel} | Viral on KING App`);
   const ogImage = escapeOgHtml(meta.thumbnail);
   const ogUrl = escapeOgHtml(`${CANONICAL_APP_ORIGIN}/watch/${encodeURIComponent(videoId)}`);
   const ogVideo = meta.videoUrl ? escapeOgHtml(meta.videoUrl) : '';

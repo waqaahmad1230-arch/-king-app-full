@@ -3,6 +3,7 @@ import { getHistory, clearHistory } from '../utils/historyUtils';
 import { loadDownloads, DownloadItem, downloadVideoFile, updateDownloadItem, deleteDownloadItem } from '../utils/downloadUtils';
 import { doc, getDoc, collection, query, where, limit, getDocs } from 'firebase/firestore';
 import { db, auth } from '../firebase';
+import { buildVideoShareText, getWatchUrl } from '../utils/videoShareUtils';
 import { 
   Eye, 
   Clock, 
@@ -149,10 +150,8 @@ export default function LibraryView() {
     }
     setActiveMenuVideoId(null);
     const videoId = video.videoId || '';
-    const watchUrl = videoId
-      ? `https://king-app-full.vercel.app/watch/${encodeURIComponent(videoId)}`
-      : 'https://king-app-full.vercel.app';
-    const shareText = `👑 KING App\n🎬 Watch this viral video on KING App\n${watchUrl}`;
+    const watchUrl = getWatchUrl(videoId);
+    const shareText = buildVideoShareText({ id: videoId, videoId });
 
     try {
       if (navigator.share) {
@@ -237,14 +236,10 @@ export default function LibraryView() {
   const handleBulkShare = async () => {
     const selectedItems = downloadsList.filter(v => selectedVideoIds.includes(v.videoId));
     if (selectedItems.length === 0) return;
-    const formatWatchLink = (videoId?: string) =>
-      videoId
-        ? `https://king-app-full.vercel.app/watch/${encodeURIComponent(videoId)}`
-        : 'https://king-app-full.vercel.app';
     try {
       if (navigator.share && selectedItems.length === 1) {
         const item = selectedItems[0];
-        const shareText = `👑 KING App\n🎬 Watch this viral video on KING App\n${formatWatchLink(item.videoId)}`;
+        const shareText = buildVideoShareText(item);
         await navigator.share({
           title: `${item.title || 'Viral Video'} - KING App`,
           text: shareText,
@@ -252,7 +247,7 @@ export default function LibraryView() {
         showToast("Shared successfully!");
       } else {
         const urls = selectedItems
-          .map(i => `👑 KING App\n🎬 Watch this viral video on KING App\n${formatWatchLink(i.videoId)}`)
+          .map(i => buildVideoShareText(i))
           .join('\n\n');
         await navigator.clipboard.writeText(urls);
         showToast(`${selectedItems.length} links copied to clipboard`);
@@ -448,11 +443,7 @@ export default function LibraryView() {
 
   const handleShare = (v: any, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
-    const videoId = v?.id || v?.videoId || '';
-    const watchUrl = videoId
-      ? `https://king-app-full.vercel.app/watch/${encodeURIComponent(videoId)}`
-      : 'https://king-app-full.vercel.app';
-    const shareText = `👑 KING App\n🎬 Watch this viral video on KING App\n${watchUrl}`;
+    const shareText = buildVideoShareText(v);
     if (navigator.share) {
       navigator.share({
         title: `${v?.title || 'Viral Video'} - KING App`,

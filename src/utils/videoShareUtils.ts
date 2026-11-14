@@ -1,17 +1,25 @@
 export const APP_SHARE_ORIGIN = 'https://king-app-full.vercel.app';
-export const DEFAULT_KING_OG_IMAGE = `${APP_SHARE_ORIGIN}/icon.png`;
+export const DEFAULT_KING_OG_IMAGE = `${APP_SHARE_ORIGIN}/icon-512.png`;
+
+export function getActiveAppOrigin(): string {
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    return window.location.origin;
+  }
+  return APP_SHARE_ORIGIN;
+}
 
 export function getWatchUrl(videoId?: string | null): string {
+  const origin = getActiveAppOrigin();
   const cleanId = typeof videoId === 'string' ? videoId.trim() : '';
   return cleanId
-    ? `${APP_SHARE_ORIGIN}/watch/${encodeURIComponent(cleanId)}`
-    : APP_SHARE_ORIGIN;
+    ? `${origin}/watch/${encodeURIComponent(cleanId)}`
+    : origin;
 }
 
 export function buildVideoShareText(video: any): string {
   const videoId = video?.id || video?.videoId || '';
-  const watchUrl = getWatchUrl(videoId);
-  return `👑 KING App\n🎬 Watch this viral video on KING App\n${watchUrl}`;
+  const shareUrl = getWatchUrl(videoId);
+  return `👑 KING App\n🎬 Watch viral video\n${shareUrl}`;
 }
 
 export function getVideoThumbnailUrl(video: any): string {
@@ -29,18 +37,18 @@ export function getVideoThumbnailUrl(video: any): string {
   return DEFAULT_KING_OG_IMAGE;
 }
 
-export function formatMetaViews(views: any): string {
-  if (typeof views === 'string') {
-    const trimmed = views.trim();
-    if (!trimmed) return '0 views';
-    if (/[km]$/i.test(trimmed) || trimmed.toLowerCase().includes('view')) {
-      return trimmed.toLowerCase().includes('view') ? trimmed : `${trimmed} views`;
+export function formatMetaCount(value: any, singular: string, plural: string): string {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return `0 ${plural}`;
+    if (/[km]$/i.test(trimmed) || trimmed.toLowerCase().includes(singular)) {
+      return trimmed.toLowerCase().includes(singular) ? trimmed : `${trimmed} ${plural}`;
     }
   }
-  const num = Number(views) || 0;
-  if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(1).replace(/\.0$/, '')}M views`;
-  if (num >= 1_000) return `${(num / 1_000).toFixed(1).replace(/\.0$/, '')}K views`;
-  return `${num} ${num === 1 ? 'view' : 'views'}`;
+  const num = Number(value) || 0;
+  if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(1).replace(/\.0$/, '')}M ${plural}`;
+  if (num >= 1_000) return `${(num / 1_000).toFixed(1).replace(/\.0$/, '')}K ${plural}`;
+  return `${num} ${num === 1 ? singular : plural}`;
 }
 
 function upsertMetaTag(attrName: 'property' | 'name', attrValue: string, content: string) {
@@ -58,15 +66,17 @@ export function applyVideoOpenGraphMeta(video: any, watchUrlOverride?: string) {
   if (typeof document === 'undefined' || !video) return;
 
   const title = (video?.title && String(video.title).trim()) || 'Viral Video';
-  const fullTitle = `${title} - KING App`;
-  const viewsText = formatMetaViews(video?.views);
-  const description = `Watch on KING App - ${viewsText}`;
+  const fullTitle = `👑 KING App - ${title}`;
+  const viewsText = formatMetaCount(video?.views, 'view', 'views');
+  const likesText = formatMetaCount(video?.likes, 'like', 'likes');
+  const description = `${viewsText} • ${likesText} | Viral on KING App`;
   const imageUrl = getVideoThumbnailUrl(video);
   const watchUrl = watchUrlOverride || getWatchUrl(video?.id || video?.videoId);
   const videoUrl = (video?.videoUrl || video?.url || '').trim();
 
   document.title = fullTitle;
   upsertMetaTag('name', 'description', description);
+  upsertMetaTag('property', 'og:site_name', 'KING App');
   upsertMetaTag('property', 'og:title', fullTitle);
   upsertMetaTag('property', 'og:description', description);
   upsertMetaTag('property', 'og:image', imageUrl);
@@ -86,11 +96,12 @@ export function applyVideoOpenGraphMeta(video: any, watchUrlOverride?: string) {
 
 export function resetDefaultOpenGraphMeta() {
   if (typeof document === 'undefined') return;
-  const defaultTitle = '👑 KING App - Watch Viral Videos';
-  const defaultDesc = 'Watch trending videos on KING App';
+  const defaultTitle = '👑 KING App - Viral Video';
+  const defaultDesc = '12M views • 228K likes | Viral on KING App';
 
   document.title = defaultTitle;
   upsertMetaTag('name', 'description', defaultDesc);
+  upsertMetaTag('property', 'og:site_name', 'KING App');
   upsertMetaTag('property', 'og:title', defaultTitle);
   upsertMetaTag('property', 'og:description', defaultDesc);
   upsertMetaTag('property', 'og:image', DEFAULT_KING_OG_IMAGE);

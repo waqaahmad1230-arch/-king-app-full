@@ -12,6 +12,10 @@
       "destination": "/api/watch?id=:id"
     },
     {
+      "source": "/watch/:id",
+      "destination": "/index.html"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }
