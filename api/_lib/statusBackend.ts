@@ -1,7 +1,7 @@
 import { v2 as cloudinary } from 'cloudinary';
-import { cert, getApps, initializeApp, App } from 'firebase-admin/app';
+import { cert, getApps, initializeApp, type App } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
-import { FieldValue, getFirestore, QueryDocumentSnapshot, Timestamp } from 'firebase-admin/firestore';
+import { FieldValue, getFirestore, type QueryDocumentSnapshot, Timestamp } from 'firebase-admin/firestore';
 
 export const FIREBASE_PROJECT_ID = 'king-5f52e';
 export const FIRESTORE_DATABASE_ID = 'ai-studio-king-4e115b8f-6ca5-4501-8ff0-73c2c7c21a47';

@@ -10,7 +10,7 @@ import {
   handleFetchAuthorizedStatusFeed,
   handleRunExpiredStatusCleanup,
   verifyFirebaseBearerToken,
-} from './api/_lib/statusBackend';
+} from './api/_lib/statusBackend.ts';
 
 const app = express();
 
