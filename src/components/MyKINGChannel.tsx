@@ -18,7 +18,8 @@ import {
   SkipBack,
   SkipForward,
   Download,
-  Facebook
+  Facebook,
+  Users
 } from 'lucide-react';
 import { 
   doc, 
@@ -48,6 +49,22 @@ import { saveToHistory } from '../utils/historyUtils';
 import { downloadVideoFile } from '../utils/downloadUtils';
 import { useAuth } from '../context/AuthContext';
 import CreatorAvatar from './CreatorAvatar';
+import {
+  ProfileRelationshipBar,
+  SocialHubSection,
+  StatusPrivacySettingsCard,
+} from './SocialNetworkPanel';
+import {
+  subscribeMyFollowers,
+  subscribeMyFollowing,
+  subscribeMyFriendships,
+} from '../services/socialGraphService';
+import {
+  markAllMyNotificationsRead,
+  markNotificationRead,
+  subscribeMyNotifications,
+} from '../services/statusService';
+import { AppNotificationRecord } from '../types/social';
 
 export interface ChannelVideoItem {
   id: string | number;
@@ -104,20 +121,57 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
   const [savingSocialKey, setSavingSocialKey] = useState<string | null>(null);
 
   // Use reactive user from AuthContext
-  const { user: authUser } = useAuth();
-  const effectiveUserId = profileUserId || currentUser?.uid || authUser?.uid || auth.currentUser?.uid;
+  const { user: authUser, openAuthModal } = useAuth();
+  const signedInUid = authUser?.uid || currentUser?.uid || auth.currentUser?.uid || null;
+  const [internalProfileUid, setInternalProfileUid] = useState<string | null>(null);
+  const [socialCounts, setSocialCounts] = useState({
+    friends: 0,
+    incomingRequests: 0,
+    followers: 0,
+    following: 0,
+  });
+
+  const activeTargetProfileUid = internalProfileUid ?? profileUserId ?? null;
+  const effectiveUserId = activeTargetProfileUid || signedInUid;
   const isViewingOtherCreator = Boolean(
-    profileUserId && 
-    (authUser?.uid || currentUser?.uid) && 
-    profileUserId !== (authUser?.uid || currentUser?.uid)
+    activeTargetProfileUid && activeTargetProfileUid !== signedInUid
   );
 
-  // Reset subView to channel whenever profileUserId or open state changes
+  // Reset subView and internal navigation whenever external profileUserId or open state changes
   useEffect(() => {
+    setInternalProfileUid(null);
     setSubView('channel');
+    setActiveTab('videos');
     setSelectedChannelVideo(null);
     setPlayingVideoIndex(null);
   }, [profileUserId, isOpen]);
+
+  // Keep live friends / incoming request / followers counts synced on own channel
+  useEffect(() => {
+    if (!signedInUid) {
+      setSocialCounts({ friends: 0, incomingRequests: 0, followers: 0, following: 0 });
+      return;
+    }
+    if (isViewingOtherCreator || isOpen === false) return;
+    const u1 = subscribeMyFriendships(signedInUid, (records) => {
+      const friends = records.filter((r) => r.status === 'accepted').length;
+      const incomingRequests = records.filter(
+        (r) => r.status === 'pending' && r.targetUid === signedInUid
+      ).length;
+      setSocialCounts((prev) => ({ ...prev, friends, incomingRequests }));
+    });
+    const u2 = subscribeMyFollowers(signedInUid, (followers) => {
+      setSocialCounts((prev) => ({ ...prev, followers: followers.length }));
+    });
+    const u3 = subscribeMyFollowing(signedInUid, (following) => {
+      setSocialCounts((prev) => ({ ...prev, following: following.length }));
+    });
+    return () => {
+      u1();
+      u2();
+      u3();
+    };
+  }, [signedInUid, isViewingOtherCreator, isOpen]);
 
   // Profile Edit State in Settings
   const [editingName, setEditingName] = useState(false);
@@ -127,12 +181,14 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
   const [channelProfile, setChannelProfile] = useState<any | null>(null);
   const [dbPhotoURL, setDbPhotoURL] = useState<string | null>(null);
   
-  // Fetch channel profile (publicProfiles first, fallback to users)
+  // Fetch channel profile (publicProfiles first, fallback to users only when viewing own profile)
   useEffect(() => {
     const fetchUserData = async () => {
-      const activeUid = effectiveUserId || authUser?.uid || currentUser?.uid;
+      const activeUid = effectiveUserId;
       if (!activeUid) {
         setChannelProfile(null);
+        setDbPhotoURL(null);
+        setSocialLinks({ whatsapp: '', facebook: '', youtube: '', instagram: '', tiktok: '' });
         return;
       }
       try {
@@ -142,48 +198,46 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
         if (pubSnap.exists()) {
           const data = pubSnap.data();
           setChannelProfile(data);
-          if (data?.photoURL) {
-            setDbPhotoURL(data.photoURL);
-          }
-          if (data?.socialLinks) {
-            setSocialLinks({
-              whatsapp: data.socialLinks.whatsapp || '',
-              facebook: data.socialLinks.facebook || '',
-              youtube: data.socialLinks.youtube || '',
-              instagram: data.socialLinks.instagram || '',
-              tiktok: data.socialLinks.tiktok || '',
-            });
-          }
-          if (data?.subscribersCount) {
+          setDbPhotoURL(data?.photoURL || null);
+          setSocialLinks({
+            whatsapp: data?.socialLinks?.whatsapp || '',
+            facebook: data?.socialLinks?.facebook || '',
+            youtube: data?.socialLinks?.youtube || '',
+            instagram: data?.socialLinks?.instagram || '',
+            tiktok: data?.socialLinks?.tiktok || '',
+          });
+          if (typeof data?.subscribersCount === 'number') {
             setSubscribersCount(data.subscribersCount);
           }
-        } else {
-          // Fallback to users
+        } else if (!isViewingOtherCreator) {
+          // Fallback to private /users/{uid} ONLY for signed-in owner
           const userRef = doc(db, 'users', activeUid);
           const snap = await getDoc(userRef);
           if (snap.exists()) {
             const data = snap.data();
             setChannelProfile(data);
-            if (data?.photoURL) {
-              setDbPhotoURL(data.photoURL);
-            }
-            if (data?.socialLinks) {
-              setSocialLinks({
-                whatsapp: data.socialLinks.whatsapp || '',
-                facebook: data.socialLinks.facebook || '',
-                youtube: data.socialLinks.youtube || '',
-                instagram: data.socialLinks.instagram || '',
-                tiktok: data.socialLinks.tiktok || '',
-              });
-            }
+            setDbPhotoURL(data?.photoURL || null);
+            setSocialLinks({
+              whatsapp: data?.socialLinks?.whatsapp || '',
+              facebook: data?.socialLinks?.facebook || '',
+              youtube: data?.socialLinks?.youtube || '',
+              instagram: data?.socialLinks?.instagram || '',
+              tiktok: data?.socialLinks?.tiktok || '',
+            });
+          } else {
+            setChannelProfile(null);
           }
+        } else {
+          setChannelProfile(null);
+          setDbPhotoURL(null);
+          setSocialLinks({ whatsapp: '', facebook: '', youtube: '', instagram: '', tiktok: '' });
         }
       } catch (err) {
         console.warn("Error loading channel profile:", err);
       }
     };
     fetchUserData();
-  }, [effectiveUserId, authUser?.uid, currentUser?.uid]);
+  }, [effectiveUserId, isViewingOtherCreator]);
 
   const realName = isViewingOtherCreator
     ? (channelProfile?.displayName || channelProfile?.name || 'KING Creator')
@@ -260,24 +314,22 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
   // Real Uploaded Videos List (Initialized empty until user uploads)
   const [channelVideos, setChannelVideos] = useState<ChannelVideoItem[]>([]);
 
-  // Subscriptions List
-  const [subscriptions, setSubscriptions] = useState([
-    { id: 1, name: 'KING AI Studio', subs: '45.8K Subscribers', avatar: '👑' },
-    { id: 2, name: 'Neon Velocity Gaming', subs: '120K Subscribers', avatar: '🏎️' },
-  ]);
-
   // Liked videos state
   const [likedList, setLikedList] = useState([
     { id: 101, title: 'KING App • Official Viral Promo', channel: 'KING AI Studio', duration: '0:16' },
     { id: 102, title: 'Daraz 11.11 Flash Sale Hacks', channel: 'Deals Master PK', duration: '4:20' },
   ]);
 
-  // Notifications state
-  const [notifications, setNotifications] = useState([
-    { id: 1, title: 'Daraz Flash Sale Live!', desc: 'Up to 65% off on Mobiles & Electronics.', time: '10m ago', unread: true },
-    { id: 2, title: 'Auto-Ads Ready', desc: 'Connect Facebook to earn 60% creator revenue split.', time: '1h ago', unread: true },
-    { id: 3, title: 'New Reel Viral', desc: 'Your promo reel crossed 150K views!', time: '1d ago', unread: false },
-  ]);
+  // Real-time Firestore Notifications (Status reactions, replies & social alerts)
+  const [notifications, setNotifications] = useState<AppNotificationRecord[]>([]);
+
+  useEffect(() => {
+    if (!signedInUid) {
+      setNotifications([]);
+      return;
+    }
+    return subscribeMyNotifications(signedInUid, setNotifications);
+  }, [signedInUid]);
 
   const showToast = (text: string) => {
     setToastMessage(text);
@@ -453,6 +505,9 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
   const handleBack = () => {
     if (subView !== 'channel') {
       setSubView('channel');
+    } else if (internalProfileUid) {
+      setInternalProfileUid(null);
+      setActiveTab('subs');
     } else {
       onClose();
     }
@@ -860,26 +915,30 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
             title="Notifications"
           >
             🔔
-            {notifications.some(n => n.unread) && (
-              <span className="absolute top-2 right-2 w-2.5 h-2.5 bg-red-500 rounded-full ring-2 ring-[#0a0e1f]" />
+            {notifications.some((n) => !n.read) && (
+              <span className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 bg-red-500 text-white text-[10px] font-black rounded-full ring-2 ring-[#0a0e1f] flex items-center justify-center">
+                {notifications.filter((n) => !n.read).length > 9 ? '9+' : notifications.filter((n) => !n.read).length}
+              </span>
             )}
           </button>
 
-          {/* Gear -> /settings (Real Settings Page) */}
-          <button
-            onClick={() => setSubView(subView === 'settings' ? 'channel' : 'settings')}
-            className={`w-10 h-10 rounded-full flex items-center justify-center cursor-pointer transition active:scale-95 ${
-              subView === 'settings' ? 'bg-cyan-600 shadow-[0_0_12px_#06b6d4]' : 'bg-[#1a1f35] hover:bg-[#242b47]'
-            }`}
-            title="Channel Settings"
-          >
-            ⚙️
-          </button>
+          {/* Gear -> /settings (Real Settings Page, only for own channel) */}
+          {!isViewingOtherCreator && (
+            <button
+              onClick={() => setSubView(subView === 'settings' ? 'channel' : 'settings')}
+              className={`w-10 h-10 rounded-full flex items-center justify-center cursor-pointer transition active:scale-95 ${
+                subView === 'settings' ? 'bg-cyan-600 shadow-[0_0_12px_#06b6d4]' : 'bg-[#1a1f35] hover:bg-[#242b47]'
+              }`}
+              title="Channel Settings"
+            >
+              ⚙️
+            </button>
+          )}
         </div>
       </div>
 
       {/* SUB-VIEW 1: REAL SETTINGS PAGE */}
-      {subView === 'settings' && (
+      {subView === 'settings' && !isViewingOtherCreator && (
         <div className="p-4 max-w-md mx-auto space-y-4 animate-in fade-in duration-200">
           <div className="flex items-center justify-between pb-3 border-b border-gray-800">
             <h2 className="text-lg font-black text-white flex items-center gap-2">
@@ -1181,6 +1240,12 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
 
 
 
+          {/* Status Privacy Settings (Phase 1 pre-configuration for future Status visibility) */}
+          <StatusPrivacySettingsCard
+            currentUid={signedInUid}
+            onShowToast={showToast}
+          />
+
           {/* Legal Section */}
           <div className="bg-[#0b1222] border border-slate-800 p-4 rounded-2xl space-y-3">
             <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Legal</h3>
@@ -1309,38 +1374,87 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
             <h2 className="text-lg font-black text-white flex items-center gap-2">
               <span className="text-amber-500">🔔</span> Notifications
             </h2>
-            <button
-              onClick={() => {
-                setNotifications(notifications.map(n => ({ ...n, unread: false })));
-                showToast('All notifications marked as read');
-              }}
-              className="text-xs text-cyan-400 hover:underline font-bold"
-            >
-              Mark all read
-            </button>
+            {notifications.some((n) => !n.read) && (
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    await markAllMyNotificationsRead(notifications);
+                    showToast('All notifications marked as read');
+                  } catch {
+                    showToast('Unable to update notifications right now');
+                  }
+                }}
+                className="text-xs text-cyan-400 hover:underline font-bold cursor-pointer"
+              >
+                Mark all read
+              </button>
+            )}
           </div>
 
-          <div className="space-y-2.5">
-            {notifications.map((n) => (
-              <div
-                key={n.id}
-                className={`p-3.5 rounded-2xl border transition ${
-                  n.unread 
-                    ? 'bg-[#0e1830] border-cyan-500/30 text-white' 
-                    : 'bg-[#0a0e1f] border-gray-800 text-slate-300'
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <h4 className="text-xs font-bold text-white flex items-center gap-2">
-                    {n.unread && <span className="w-2 h-2 rounded-full bg-cyan-400" />}
-                    {n.title}
-                  </h4>
-                  <span className="text-[10px] text-slate-400">{n.time}</span>
-                </div>
-                <p className="text-xs text-slate-300 mt-1">{n.desc}</p>
-              </div>
-            ))}
-          </div>
+          {!signedInUid ? (
+            <div className="p-5 bg-[#0a0e1f] border border-gray-800 rounded-2xl text-center text-xs text-slate-400">
+              Sign in to receive Status reaction & reply notifications.
+            </div>
+          ) : notifications.length === 0 ? (
+            <div className="p-6 bg-[#0a0e1f] border border-dashed border-gray-800 rounded-2xl text-center space-y-1.5">
+              <Bell className="w-7 h-7 text-slate-600 mx-auto" />
+              <div className="text-xs font-bold text-slate-300">No notifications yet</div>
+              <p className="text-[11px] text-slate-500">
+                Status reactions and private replies from friends will appear here in real time.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-2.5">
+              {notifications.map((n) => {
+                const diffSec = n.createdAtMs ? Math.max(0, Math.floor((Date.now() - n.createdAtMs) / 1000)) : 0;
+                const relTime =
+                  !n.createdAtMs
+                    ? 'Just now'
+                    : diffSec < 60
+                    ? `${diffSec}s ago`
+                    : diffSec < 3600
+                    ? `${Math.floor(diffSec / 60)}m ago`
+                    : `${Math.floor(diffSec / 3600)}h ago`;
+
+                return (
+                  <button
+                    key={n.id}
+                    type="button"
+                    onClick={() => {
+                      if (!n.read) {
+                        markNotificationRead(n.id).catch(() => {});
+                      }
+                    }}
+                    className={`w-full text-left p-3.5 rounded-2xl border transition cursor-pointer ${
+                      !n.read
+                        ? 'bg-[#0e1830] border-cyan-500/40 text-white'
+                        : 'bg-[#0a0e1f] border-gray-800 text-slate-300'
+                    }`}
+                  >
+                    <div className="flex items-start gap-2.5">
+                      <CreatorAvatar
+                        uid={n.actorUid}
+                        fallbackPhoto={n.actorPhoto}
+                        fallbackName={n.actorName}
+                        className="w-9 h-9 rounded-full shrink-0"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between gap-2">
+                          <h4 className="text-xs font-bold text-white flex items-center gap-1.5 truncate">
+                            {!n.read && <span className="w-2 h-2 rounded-full bg-cyan-400 shrink-0" />}
+                            <span className="truncate">{n.title}</span>
+                          </h4>
+                          <span className="text-[10px] text-slate-400 shrink-0">{relTime}</span>
+                        </div>
+                        {n.body && <p className="text-xs text-slate-300 mt-1 break-words">{n.body}</p>}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
@@ -1490,17 +1604,42 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
             })()}
 
             {/* Handle & Real Stats */}
-            <p className="mt-4 text-sm">
+            <p className="mt-4 text-sm text-center px-4">
               <span className="text-cyan-400 font-bold">{realHandle}</span>{' '}
               <span className="mx-2">•</span>{' '}
-              <span className="font-bold">{(subscribersCount / 1000).toFixed(1)}K Subscribers</span>{' '}
-              <span className="mx-2">•</span> {channelVideos.length} Videos
+              {!isViewingOtherCreator && signedInUid ? (
+                <>
+                  <span className="font-bold">{socialCounts.friends} Friends</span>{' '}
+                  <span className="mx-1.5">•</span>{' '}
+                  <span className="font-bold">{socialCounts.followers} Followers</span>{' '}
+                  <span className="mx-1.5">•</span>{' '}
+                  <span className="font-bold">{socialCounts.following} Following</span>{' '}
+                  <span className="mx-1.5">•</span>{' '}
+                </>
+              ) : (
+                <>
+                  <span className="font-bold">{(subscribersCount / 1000).toFixed(1)}K Subscribers</span>{' '}
+                  <span className="mx-2">•</span>{' '}
+                </>
+              )}
+              {channelVideos.length} Videos
             </p>
 
             <p className="mt-3 text-center text-gray-400 text-sm px-6 max-w-md">
               Welcome to my official KING Channel ✨! Uploading HD Movies, Kids Cartoons, Cyber Gaming &
               Trending Video...
             </p>
+
+            {/* Relationship Actions when viewing another creator */}
+            {isViewingOtherCreator && activeTargetProfileUid && (
+              <ProfileRelationshipBar
+                currentUid={signedInUid}
+                targetUid={activeTargetProfileUid}
+                targetName={realName}
+                onRequireAuth={() => openAuthModal('login')}
+                onShowToast={showToast}
+              />
+            )}
 
             {/* + KINGTUBE Action */}
             {!isViewingOtherCreator && (
@@ -1526,17 +1665,25 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
               >
                 📹 VIDEOS ({channelVideos.length})
               </button>
-              <button
-                type="button"
-                onClick={() => setActiveTab('subs')}
-                className={`pb-3 font-bold flex items-center gap-2 cursor-pointer transition ${
-                  activeTab === 'subs'
-                    ? 'border-b-2 border-cyan-400 text-cyan-400'
-                    : 'text-gray-400 hover:text-white'
-                }`}
-              >
-                🔔 SUBSCRIPTIONS ({subscriptions.length})
-              </button>
+              {!isViewingOtherCreator && (
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('subs')}
+                  className={`pb-3 font-bold flex items-center gap-2 cursor-pointer transition ${
+                    activeTab === 'subs'
+                      ? 'border-b-2 border-cyan-400 text-cyan-400'
+                      : 'text-gray-400 hover:text-white'
+                  }`}
+                >
+                  <Users className="w-4 h-4" />
+                  <span>FRIENDS & SOCIAL</span>
+                  {socialCounts.incomingRequests > 0 && (
+                    <span className="px-1.5 py-0.2 rounded-full bg-rose-500 text-white text-[10px] font-black">
+                      {socialCounts.incomingRequests}
+                    </span>
+                  )}
+                </button>
+              )}
             </div>
 
             {/* Content for Active Tab 1: VIDEOS */}
@@ -1642,47 +1789,18 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
               </div>
             )}
 
-            {/* Content for Active Tab 2: SUBSCRIPTIONS */}
-            {activeTab === 'subs' && (
-              <div className="w-full max-w-md px-4 mt-5 space-y-4">
-                <div className="flex justify-between items-center">
-                  <h3 className="font-black text-lg">
-                    CHANNEL SUBSCRIPTIONS{' '}
-                    <span className="text-gray-500 text-sm font-normal ml-2">
-                      {subscriptions.length} channels
-                    </span>
-                  </h3>
-                </div>
-
-                <div className="space-y-3">
-                  {subscriptions.map((sub) => (
-                    <div
-                      key={sub.id}
-                      className="flex items-center justify-between p-3 bg-[#0a0e1f] border border-gray-800 rounded-xl"
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-lg">
-                          {sub.avatar}
-                        </div>
-                        <div>
-                          <div className="text-xs font-bold text-white">{sub.name}</div>
-                          <div className="text-[10px] text-slate-400">{sub.subs}</div>
-                        </div>
-                      </div>
-
-                      <button
-                        onClick={() => {
-                          setSubscriptions(subscriptions.filter(s => s.id !== sub.id));
-                          showToast(`Unsubscribed from ${sub.name}`);
-                        }}
-                        className="text-[11px] px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg font-bold transition"
-                      >
-                        Subscribed ✓
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
+            {/* Content for Active Tab 2: FRIENDS & SOCIAL (Real Firestore Graph) */}
+            {activeTab === 'subs' && !isViewingOtherCreator && (
+              <SocialHubSection
+                currentUid={signedInUid}
+                onOpenUserProfile={(uid) => {
+                  setInternalProfileUid(uid);
+                  setActiveTab('videos');
+                }}
+                onRequireAuth={() => openAuthModal('login')}
+                onShowToast={showToast}
+                onCountsChange={setSocialCounts}
+              />
             )}
 
           </div>

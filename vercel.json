@@ -19,5 +19,11 @@
       "source": "/(.*)",
       "destination": "/index.html"
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/status/cleanup",
+      "schedule": "0 0 * * *"
+    }
   ]
 }

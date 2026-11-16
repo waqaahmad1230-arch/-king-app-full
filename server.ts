@@ -4,6 +4,13 @@ import path from 'path';
 import fs from 'fs';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
+import {
+  buildSignedStatusUploadPayload,
+  handleDeleteSingleStatusServer,
+  handleFetchAuthorizedStatusFeed,
+  handleRunExpiredStatusCleanup,
+  verifyFirebaseBearerToken,
+} from './api/_lib/statusBackend';
 
 const app = express();
 
@@ -335,6 +342,61 @@ app.get('/api/games/gamepix-trending', async (req, res) => {
   } catch (err: any) {
     console.warn('[GamePix Trending API] Fetch error:', err);
     return res.status(500).json({ error: err.message || 'Failed to fetch GamePix feed' });
+  }
+});
+
+// --- STATUS SYSTEM BACKEND ENDPOINTS (Mirrors Vercel /api/status/* serverless functions) ---
+app.get('/api/status/feed', generalApiRateLimiter, authenticateFirebaseToken, async (req, res) => {
+  try {
+    const user = (req as any).user as VerifiedFirebaseUser;
+    const result = await handleFetchAuthorizedStatusFeed(user.uid);
+    return res.status(result.status).json(result);
+  } catch (err: any) {
+    console.error('[server.ts /api/status/feed] Error:', err);
+    return res.status(500).json({ error: err?.message || 'Status feed error' });
+  }
+});
+
+app.post(
+  '/api/status/sign-upload',
+  generalApiRateLimiter,
+  express.json({ limit: '16kb' }),
+  authenticateFirebaseToken,
+  (req, res) => {
+    const user = (req as any).user as VerifiedFirebaseUser;
+    const payload = buildSignedStatusUploadPayload({
+      callerUid: user.uid,
+      resourceType: req.body?.resourceType,
+      privacyMode: req.body?.privacyMode,
+    });
+    return res.status(payload.status).json(payload);
+  }
+);
+
+app.all('/api/status/cleanup', generalApiRateLimiter, express.json({ limit: '16kb' }), async (req, res) => {
+  try {
+    const caller = await verifyFirebaseBearerToken(req.headers.authorization);
+    const statusId =
+      (typeof req.query?.statusId === 'string' && req.query.statusId) ||
+      (typeof req.body?.statusId === 'string' && req.body.statusId) ||
+      '';
+
+    if (statusId && (req.method === 'DELETE' || req.method === 'POST')) {
+      if (!caller) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+      const delRes = await handleDeleteSingleStatusServer(statusId.trim(), caller);
+      return res.status(delRes.status).json(delRes);
+    }
+
+    const cleanupRes = await handleRunExpiredStatusCleanup({
+      authHeader: req.headers.authorization,
+      caller,
+    });
+    return res.status(cleanupRes.status).json(cleanupRes);
+  } catch (err: any) {
+    console.error('[server.ts /api/status/cleanup] Error:', err);
+    return res.status(500).json({ error: err?.message || 'Status cleanup error' });
   }
 });
 

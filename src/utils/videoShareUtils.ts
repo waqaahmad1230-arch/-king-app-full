@@ -103,3 +103,74 @@ export function resetDefaultOpenGraphMeta() {
   upsertMetaTag('name', 'twitter:description', defaultDesc);
   upsertMetaTag('name', 'twitter:image', DEFAULT_KING_OG_IMAGE);
 }
+
+export function cleanWhatsAppDigits(rawValue: unknown): string {
+  if (typeof rawValue !== 'string' && typeof rawValue !== 'number') return '';
+  const raw = String(rawValue).trim();
+  if (!raw) return '';
+
+  if (raw.startsWith('http://') || raw.startsWith('https://')) {
+    try {
+      const parsed = new URL(raw);
+      const phoneParam = parsed.searchParams.get('phone');
+      if (phoneParam) {
+        const digits = phoneParam.replace(/\D/g, '');
+        if (digits.length >= 7) return digits;
+      }
+      const pathDigits = parsed.pathname.replace(/\D/g, '');
+      if (pathDigits.length >= 7) return pathDigits;
+      return '';
+    } catch {
+      // fall through to standard digit extraction
+    }
+  }
+
+  const digits = raw.replace(/\D/g, '');
+  return digits.length >= 7 ? digits : '';
+}
+
+export function getVideoOwnerWhatsAppNumber(
+  video: any,
+  creatorProfileWhatsApp?: string | null
+): string {
+  const candidates = [
+    video?.user?.whatsappNumber,
+    video?.user?.phoneNumber,
+    video?.user?.phone,
+    video?.user?.whatsapp,
+    video?.author?.whatsapp,
+    video?.author?.phoneNumber,
+    video?.author?.phone,
+    video?.userPhone,
+    video?.whatsappNumber,
+    video?.whatsapp,
+    video?.phoneNumber,
+    video?.phone,
+    creatorProfileWhatsApp,
+  ];
+
+  for (const candidate of candidates) {
+    const clean = cleanWhatsAppDigits(candidate);
+    if (clean) return clean;
+  }
+
+  return '';
+}
+
+export function openVideoOwnerWhatsApp(
+  video: any,
+  creatorProfileWhatsApp?: string | null
+): void {
+  const ownerNumber = getVideoOwnerWhatsAppNumber(video, creatorProfileWhatsApp);
+
+  if (!ownerNumber) {
+    alert('This user has no WhatsApp number');
+    return;
+  }
+
+  const cleanNumber = ownerNumber.replace(/\D/g, '');
+  const text = `Hello! I saw your video on KING APP 👑`;
+  const url = `https://wa.me/${cleanNumber}?text=${encodeURIComponent(text)}`;
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
+

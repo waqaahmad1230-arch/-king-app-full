@@ -24,6 +24,7 @@ import { downloadVideoFile } from '../utils/downloadUtils';
 import { GamePlayer } from './GamePlayer';
 import { formatLastUpdated, DailyGame } from '../services/dailyGameSync';
 import CreatorAvatar, { CreatorDisplayName } from './CreatorAvatar';
+import StatusBar from './StatusBar';
 
 interface HomeViewProps {
   onOpenQR: () => void;
@@ -294,9 +295,11 @@ export default function HomeView({ onOpenQR, onOpenTab }: HomeViewProps) {
 
   return (
     <div className="pb-24 space-y-6">
-      
+      {/* KING Status Bar (Home Screen Only, Below TopHeader) */}
+      <StatusBar />
+
       {/* 1. Daraz Affiliate Deals Auto-Sliding Carousel Section */}
-      <section className="px-4 pt-3">
+      <section className="px-4 pt-1">
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-orange-600 to-amber-500 flex items-center justify-center text-white shadow-md shadow-orange-600/30">

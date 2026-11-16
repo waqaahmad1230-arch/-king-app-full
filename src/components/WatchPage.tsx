@@ -33,8 +33,10 @@ import {
 import {
   applyVideoOpenGraphMeta,
   buildVideoShareText,
+  getVideoOwnerWhatsAppNumber,
   getVideoThumbnailUrl,
   getWatchUrl,
+  openVideoOwnerWhatsApp as openOwnerWhatsAppChat,
   resetDefaultOpenGraphMeta,
 } from '../utils/videoShareUtils';
 
@@ -117,6 +119,7 @@ export default function WatchPage({
   const [isDownloading, setIsDownloading] = useState<boolean>(false);
   const [isDownloaded, setIsDownloaded] = useState<boolean>(false);
   const [copiedToast, setCopiedToast] = useState<boolean>(false);
+  const [creatorWhatsApp, setCreatorWhatsApp] = useState<string | null>(null);
 
   const videoPlayerRef = useRef<HTMLVideoElement | null>(null);
   const hideControlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -181,6 +184,41 @@ export default function WatchPage({
     });
     return () => unsub();
   }, [video?.id, authUser?.uid]);
+
+  // Subscribe to creator's public profile WhatsApp link
+  useEffect(() => {
+    setCreatorWhatsApp(null);
+    const creatorUid = video?.uid || video?.userId;
+    if (!creatorUid || typeof creatorUid !== 'string' || !creatorUid.trim()) {
+      return;
+    }
+
+    const safeUid = creatorUid.trim();
+    const unsubProfile = onSnapshot(
+      doc(db, 'publicProfiles', safeUid),
+      (pubDoc) => {
+        if (pubDoc.exists()) {
+          const pubData = pubDoc.data();
+          const waLink =
+            pubData?.socialLinks?.whatsapp ||
+            pubData?.whatsappNumber ||
+            pubData?.whatsapp ||
+            pubData?.phoneNumber ||
+            pubData?.phone;
+          if (waLink && typeof waLink === 'string' && waLink.trim()) {
+            setCreatorWhatsApp(waLink.trim());
+            return;
+          }
+        }
+        setCreatorWhatsApp(null);
+      },
+      () => {
+        setCreatorWhatsApp(null);
+      }
+    );
+
+    return () => unsubProfile();
+  }, [video?.uid, video?.userId]);
 
   const startHideTimer = () => {
     if (hideControlsTimerRef.current) clearTimeout(hideControlsTimerRef.current);
@@ -293,11 +331,9 @@ export default function WatchPage({
     }
   };
 
-  const handleWhatsAppShare = (e?: React.MouseEvent) => {
+  const openVideoOwnerWhatsApp = (e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
-    const targetObj = video || { id: videoId };
-    const shareUrl = buildVideoShareText(targetObj);
-    window.open(`https://wa.me/?text=${encodeURIComponent(shareUrl)}`, '_blank', 'noopener,noreferrer');
+    openOwnerWhatsAppChat(video || { id: videoId }, creatorWhatsApp);
   };
 
   const handleTimeUpdate = (e: React.SyntheticEvent<HTMLVideoElement>) => {
@@ -598,19 +634,22 @@ export default function WatchPage({
               </span>
             </button>
 
-            <button
-              type="button"
-              onClick={handleWhatsAppShare}
-              className="flex flex-col items-center gap-1 cursor-pointer active:scale-95 transition"
-              title="Share on WhatsApp"
-            >
-              <div className="w-11 h-11 rounded-full bg-black/45 hover:bg-black/65 border border-green-500/40 text-green-400 flex items-center justify-center backdrop-blur-md shadow-lg">
-                <MessageCircle className="w-5 h-5" />
-              </div>
-              <span className="text-[11px] font-semibold text-green-400 [text-shadow:0_1px_4px_rgba(0,0,0,0.95)]">
-                WhatsApp
-              </span>
-            </button>
+            {Boolean(getVideoOwnerWhatsAppNumber(video, creatorWhatsApp)) && (
+              <button
+                type="button"
+                onClick={openVideoOwnerWhatsApp}
+                className="flex flex-col items-center gap-1 cursor-pointer active:scale-95 transition"
+                title="Message Creator on WhatsApp"
+                aria-label="Message Creator on WhatsApp"
+              >
+                <div className="w-11 h-11 rounded-full bg-black/45 hover:bg-black/65 border border-green-500/40 text-green-400 flex items-center justify-center backdrop-blur-md shadow-lg">
+                  <MessageCircle className="w-5 h-5" />
+                </div>
+                <span className="text-[11px] font-semibold text-green-400 [text-shadow:0_1px_4px_rgba(0,0,0,0.95)]">
+                  WhatsApp
+                </span>
+              </button>
+            )}
           </div>
         )}
 

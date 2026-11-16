@@ -13,7 +13,8 @@
         "fb_auto_ads": { "type": "boolean" },
         "consentedAt": { "type": "string" },
         "createdAt": { "type": "string" },
-        "lastLogin": { "type": "string" }
+        "lastLogin": { "type": "string" },
+        "statusPrivacy": { "type": "object" }
       },
       "required": ["uid"]
     },
@@ -173,6 +174,141 @@
         "updatedAt": { "type": "string" }
       },
       "required": ["name", "originalPrice", "stock", "category", "imageUrls", "isActive"]
+    },
+    "Friendship": {
+      "title": "Friendship",
+      "description": "Canonical friend request or accepted friendship between two users",
+      "type": "object",
+      "properties": {
+        "userA": { "type": "string" },
+        "userB": { "type": "string" },
+        "users": { "type": "array" },
+        "status": { "type": "string" },
+        "requestedBy": { "type": "string" },
+        "targetUid": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["userA", "userB", "users", "status", "requestedBy", "targetUid"]
+    },
+    "Follow": {
+      "title": "Follow",
+      "description": "One-way follow edge from followerUid to targetUid",
+      "type": "object",
+      "properties": {
+        "followerUid": { "type": "string" },
+        "targetUid": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["followerUid", "targetUid"]
+    },
+    "Block": {
+      "title": "Block",
+      "description": "Block record preventing social interaction between two users",
+      "type": "object",
+      "properties": {
+        "blockerUid": { "type": "string" },
+        "blockedUid": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["blockerUid", "blockedUid"]
+    },
+    "Status": {
+      "title": "Status",
+      "description": "24-hour expiring Status update (photo, video up to 60s, or text) with privacy controls",
+      "type": "object",
+      "properties": {
+        "authorUid": { "type": "string" },
+        "authorName": { "type": "string" },
+        "authorPhoto": { "type": "string" },
+        "type": { "type": "string" },
+        "mediaUrl": { "type": "string" },
+        "thumbnailUrl": { "type": "string" },
+        "cloudinaryPublicId": { "type": "string" },
+        "cloudinaryResourceType": { "type": "string" },
+        "cloudinaryDeliveryType": { "type": "string" },
+        "caption": { "type": "string" },
+        "textContent": { "type": "string" },
+        "bgGradient": { "type": "string" },
+        "textStyle": { "type": "string" },
+        "durationSec": { "type": "number" },
+        "audioTrack": { "type": "object" },
+        "privacyMode": { "type": "string" },
+        "allowedUids": { "type": "array" },
+        "excludedUids": { "type": "array" },
+        "viewsCount": { "type": "number" },
+        "likesCount": { "type": "number" },
+        "createdAt": { "type": "string" },
+        "expiresAt": { "type": "string" }
+      },
+      "required": ["authorUid", "type", "privacyMode", "createdAt", "expiresAt"]
+    },
+    "StatusView": {
+      "title": "StatusView",
+      "description": "Unique view record per viewer per status (statusId_viewerUid)",
+      "type": "object",
+      "properties": {
+        "statusId": { "type": "string" },
+        "statusOwnerUid": { "type": "string" },
+        "viewerUid": { "type": "string" },
+        "viewerName": { "type": "string" },
+        "viewerPhoto": { "type": "string" },
+        "viewedAt": { "type": "string" },
+        "expiresAt": { "type": "string" }
+      },
+      "required": ["statusId", "statusOwnerUid", "viewerUid"]
+    },
+    "StatusLike": {
+      "title": "StatusLike",
+      "description": "Unique reaction per user per status (statusId_userUid)",
+      "type": "object",
+      "properties": {
+        "statusId": { "type": "string" },
+        "statusOwnerUid": { "type": "string" },
+        "userUid": { "type": "string" },
+        "userName": { "type": "string" },
+        "userPhoto": { "type": "string" },
+        "emoji": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "expiresAt": { "type": "string" }
+      },
+      "required": ["statusId", "statusOwnerUid", "userUid", "emoji"]
+    },
+    "StatusReply": {
+      "title": "StatusReply",
+      "description": "Private reply from a viewer to a status owner",
+      "type": "object",
+      "properties": {
+        "statusId": { "type": "string" },
+        "statusOwnerUid": { "type": "string" },
+        "senderUid": { "type": "string" },
+        "senderName": { "type": "string" },
+        "senderPhoto": { "type": "string" },
+        "message": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "expiresAt": { "type": "string" }
+      },
+      "required": ["statusId", "statusOwnerUid", "senderUid", "message"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "Social & Status reaction/reply notifications for users",
+      "type": "object",
+      "properties": {
+        "recipientUid": { "type": "string" },
+        "actorUid": { "type": "string" },
+        "actorName": { "type": "string" },
+        "actorPhoto": { "type": "string" },
+        "type": { "type": "string" },
+        "statusId": { "type": "string" },
+        "title": { "type": "string" },
+        "body": { "type": "string" },
+        "emoji": { "type": "string" },
+        "read": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "expiresAt": { "type": "string" }
+      },
+      "required": ["recipientUid", "actorUid", "type", "title", "read"]
     }
   },
   "firestore": {
@@ -215,6 +351,38 @@
     "/catalog_products/{productId}": {
       "schema": "CatalogProduct",
       "description": "Shopping catalog products collection"
+    },
+    "/friendships/{pairId}": {
+      "schema": "Friendship",
+      "description": "Friend requests and accepted friendships keyed by sorted minUid_maxUid"
+    },
+    "/follows/{followId}": {
+      "schema": "Follow",
+      "description": "Follow relationships keyed by followerUid_targetUid"
+    },
+    "/blocks/{blockId}": {
+      "schema": "Block",
+      "description": "User block records keyed by blockerUid_blockedUid"
+    },
+    "/statuses/{statusId}": {
+      "schema": "Status",
+      "description": "24-hour expiring Status updates"
+    },
+    "/status_views/{viewId}": {
+      "schema": "StatusView",
+      "description": "Unique view records per status and viewer"
+    },
+    "/status_likes/{likeId}": {
+      "schema": "StatusLike",
+      "description": "Unique emoji reactions per status and user"
+    },
+    "/status_replies/{replyId}": {
+      "schema": "StatusReply",
+      "description": "Private replies to Status updates"
+    },
+    "/notifications/{notificationId}": {
+      "schema": "Notification",
+      "description": "User notifications for status reactions and replies"
     }
   }
 }
