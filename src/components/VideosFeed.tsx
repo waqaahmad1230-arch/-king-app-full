@@ -34,6 +34,7 @@ import {
   subscribeUserLikeStatus, 
   recordUniqueVideoView 
 } from "../services/videoSocialService";
+import { deduplicateByKeys, isVideoPublished } from "../services/centralContentService";
 import LikedByModal from "./LikedByModal";
 import {
   applyVideoOpenGraphMeta,
@@ -127,7 +128,7 @@ export default function VideosFeed({
   onOpenCreatorProfile,
   onFullScreenChange,
 }: VideosFeedProps = {}) {
-  const { user: authUser } = useAuth();
+  const { user: authUser, openAuthModal } = useAuth();
   const [videos, setVideos] = useState<any[]>([]);
   const [activeCategory, setActiveCategory] = useState("All");
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
@@ -397,7 +398,10 @@ export default function VideosFeed({
     const unsub = onSnapshot(
       q,
       (snap) => {
-        const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+        const list = deduplicateByKeys(
+          snap.docs.map((d) => ({ id: d.id, ...d.data() })).filter(isVideoPublished),
+          (v: any) => [v.id, v.videoUrl || v.url || '']
+        );
         setVideos(list);
         try {
           const compact = list.map((v: any) => ({
@@ -471,7 +475,7 @@ export default function VideosFeed({
     if (!activeVideo?.id) return;
     const currentUser = authUser || auth.currentUser;
     if (!currentUser) {
-      alert("Please sign in to like KING videos! 👑");
+      openAuthModal('login');
       return;
     }
     if (isLiking) return;

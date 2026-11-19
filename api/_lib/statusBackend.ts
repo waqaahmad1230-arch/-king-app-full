@@ -85,12 +85,30 @@ export async function verifyFirebaseBearerToken(authHeader?: string | string[]):
 }
 
 function getCloudinaryCredentials() {
-  const apiKey = (process.env.CLOUDINARY_API_KEY || '').trim();
-  const apiSecret = (process.env.CLOUDINARY_API_SECRET || '').trim();
+  let cloudName = (process.env.CLOUDINARY_CLOUD_NAME || CLOUDINARY_CLOUD_NAME).trim() || CLOUDINARY_CLOUD_NAME;
+  let apiKey = (process.env.CLOUDINARY_API_KEY || '').trim();
+  let apiSecret = (process.env.CLOUDINARY_API_SECRET || '').trim();
+
+  if ((!apiKey || !apiSecret) && process.env.CLOUDINARY_URL) {
+    try {
+      const parsedUrl = new URL(process.env.CLOUDINARY_URL.trim());
+      if (parsedUrl.protocol === 'cloudinary:') {
+        if (!apiKey && parsedUrl.username) apiKey = decodeURIComponent(parsedUrl.username);
+        if (!apiSecret && parsedUrl.password) apiSecret = decodeURIComponent(parsedUrl.password);
+        if (parsedUrl.hostname && !process.env.CLOUDINARY_CLOUD_NAME) {
+          cloudName = parsedUrl.hostname;
+        }
+      }
+    } catch {
+      // Ignore malformed CLOUDINARY_URL; fall back to explicit missing-env 503
+    }
+  }
+
   return {
+    cloudName,
     apiKey,
     apiSecret,
-    configured: Boolean(apiKey && apiSecret),
+    configured: Boolean(cloudName && apiKey && apiSecret),
   };
 }
 
@@ -99,23 +117,27 @@ export function buildSignedStatusUploadPayload(params: {
   resourceType?: string;
   privacyMode?: string;
 }) {
-  const { apiKey, apiSecret, configured } = getCloudinaryCredentials();
+  const { cloudName, apiKey, apiSecret, configured } = getCloudinaryCredentials();
   const resourceType =
     params.resourceType === 'video' || params.resourceType === 'raw' ? params.resourceType : 'image';
   const isPublic = params.privacyMode === 'public';
   const deliveryType = isPublic ? ('upload' as const) : ('authenticated' as const);
 
   if (!configured) {
+    const missingEnv: string[] = [];
+    if (!cloudName) missingEnv.push('CLOUDINARY_CLOUD_NAME');
+    if (!apiKey) missingEnv.push('CLOUDINARY_API_KEY');
+    if (!apiSecret) missingEnv.push('CLOUDINARY_API_SECRET');
     return {
       ok: false as const,
       status: 503 as const,
       signed: false as const,
       code: 'CLOUDINARY_UNCONFIGURED',
-      cloudName: CLOUDINARY_CLOUD_NAME,
+      cloudName,
       folder: STATUS_CLOUDINARY_FOLDER,
       resourceType,
       deliveryType,
-      missingEnv: ['CLOUDINARY_API_KEY', 'CLOUDINARY_API_SECRET'],
+      missingEnv,
       message:
         'Signed Status upload credentials (CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET) are not configured on the server.',
     };
@@ -134,7 +156,7 @@ export function buildSignedStatusUploadPayload(params: {
     status: 200 as const,
     signed: true as const,
     mode: 'signed' as const,
-    cloudName: CLOUDINARY_CLOUD_NAME,
+    cloudName,
     apiKey,
     timestamp,
     signature,
@@ -150,11 +172,11 @@ export function signAuthenticatedCloudinaryUrl(
   deliveryType: string
 ): string | null {
   if (!publicId || deliveryType !== 'authenticated') return null;
-  const { apiKey, apiSecret, configured } = getCloudinaryCredentials();
+  const { cloudName, apiKey, apiSecret, configured } = getCloudinaryCredentials();
   if (!configured) return null;
 
   cloudinary.config({
-    cloud_name: CLOUDINARY_CLOUD_NAME,
+    cloud_name: cloudName,
     api_key: apiKey,
     api_secret: apiSecret,
     secure: true,
@@ -168,23 +190,28 @@ export function signAuthenticatedCloudinaryUrl(
   });
 }
 
-export function signAuthenticatedVideoThumbnailUrl(publicId: string): string | null {
+export function signAuthenticatedVideoThumbnailUrl(
+  publicId: string,
+  startOffsetSec = 0
+): string | null {
   if (!publicId) return null;
-  const { apiKey, apiSecret, configured } = getCloudinaryCredentials();
+  const { cloudName, apiKey, apiSecret, configured } = getCloudinaryCredentials();
   if (!configured) return null;
 
   cloudinary.config({
-    cloud_name: CLOUDINARY_CLOUD_NAME,
+    cloud_name: cloudName,
     api_key: apiKey,
     api_secret: apiSecret,
     secure: true,
   });
 
+  const safeOffset = String(Math.max(0, Math.floor(Number(startOffsetSec) || 0)));
+
   return cloudinary.url(publicId, {
     resource_type: 'video',
     type: 'authenticated',
     format: 'jpg',
-    transformation: [{ start_offset: '0', width: 480, height: 800, crop: 'fill' }],
+    transformation: [{ start_offset: safeOffset, width: 480, height: 800, crop: 'fill' }],
     sign_url: true,
     secure: true,
   });
@@ -197,7 +224,7 @@ async function destroyCloudinaryAssetWithRetry(
   maxAttempts = 2
 ): Promise<{ status: 'deleted' | 'skipped_missing_secret' | 'failed'; error?: string }> {
   if (!publicId) return { status: 'deleted' };
-  const { apiKey, apiSecret, configured } = getCloudinaryCredentials();
+  const { cloudName, apiKey, apiSecret, configured } = getCloudinaryCredentials();
   if (!configured) {
     return {
       status: 'skipped_missing_secret',
@@ -206,7 +233,7 @@ async function destroyCloudinaryAssetWithRetry(
   }
 
   cloudinary.config({
-    cloud_name: CLOUDINARY_CLOUD_NAME,
+    cloud_name: cloudName,
     api_key: apiKey,
     api_secret: apiSecret,
     secure: true,
@@ -279,6 +306,28 @@ export interface RawStatusDoc {
     presetId?: string;
     audioUrl?: string;
     cloudinaryPublicId?: string;
+  };
+  whatsappCta?: {
+    enabled: boolean;
+    url: string;
+    label: string;
+  };
+  videoEdits?: {
+    trimStartSec: number;
+    trimEndSec: number;
+    muted: boolean;
+    overlays: Array<{
+      id: string;
+      kind: 'text' | 'sticker';
+      content: string;
+      x: number;
+      y: number;
+      scale: number;
+      font?: string;
+      color?: string;
+      align?: 'left' | 'center' | 'right';
+      bgMode?: 'none' | 'dark' | 'accent';
+    }>;
   };
   privacyMode: 'public' | 'friends' | 'followers' | 'selected' | 'except' | 'only_me';
   allowedUids?: string[];
@@ -407,6 +456,16 @@ export async function handleFetchAuthorizedStatusFeed(callerUid: string) {
         textStyle: data.textStyle || 'classic',
         durationSec: Number(data.durationSec) || 0,
         audioTrack: data.audioTrack || { mode: 'original', label: 'Original Sound' },
+        ...(data.whatsappCta?.enabled && data.whatsappCta?.url
+          ? {
+              whatsappCta: {
+                enabled: true,
+                url: String(data.whatsappCta.url).slice(0, 300),
+                label: String(data.whatsappCta.label || 'Chat on WhatsApp').slice(0, 40),
+              },
+            }
+          : {}),
+        ...(data.videoEdits ? { videoEdits: data.videoEdits } : {}),
         privacyMode: data.privacyMode || 'friends',
         allowedUids: Array.isArray(data.allowedUids) ? data.allowedUids : [],
         excludedUids: Array.isArray(data.excludedUids) ? data.excludedUids : [],
@@ -441,7 +500,10 @@ export async function handleFetchAuthorizedStatusFeed(callerUid: string) {
             if (resType === 'image' && signedMedia) {
               normalized.thumbnailUrl = signedMedia;
             } else if (resType === 'video') {
-              const signedThumb = signAuthenticatedVideoThumbnailUrl(normalized.cloudinaryPublicId);
+              const signedThumb = signAuthenticatedVideoThumbnailUrl(
+                normalized.cloudinaryPublicId,
+                normalized.videoEdits?.trimStartSec || 0
+              );
               if (signedThumb) normalized.thumbnailUrl = signedThumb;
             }
           }

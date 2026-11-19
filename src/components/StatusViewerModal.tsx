@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   ChevronUp,
   Eye,
@@ -7,6 +8,7 @@ import {
   Music,
   Pause,
   Plus,
+  RefreshCw,
   Send,
   Trash2,
   Volume2,
@@ -34,6 +36,7 @@ import {
   StatusViewRecord,
 } from '../types/social';
 import { StatusRoyaltyFreePlayer } from '../utils/statusAudioEngine';
+import { getOverlayTextDisplayStyle } from '../utils/statusCanvasExport';
 import { getStatusVideoDeliveryUrl, MAX_STATUS_VIDEO_SECONDS } from '../utils/statusMediaUtils';
 import CreatorAvatar from './CreatorAvatar';
 
@@ -88,6 +91,15 @@ export default function StatusViewerModal({
   const [volume, setVolume] = useState<number>(0.85);
   const [showVolumeSlider, setShowVolumeSlider] = useState<boolean>(false);
   const [useRawVideoFallback, setUseRawVideoFallback] = useState<boolean>(false);
+  const [mediaLoadState, setMediaLoadState] = useState<'loading' | 'ready' | 'error'>(() => {
+    const grp = groups[safeInitialGroup];
+    if (!grp) return 'ready';
+    const firstUnseen = grp.statuses.findIndex((s) => !s.viewedByMe);
+    const st = grp.statuses[firstUnseen >= 0 ? firstUnseen : 0];
+    return st && st.type !== 'text' && st.mediaUrl ? 'loading' : 'ready';
+  });
+  const [mediaErrorText, setMediaErrorText] = useState<string>('');
+  const [retryNonce, setRetryNonce] = useState<number>(0);
 
   // Reply & Reaction states
   const [replyText, setReplyText] = useState<string>('');
@@ -102,10 +114,13 @@ export default function StatusViewerModal({
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<boolean>(false);
 
+  const imgRef = useRef<HTMLImageElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const customAudioElRef = useRef<HTMLAudioElement | null>(null);
   const royaltyPlayerRef = useRef<StatusRoyaltyFreePlayer | null>(null);
   const viewedSessionRef = useRef<Set<string>>(new Set());
+  const initialSeekDoneRef = useRef<string | null>(null);
+  const advancedSlideKeyRef = useRef<string | null>(null);
 
   // Gesture refs
   const pointerDownPosRef = useRef<{ x: number; y: number; time: number } | null>(null);
@@ -116,10 +131,66 @@ export default function StatusViewerModal({
   const activeStatus: StatusRecord | undefined = activeGroup?.statuses?.[slideIdx];
   const isOwner = Boolean(currentUid && activeStatus && currentUid === activeStatus.authorUid);
 
+  const cleanupMediaResources = useCallback(() => {
+    if (holdTimerRef.current) {
+      clearTimeout(holdTimerRef.current);
+      holdTimerRef.current = null;
+    }
+    isHoldingRef.current = false;
+    pointerDownPosRef.current = null;
+    royaltyPlayerRef.current?.stop();
+
+    const vid = videoRef.current;
+    if (vid) {
+      try {
+        vid.pause();
+        vid.removeAttribute('src');
+        vid.load();
+      } catch {
+        // Ignore teardown issues on unmounted video element
+      }
+    }
+
+    const aud = customAudioElRef.current;
+    if (aud) {
+      try {
+        aud.pause();
+        aud.removeAttribute('src');
+        aud.load();
+      } catch {
+        // Ignore teardown issues on unmounted audio element
+      }
+    }
+  }, []);
+
+  const handleSafeClose = useCallback(() => {
+    cleanupMediaResources();
+    onClose();
+  }, [cleanupMediaResources, onClose]);
+
+  // Lock background page scroll + Escape key close + clean unmount teardown
+  useEffect(() => {
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') {
+        handleSafeClose();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      window.removeEventListener('keydown', onKeyDown);
+      cleanupMediaResources();
+    };
+  }, [cleanupMediaResources, handleSafeClose]);
+
   // Keep indices valid if groups update (e.g., after delete or expiry)
   useEffect(() => {
     if (groups.length === 0) {
-      onClose();
+      handleSafeClose();
       return;
     }
     if (groupIdx >= groups.length) {
@@ -128,14 +199,23 @@ export default function StatusViewerModal({
     } else if (groups[groupIdx] && slideIdx >= groups[groupIdx].statuses.length) {
       setSlideIdx(Math.max(0, groups[groupIdx].statuses.length - 1));
     }
-  }, [groups, groupIdx, slideIdx, onClose]);
+  }, [groups, groupIdx, slideIdx, handleSafeClose]);
 
   useEffect(() => {
     setProgress(0);
     setUseRawVideoFallback(false);
     setConfirmDeleteId(null);
     setShowInsights(false);
-  }, [activeStatus?.id]);
+    setMediaErrorText('');
+    initialSeekDoneRef.current = null;
+    advancedSlideKeyRef.current = null;
+
+    if (!activeStatus || activeStatus.type === 'text' || !activeStatus.mediaUrl) {
+      setMediaLoadState('ready');
+    } else {
+      setMediaLoadState('loading');
+    }
+  }, [activeStatus?.id, activeStatus?.type, activeStatus?.mediaUrl]);
 
   // Unique view recording (non-owner only)
   useEffect(() => {
@@ -172,9 +252,9 @@ export default function StatusViewerModal({
     };
   }, [isOwner, activeStatus?.id, currentUid]);
 
-  const goNextSlide = () => {
+  const goNextSlide = useCallback(() => {
     if (!activeGroup) {
-      onClose();
+      handleSafeClose();
       return;
     }
     if (slideIdx + 1 < activeGroup.statuses.length) {
@@ -190,10 +270,10 @@ export default function StatusViewerModal({
       setProgress(0);
       return;
     }
-    onClose();
-  };
+    handleSafeClose();
+  }, [activeGroup, slideIdx, groupIdx, groups, handleSafeClose]);
 
-  const goPrevSlide = () => {
+  const goPrevSlide = useCallback(() => {
     if (slideIdx > 0) {
       setSlideIdx(slideIdx - 1);
       setProgress(0);
@@ -207,25 +287,60 @@ export default function StatusViewerModal({
     } else {
       setProgress(0);
     }
-  };
+  }, [slideIdx, groupIdx, groups]);
+
+  const goNextSlideRef = useRef(goNextSlide);
+  goNextSlideRef.current = goNextSlide;
+
+  // Bounded media load watchdog + cached image resolution (prevents infinite spinner)
+  useEffect(() => {
+    if (!activeStatus || activeStatus.type === 'text' || !activeStatus.mediaUrl) {
+      setMediaLoadState('ready');
+      return;
+    }
+
+    if (activeStatus.type === 'image' && imgRef.current?.complete && imgRef.current.naturalWidth > 0) {
+      setMediaLoadState('ready');
+      return;
+    }
+
+    if (activeStatus.type === 'video' && videoRef.current && videoRef.current.readyState >= 2) {
+      setMediaLoadState('ready');
+      return;
+    }
+
+    if (mediaLoadState !== 'loading') return;
+
+    const timer = window.setTimeout(() => {
+      setMediaLoadState((cur) => {
+        if (cur === 'loading') {
+          setMediaErrorText('Media took too long to load. Tap Retry or skip.');
+          return 'error';
+        }
+        return cur;
+      });
+    }, 12000);
+
+    return () => window.clearTimeout(timer);
+  }, [activeStatus?.id, activeStatus?.type, activeStatus?.mediaUrl, mediaLoadState, retryNonce]);
 
   // Immediately advance/close if activeStatus hits its exact 24h expiry while open
   useEffect(() => {
     if (!activeStatus) return;
     const msLeft = activeStatus.expiresAtMs - Date.now();
     if (msLeft <= 0) {
-      goNextSlide();
+      goNextSlideRef.current();
       return;
     }
     const timer = window.setTimeout(() => {
-      goNextSlide();
+      goNextSlideRef.current();
     }, Math.min(60_000, msLeft + 40));
     return () => window.clearTimeout(timer);
   }, [activeStatus?.id, activeStatus?.expiresAtMs, groupIdx, slideIdx]);
 
-  // Timer for Image & Text statuses
+  // Timer for Image & Text statuses (waits for mediaLoadState === 'ready' and never loops)
   useEffect(() => {
-    if (!activeStatus || activeStatus.type === 'video') return;
+    if (!activeStatus || activeStatus.type === 'video' || mediaLoadState !== 'ready') return;
 
     const totalMs = Math.max(2500, Math.min(15000, (activeStatus.durationSec || 6) * 1000));
     let elapsedMs = (progress / 100) * totalMs;
@@ -238,7 +353,7 @@ export default function StatusViewerModal({
         const pct = Math.min(100, (elapsedMs / totalMs) * 100);
         setProgress(pct);
         if (pct >= 100) {
-          goNextSlide();
+          goNextSlideRef.current();
           return;
         }
       }
@@ -248,21 +363,40 @@ export default function StatusViewerModal({
 
     rafId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafId);
-  }, [activeStatus?.id, activeStatus?.type, isPaused, showInsights]);
+  }, [activeStatus?.id, activeStatus?.type, isPaused, showInsights, mediaLoadState]);
 
   // Video play/pause & volume sync
   useEffect(() => {
     const vid = videoRef.current;
     if (!vid || activeStatus?.type !== 'video') return;
     vid.volume = volume;
-    vid.muted = isMuted || activeStatus?.audioTrack?.mode === 'royalty_free' || activeStatus?.audioTrack?.mode === 'custom_audio';
+    vid.muted =
+      isMuted ||
+      Boolean(activeStatus?.videoEdits?.muted) ||
+      activeStatus?.audioTrack?.mode === 'royalty_free' ||
+      activeStatus?.audioTrack?.mode === 'custom_audio';
 
     if (isPaused || showInsights) {
       vid.pause();
     } else {
-      vid.play().catch(() => {});
+      vid.play().catch(() => {
+        if (!vid.muted) {
+          vid.muted = true;
+          setIsMuted(true);
+          vid.play().catch(() => {});
+        }
+      });
     }
-  }, [activeStatus?.id, activeStatus?.type, activeStatus?.audioTrack?.mode, isPaused, showInsights, volume, isMuted]);
+  }, [
+    activeStatus?.id,
+    activeStatus?.type,
+    activeStatus?.audioTrack?.mode,
+    activeStatus?.videoEdits?.muted,
+    isPaused,
+    showInsights,
+    volume,
+    isMuted,
+  ]);
 
   // Soundscape & Custom Audio playback sync
   useEffect(() => {
@@ -351,7 +485,7 @@ export default function StatusViewerModal({
 
     // Swipe down to close
     if (dy > 90 && Math.abs(dy) > Math.abs(dx)) {
-      onClose();
+      handleSafeClose();
       return;
     }
 
@@ -363,7 +497,7 @@ export default function StatusViewerModal({
           setSlideIdx(0);
           setProgress(0);
         } else {
-          onClose();
+          handleSafeClose();
         }
       } else if (groupIdx > 0) {
         setGroupIdx(groupIdx - 1);
@@ -482,13 +616,18 @@ export default function StatusViewerModal({
       ? 'font-mono font-bold'
       : 'font-bold';
 
-  return (
-    <div className="fixed inset-0 z-50 bg-[#04070f] flex items-center justify-center select-none">
+  const modalMarkup = (
+    <div className="fixed inset-0 z-[150] bg-[#04070f] flex items-center justify-center select-none">
       <audio ref={customAudioElRef} loop className="hidden" />
 
       <div className="relative w-full h-full max-w-md mx-auto flex flex-col bg-[#060a14] sm:rounded-3xl sm:max-h-[92vh] sm:border sm:border-slate-800 overflow-hidden shadow-2xl">
-        {/* Top Segmented Progress Bars + Header Overlay */}
-        <div className="absolute top-0 left-0 right-0 z-30 bg-gradient-to-b from-black/85 via-black/45 to-transparent px-3 pt-3 pb-6">
+        {/* Top Segmented Progress Bars + Header Overlay (z-40 above stage, always closes cleanly) */}
+        <div
+          onPointerDown={(e) => e.stopPropagation()}
+          onPointerUp={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+          className="absolute top-0 left-0 right-0 z-40 bg-gradient-to-b from-black/85 via-black/45 to-transparent px-3 pt-3 pb-6"
+        >
           <div className="flex gap-1 mb-3">
             {activeGroup.statuses.map((st, idx) => {
               const barPct = idx < slideIdx ? 100 : idx === slideIdx ? progress : 0;
@@ -588,7 +727,7 @@ export default function StatusViewerModal({
                 type="button"
                 onClick={(e) => {
                   e.stopPropagation();
-                  onClose();
+                  handleSafeClose();
                 }}
                 className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-full text-white hover:bg-white/15 transition cursor-pointer"
                 aria-label="Close Status Viewer"
@@ -614,9 +753,19 @@ export default function StatusViewerModal({
           {activeStatus.type === 'image' && (
             activeStatus.mediaUrl ? (
               <img
+                ref={imgRef}
+                key={`${activeStatus.id}_${retryNonce}`}
                 src={activeStatus.mediaUrl}
                 alt={activeStatus.caption || 'KING Status'}
-                className="w-full h-full object-contain bg-black"
+                referrerPolicy="no-referrer"
+                onLoad={() => setMediaLoadState('ready')}
+                onError={() => {
+                  setMediaErrorText('Failed to load Status photo.');
+                  setMediaLoadState('error');
+                }}
+                className={`w-full h-full object-contain bg-black transition-opacity duration-150 ${
+                  mediaLoadState === 'error' ? 'opacity-0' : 'opacity-100'
+                }`}
                 draggable={false}
               />
             ) : (
@@ -635,27 +784,84 @@ export default function StatusViewerModal({
             resolvedVideoSrc ? (
               <video
                 ref={videoRef}
-                key={`${activeStatus.id}_${useRawVideoFallback ? 'raw' : 'opt'}`}
+                key={`${activeStatus.id}_${useRawVideoFallback ? 'raw' : 'opt'}_${retryNonce}`}
                 src={resolvedVideoSrc}
                 poster={activeStatus.thumbnailUrl || undefined}
                 playsInline
                 autoPlay
-                className="w-full h-full object-contain bg-black"
-                onTimeUpdate={(e) => {
-                  const v = e.currentTarget;
-                  const cappedDur = Math.min(MAX_STATUS_VIDEO_SECONDS, v.duration || activeStatus.durationSec || 6);
-                  if (cappedDur > 0) {
-                    setProgress(Math.min(100, (v.currentTime / cappedDur) * 100));
-                  }
-                  if (v.currentTime >= MAX_STATUS_VIDEO_SECONDS) {
-                    v.pause();
-                    goNextSlide();
+                className={`w-full h-full object-contain bg-black transition-opacity duration-150 ${
+                  mediaLoadState === 'error' ? 'opacity-0' : 'opacity-100'
+                }`}
+                onLoadedMetadata={(e) => {
+                  const trimStart = activeStatus.videoEdits?.trimStartSec || 0;
+                  const loadKey = `${activeStatus.id}_${useRawVideoFallback}_${retryNonce}`;
+                  if (trimStart > 0 && initialSeekDoneRef.current !== loadKey) {
+                    initialSeekDoneRef.current = loadKey;
+                    try {
+                      e.currentTarget.currentTime = trimStart;
+                    } catch {
+                      // Ignore pre-seek errors on streams lacking range support
+                    }
                   }
                 }}
-                onEnded={goNextSlide}
+                onLoadedData={(e) => {
+                  setMediaLoadState('ready');
+                  if (!isPaused && !showInsights) {
+                    const vid = e.currentTarget;
+                    vid.play().catch(() => {
+                      if (!vid.muted) {
+                        vid.muted = true;
+                        setIsMuted(true);
+                        vid.play().catch(() => {});
+                      }
+                    });
+                  }
+                }}
+                onCanPlay={() => {
+                  setMediaLoadState('ready');
+                }}
+                onPlaying={() => {
+                  setMediaLoadState('ready');
+                }}
+                onTimeUpdate={(e) => {
+                  const v = e.currentTarget;
+                  if (v.seeking) return;
+                  const trimStart = activeStatus.videoEdits?.trimStartSec || 0;
+                  const rawTrimEnd = activeStatus.videoEdits?.trimEndSec || 0;
+                  const effectiveEnd =
+                    rawTrimEnd > trimStart
+                      ? Math.min(trimStart + MAX_STATUS_VIDEO_SECONDS, rawTrimEnd)
+                      : Math.min(MAX_STATUS_VIDEO_SECONDS, v.duration || activeStatus.durationSec || 6);
+                  const clipDuration = Math.max(0.5, effectiveEnd - trimStart);
+
+                  const elapsed = Math.max(0, v.currentTime - trimStart);
+                  setProgress(Math.min(100, (elapsed / clipDuration) * 100));
+
+                  const slideKey = `${activeStatus.id}_${retryNonce}`;
+                  if (
+                    ((rawTrimEnd > trimStart && v.currentTime >= effectiveEnd) ||
+                      elapsed >= MAX_STATUS_VIDEO_SECONDS) &&
+                    advancedSlideKeyRef.current !== slideKey
+                  ) {
+                    advancedSlideKeyRef.current = slideKey;
+                    v.pause();
+                    goNextSlideRef.current();
+                  }
+                }}
+                onEnded={() => {
+                  const slideKey = `${activeStatus.id}_${retryNonce}`;
+                  if (advancedSlideKeyRef.current !== slideKey) {
+                    advancedSlideKeyRef.current = slideKey;
+                    goNextSlideRef.current();
+                  }
+                }}
                 onError={() => {
-                  if (!useRawVideoFallback && activeStatus.mediaUrl !== resolvedVideoSrc) {
+                  if (!useRawVideoFallback && activeStatus.mediaUrl && activeStatus.mediaUrl !== resolvedVideoSrc) {
                     setUseRawVideoFallback(true);
+                    setMediaLoadState('loading');
+                  } else {
+                    setMediaErrorText('Failed to load Status video.');
+                    setMediaLoadState('error');
                   }
                 }}
               />
@@ -671,6 +877,85 @@ export default function StatusViewerModal({
             )
           )}
 
+          {/* Bounded Loading Indicator (Only Shown While Fetching Active Media) */}
+          {mediaLoadState === 'loading' && activeStatus.mediaUrl && (
+            <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2.5 bg-black/55 pointer-events-none">
+              <div className="w-9 h-9 rounded-full border-2 border-white/25 border-t-blue-400 animate-spin" />
+              <span className="text-xs font-semibold text-slate-200">Loading status...</span>
+            </div>
+          )}
+
+          {/* Media Failure + Retry Fallback Overlay (Never Spins Forever) */}
+          {mediaLoadState === 'error' && (
+            <div
+              onPointerDown={(e) => e.stopPropagation()}
+              onPointerUp={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
+              className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 px-6 text-center bg-black/85"
+            >
+              <p className="text-sm font-black text-white">Couldn&apos;t load Status media</p>
+              <p className="text-xs text-slate-300 max-w-xs">
+                {mediaErrorText || 'Network connection interrupted or media unavailable.'}
+              </p>
+              <div className="flex items-center gap-2.5 pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUseRawVideoFallback(false);
+                    setMediaErrorText('');
+                    setMediaLoadState('loading');
+                    setRetryNonce((n) => n + 1);
+                  }}
+                  className="min-h-[42px] px-4 rounded-xl bg-blue-500 hover:bg-blue-400 text-white text-xs font-black flex items-center gap-1.5 cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" /> Retry
+                </button>
+                <button
+                  type="button"
+                  onClick={goNextSlide}
+                  className="min-h-[42px] px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold cursor-pointer"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Render Video Overlays (Text & Stickers saved from Editor) */}
+          {activeStatus.type === 'video' &&
+            Array.isArray(activeStatus.videoEdits?.overlays) &&
+            activeStatus.videoEdits.overlays.map((ov, ovIndex) => (
+              <div
+                key={ov.id}
+                className="absolute pointer-events-none select-none"
+                style={{
+                  left: `${ov.x * 100}%`,
+                  top: `${ov.y * 100}%`,
+                  zIndex: 15 + ovIndex,
+                  transform: `translate(-50%, -50%) rotate(${ov.rotation || 0}deg) scale(${ov.scale || 1})`,
+                }}
+              >
+                {ov.kind === 'sticker' ? (
+                  <span className="text-4xl leading-none drop-shadow-lg">{ov.content}</span>
+                ) : (
+                  <div
+                    className={`px-3 py-1.5 rounded-xl max-w-[260px] whitespace-pre-wrap break-words text-lg leading-snug ${
+                      ov.font === 'display' ? 'uppercase tracking-wider' : ''
+                    } ${
+                      ov.align === 'left'
+                        ? 'text-left'
+                        : ov.align === 'right'
+                        ? 'text-right'
+                        : 'text-center'
+                    }`}
+                    style={getOverlayTextDisplayStyle(ov)}
+                  >
+                    {ov.content}
+                  </div>
+                )}
+              </div>
+            ))}
+
           {activeStatus.type === 'text' && (
             <div className="px-8 text-center max-w-sm">
               <p className={`text-2xl text-white leading-relaxed drop-shadow-lg break-words ${textStyleClass}`}>
@@ -679,12 +964,31 @@ export default function StatusViewerModal({
             </div>
           )}
 
-          {/* Optional Caption Overlay */}
-          {activeStatus.caption && activeStatus.type !== 'text' && (
-            <div className="absolute bottom-24 left-4 right-4 z-20 pointer-events-none flex justify-center">
-              <p className="bg-black/70 backdrop-blur-md text-white text-xs sm:text-sm font-medium px-4 py-2 rounded-2xl border border-white/10 text-center max-w-sm">
-                {activeStatus.caption}
-              </p>
+          {/* Optional Caption + Clickable WhatsApp Button */}
+          {(activeStatus.caption || (activeStatus.whatsappCta?.enabled && activeStatus.whatsappCta?.url)) && (
+            <div className="absolute bottom-28 left-4 right-4 z-30 flex flex-col items-center gap-2 pointer-events-none">
+              {activeStatus.caption && activeStatus.type !== 'text' && (
+                <p className="bg-black/70 backdrop-blur-md text-white text-xs sm:text-sm font-medium px-4 py-2 rounded-2xl border border-white/10 text-center max-w-sm">
+                  {activeStatus.caption}
+                </p>
+              )}
+              {activeStatus.whatsappCta?.enabled && activeStatus.whatsappCta?.url && (
+                <a
+                  href={activeStatus.whatsappCta.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onPointerUp={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setIsPaused(true);
+                  }}
+                  className="pointer-events-auto inline-flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-black shadow-xl border border-white/20 transition active:scale-95"
+                >
+                  <MessageCircle className="w-4 h-4 fill-current shrink-0" />
+                  <span>{activeStatus.whatsappCta.label || 'Chat on WhatsApp'}</span>
+                </a>
+              )}
             </div>
           )}
         </div>
@@ -717,7 +1021,7 @@ export default function StatusViewerModal({
               <button
                 type="button"
                 onClick={() => {
-                  onClose();
+                  handleSafeClose();
                   onOpenAddStatus();
                 }}
                 className="min-h-[44px] px-3 rounded-2xl bg-cyan-500 hover:bg-cyan-400 text-black text-xs font-black flex items-center gap-1 cursor-pointer shrink-0"
@@ -897,4 +1201,9 @@ export default function StatusViewerModal({
       </div>
     </div>
   );
+
+  if (typeof document !== 'undefined') {
+    return createPortal(modalMarkup, document.body);
+  }
+  return modalMarkup;
 }

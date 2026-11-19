@@ -1,5 +1,10 @@
 import { auth } from '../firebase';
-import { StatusCloudinaryDeliveryType, StatusPrivacyMode } from '../types/social';
+import {
+  StatusCloudinaryDeliveryType,
+  StatusPrivacyMode,
+  StatusWhatsAppCta,
+} from '../types/social';
+import { cleanWhatsAppDigits } from './videoShareUtils';
 
 export const MAX_STATUS_VIDEO_SECONDS = 60;
 export const MAX_STATUS_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -7,6 +12,68 @@ export const MAX_STATUS_VIDEO_BYTES = 50 * 1024 * 1024;
 export const MAX_STATUS_AUDIO_BYTES = 15 * 1024 * 1024;
 export const STATUS_CLOUDINARY_FOLDER = 'king_status';
 export const STATUS_CLOUD_NAME = 'xb0o3xwi';
+
+const ALLOWED_WHATSAPP_HOSTS = new Set(['wa.me', 'api.whatsapp.com', 'chat.whatsapp.com', 'www.wa.me']);
+
+/**
+ * Normalizes a phone number or WhatsApp URL into a safe, clickable WhatsApp link.
+ * Rejects arbitrary non-WhatsApp URLs to protect viewers.
+ */
+export function normalizeStatusWhatsAppCta(params: {
+  enabled: boolean;
+  phoneOrLink: string;
+  label?: string;
+}): {
+  valid: boolean;
+  cta?: StatusWhatsAppCta;
+  error?: string;
+} {
+  const raw = String(params.phoneOrLink || '').trim();
+  const cleanLabel = String(params.label || 'Chat on WhatsApp').trim().slice(0, 40) || 'Chat on WhatsApp';
+
+  if (!params.enabled || !raw) {
+    return { valid: true, cta: undefined };
+  }
+
+  let normalizedUrl = '';
+  const lower = raw.toLowerCase();
+
+  if (lower.startsWith('whatsapp://')) {
+    normalizedUrl = raw.slice(0, 300);
+  } else if (lower.startsWith('http://') || lower.startsWith('https://')) {
+    try {
+      const parsed = new URL(raw);
+      if (!ALLOWED_WHATSAPP_HOSTS.has(parsed.hostname.toLowerCase())) {
+        return {
+          valid: false,
+          error: 'Enter a valid WhatsApp phone number or wa.me / api.whatsapp.com link.',
+        };
+      }
+      parsed.protocol = 'https:';
+      normalizedUrl = parsed.toString().slice(0, 300);
+    } catch {
+      return { valid: false, error: 'Invalid WhatsApp link format.' };
+    }
+  } else {
+    const digits = cleanWhatsAppDigits(raw);
+    if (!digits || digits.length < 7 || digits.length > 15) {
+      return {
+        valid: false,
+        error: 'Enter a valid WhatsApp number with country code (7–15 digits) or wa.me link.',
+      };
+    }
+    normalizedUrl = `https://wa.me/${digits}`;
+  }
+
+  return {
+    valid: true,
+    cta: {
+      enabled: true,
+      url: normalizedUrl,
+      label: cleanLabel,
+    },
+  };
+}
 
 export interface StatusUploadResult {
   secureUrl: string;
@@ -53,7 +120,7 @@ export async function readMediaDurationSeconds(file: File, kind: 'video' | 'audi
   });
 }
 
-export async function generateStatusVideoPosterDataUrl(file: File): Promise<string> {
+export async function generateStatusVideoPosterDataUrl(file: File, targetTimeSec = 0): Promise<string> {
   return new Promise((resolve) => {
     const video = document.createElement('video');
     const objectUrl = URL.createObjectURL(file);
@@ -65,7 +132,12 @@ export async function generateStatusVideoPosterDataUrl(file: File): Promise<stri
     const cleanup = () => URL.revokeObjectURL(objectUrl);
 
     video.onloadedmetadata = () => {
-      video.currentTime = Math.min(0.5, Math.max(0, (video.duration || 1) * 0.1));
+      const dur = Number.isFinite(video.duration) ? video.duration : 1;
+      const seekTarget =
+        targetTimeSec > 0
+          ? Math.min(Math.max(0, dur - 0.1), targetTimeSec)
+          : Math.min(0.5, Math.max(0, dur * 0.1));
+      video.currentTime = seekTarget;
     };
 
     video.onseeked = () => {
@@ -311,6 +383,57 @@ export function getStatusVideoDeliveryUrl(
 }
 
 /**
+ * Resolves the portrait card background thumbnail URL for a status.
+ * Preserves data URIs and HMAC-signed authenticated Cloudinary URLs untouched so signatures stay valid.
+ */
+export function getStatusCardThumbnailUrl(status: {
+  type: 'image' | 'video' | 'text';
+  mediaUrl?: string;
+  thumbnailUrl?: string;
+  cloudinaryDeliveryType?: StatusCloudinaryDeliveryType;
+}): string {
+  if (!status || status.type === 'text') return '';
+  const candidate = (status.thumbnailUrl || '').trim();
+  const media = (status.mediaUrl || '').trim();
+  const raw = candidate || (status.type === 'image' ? media : '');
+
+  if (raw) {
+    if (
+      raw.startsWith('data:') ||
+      status.cloudinaryDeliveryType === 'authenticated' ||
+      raw.includes('/s--')
+    ) {
+      return raw;
+    }
+    if (
+      status.type === 'image' &&
+      raw.includes(`res.cloudinary.com/${STATUS_CLOUD_NAME}/image/upload/`)
+    ) {
+      const [base, rest] = raw.split('/image/upload/');
+      if (rest && !rest.startsWith('w_') && !rest.startsWith('q_auto')) {
+        return `${base}/image/upload/w_360,h_560,c_fill,q_auto:good,f_auto/${rest}`;
+      }
+    }
+    return raw;
+  }
+
+  if (
+    status.type === 'video' &&
+    media &&
+    status.cloudinaryDeliveryType !== 'authenticated' &&
+    !media.includes('/s--') &&
+    media.includes(`res.cloudinary.com/${STATUS_CLOUD_NAME}/video/upload/`)
+  ) {
+    return media
+      .split('?')[0]
+      .replace(/\.[^/.]+$/, '.jpg')
+      .replace('/video/upload/', '/video/upload/so_0,w_360,h_560,c_fill,q_auto:good/');
+  }
+
+  return '';
+}
+
+/**
  * Uploads Status media exclusively into Cloudinary folder `king_status/` without altering
  * KING Shop (`cloudinaryUpload.ts`) or KINGTUBE (`kingtube`) upload behavior.
  */
@@ -341,7 +464,21 @@ export async function uploadStatusMediaToCloudinary(
     body: JSON.stringify({ resourceType, privacyMode }),
   });
 
-  const signMeta: any = await signRes.json().catch(() => ({}));
+  const contentType = signRes.headers.get('content-type') || '';
+  const rawSignText = await signRes.text().catch(() => '');
+  let signMeta: any = {};
+  if (rawSignText) {
+    try {
+      signMeta = JSON.parse(rawSignText);
+    } catch {
+      throw new Error(
+        `Signed Status upload endpoint (/api/status/sign-upload) returned non-JSON response (${
+          contentType || 'unknown'
+        }, HTTP ${signRes.status}). Deploy latest /api/status/* serverless functions.`
+      );
+    }
+  }
+
   if (
     !signRes.ok ||
     !signMeta?.signed ||
@@ -352,7 +489,7 @@ export async function uploadStatusMediaToCloudinary(
     throw new Error(
       signMeta?.message ||
         signMeta?.error ||
-        `Signed Status upload is unavailable (HTTP ${signRes.status}). Server Cloudinary credentials are required.`
+        `Signed Status upload failed (HTTP ${signRes.status}).`
     );
   }
 

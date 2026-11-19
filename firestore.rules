@@ -6,9 +6,11 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    // Single Authorized Super Admin Email
+    // Single Authorized Super Admin Email (requires verified email claim)
     function isSuperAdmin() {
-      return request.auth != null && request.auth.token.email == "waqaahmad1230@gmail.com";
+      return request.auth != null &&
+        request.auth.token.email == "waqaahmad1230@gmail.com" &&
+        request.auth.token.email_verified == true;
     }
 
     function isAdmin() {
@@ -111,6 +113,37 @@ service cloud.firestore {
         (!('cloudinaryPublicId' in track) || (track.cloudinaryPublicId is string && track.cloudinaryPublicId.size() <= 500));
     }
 
+    // Validate optional WhatsApp CTA button on a Status
+    function isValidWhatsAppCta(cta) {
+      return cta is map &&
+        cta.keys().hasAll(['enabled', 'url', 'label']) &&
+        cta.keys().hasOnly(['enabled', 'url', 'label']) &&
+        cta.enabled is bool &&
+        cta.url is string &&
+        cta.url.size() <= 300 &&
+        (
+          cta.url == '' ||
+          cta.url.matches('^https://(wa\\.me|api\\.whatsapp\\.com|chat\\.whatsapp\\.com)/.*') ||
+          cta.url.matches('^whatsapp://.*')
+        ) &&
+        cta.label is string &&
+        cta.label.size() <= 40;
+    }
+
+    // Validate optional Video trim/mute/overlay edit metadata on a Status
+    function isValidVideoEdits(edits) {
+      return edits is map &&
+        edits.keys().hasAll(['trimStartSec', 'trimEndSec', 'muted', 'overlays']) &&
+        edits.keys().hasOnly(['trimStartSec', 'trimEndSec', 'muted', 'overlays']) &&
+        edits.trimStartSec is number && edits.trimStartSec >= 0 && edits.trimStartSec <= 3600 &&
+        edits.trimEndSec is number && edits.trimEndSec >= edits.trimStartSec && edits.trimEndSec <= 3600 &&
+        (edits.trimEndSec - edits.trimStartSec) <= 60.5 &&
+        edits.muted is bool &&
+        edits.overlays is list &&
+        edits.overlays.size() <= 25 &&
+        (edits.overlays.size() == 0 || edits.overlays[0] is map);
+    }
+
     // Validate new Status payload on create
     function isValidStatusCreate(data) {
       return data.keys().hasAll([
@@ -124,7 +157,7 @@ service cloud.firestore {
           'authorUid', 'authorName', 'authorPhoto', 'type', 'mediaUrl', 'thumbnailUrl',
           'cloudinaryPublicId', 'cloudinaryResourceType', 'cloudinaryDeliveryType',
           'caption', 'textContent', 'bgGradient', 'textStyle', 'durationSec',
-          'audioTrack', 'privacyMode', 'allowedUids', 'excludedUids',
+          'audioTrack', 'whatsappCta', 'videoEdits', 'privacyMode', 'allowedUids', 'excludedUids',
           'viewsCount', 'likesCount', 'createdAt', 'expiresAt'
         ]) &&
         isValidId(request.auth.uid) &&
@@ -143,6 +176,8 @@ service cloud.firestore {
         data.textStyle in ['classic', 'bold', 'editorial', 'mono'] &&
         data.durationSec is number && data.durationSec >= 0 && data.durationSec <= 60 &&
         isValidAudioTrack(data.audioTrack) &&
+        (!('whatsappCta' in data) || isValidWhatsAppCta(data.whatsappCta)) &&
+        (!('videoEdits' in data) || isValidVideoEdits(data.videoEdits)) &&
         data.privacyMode in ['public', 'friends', 'followers', 'selected', 'except', 'only_me'] &&
         data.allowedUids is list && data.allowedUids.size() <= 200 &&
         (data.allowedUids.size() == 0 || isValidId(data.allowedUids[0])) &&
@@ -157,10 +192,25 @@ service cloud.firestore {
     }
 
     // --- catalog_products Collection ---
-    // Public can see King Catalog; writes strictly restricted to Super Admin
+    // Public reads ONLY active products; drafts and all writes strictly restricted to Super Admin
     match /catalog_products/{productId} {
-      allow read: if true;
-      allow create, update, delete: if isSuperAdmin();
+      allow read: if (resource != null && resource.data.isActive == true) || isAdmin();
+      allow create: if isAdmin() &&
+        request.resource.data.keys().hasAll([
+          'name', 'originalPrice', 'stock', 'category', 'imageUrls', 'isActive', 'createdAt', 'updatedAt'
+        ]) &&
+        request.resource.data.name is string && request.resource.data.name.size() >= 1 && request.resource.data.name.size() <= 200 &&
+        request.resource.data.originalPrice is number && request.resource.data.originalPrice > 0 &&
+        request.resource.data.stock is number && request.resource.data.stock >= 0 &&
+        request.resource.data.category is string && request.resource.data.category.size() >= 1 &&
+        request.resource.data.imageUrls is list &&
+        request.resource.data.isActive is bool;
+      allow update: if isAdmin() &&
+        request.resource.data.name is string && request.resource.data.name.size() >= 1 &&
+        request.resource.data.originalPrice is number && request.resource.data.originalPrice > 0 &&
+        request.resource.data.stock is number && request.resource.data.stock >= 0 &&
+        request.resource.data.isActive is bool;
+      allow delete: if isAdmin();
     }
 
     // --- Users Collection ---
@@ -216,14 +266,35 @@ service cloud.firestore {
 
     // --- Videos Collection ---
     match /videos/{videoId} {
-      // 1. Public can read all videos
-      allow read: if true;
+      // 1. Public reads published videos; unpublished/rejected visible only to owner or Super Admin
+      allow read: if isAdmin() || isVideoOwner(resource.data) || (
+        resource != null &&
+        resource.data.publicationStatus != 'unpublished' &&
+        resource.data.publicationStatus != 'rejected' &&
+        resource.data.status != 'unpublished' &&
+        resource.data.status != 'rejected'
+      );
 
-      // 2. Authenticated user can create their own video
-      allow create: if isSignedIn() && (
-        (('userId' in request.resource.data && request.resource.data.userId == request.auth.uid) ||
-         ('uid' in request.resource.data && request.resource.data.uid == request.auth.uid)) ||
-        isAdmin()
+      // 2. Authenticated user can create their own video with validated initial counters
+      allow create: if isSignedIn() && isValidId(videoId) && (
+        isAdmin() || (
+          (('userId' in request.resource.data && request.resource.data.userId == request.auth.uid) ||
+           ('uid' in request.resource.data && request.resource.data.uid == request.auth.uid)) &&
+          request.resource.data.keys().hasAll(['title', 'createdAt']) &&
+          request.resource.data.keys().hasOnly([
+            'url', 'videoUrl', 'thumbnailUrl', 'title', 'caption', 'userId', 'uid',
+            'uploaderPhoto', 'channelAvatar', 'uploaderName', 'channelName',
+            'contentType', 'publicationStatus', 'status',
+            'likes', 'views', 'commentsCount', 'createdAt', 'type', 'duration'
+          ]) &&
+          request.resource.data.title is string && request.resource.data.title.size() >= 1 && request.resource.data.title.size() <= 200 &&
+          (!('caption' in request.resource.data) || (request.resource.data.caption is string && request.resource.data.caption.size() <= 500)) &&
+          (!('likes' in request.resource.data) || request.resource.data.likes == 0) &&
+          (!('views' in request.resource.data) || request.resource.data.views == 0) &&
+          (!('commentsCount' in request.resource.data) || request.resource.data.commentsCount == 0) &&
+          (!('publicationStatus' in request.resource.data) || request.resource.data.publicationStatus == 'published') &&
+          request.resource.data.createdAt == request.time
+        )
       );
 
       // 3. Strict update logic: exactly one branch must be satisfied
@@ -231,11 +302,11 @@ service cloud.firestore {
         // Branch A: Super Admin full access
         isAdmin() ||
 
-        // Branch B: Video creator metadata update (strictly excludes ownership, URLs, createdAt, and counters)
+        // Branch B: Video creator metadata update (strictly excludes ownership, URLs, createdAt, status, and counters)
         (
           isVideoOwner(resource.data) &&
           !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-            'userId', 'uid', 'url', 'videoUrl', 'createdAt', 'likes', 'views'
+            'userId', 'uid', 'url', 'videoUrl', 'createdAt', 'likes', 'views', 'commentsCount', 'publicationStatus', 'status'
           ])
         ) ||
 
@@ -264,6 +335,27 @@ service cloud.firestore {
           request.resource.data.views == (getDocViews(resource.data) + 1) &&
           !exists(/databases/$(database)/documents/videos/$(videoId)/views/$(request.auth.uid)) &&
           existsAfter(/databases/$(database)/documents/videos/$(videoId)/views/$(request.auth.uid))
+        ) ||
+
+        // Branch E1: Atomic Comment create increment (+1) coupled with new comment doc creation
+        (
+          isSignedIn() &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['commentsCount', 'lastCommentId']) &&
+          request.resource.data.commentsCount == getDocCounter(resource.data, 'commentsCount') + 1 &&
+          isValidId(request.resource.data.lastCommentId) &&
+          request.resource.data.lastCommentId.matches('^' + request.auth.uid + '_.*') &&
+          !exists(/databases/$(database)/documents/videos/$(videoId)/comments/$(request.resource.data.lastCommentId)) &&
+          existsAfter(/databases/$(database)/documents/videos/$(videoId)/comments/$(request.resource.data.lastCommentId))
+        ) ||
+
+        // Branch E2: Atomic Comment delete decrement (-1) coupled with comment doc deletion
+        (
+          isSignedIn() &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['commentsCount', 'lastDeletedCommentId']) &&
+          request.resource.data.commentsCount == (getDocCounter(resource.data, 'commentsCount') > 0 ? getDocCounter(resource.data, 'commentsCount') - 1 : 0) &&
+          isValidId(request.resource.data.lastDeletedCommentId) &&
+          exists(/databases/$(database)/documents/videos/$(videoId)/comments/$(request.resource.data.lastDeletedCommentId)) &&
+          !existsAfter(/databases/$(database)/documents/videos/$(videoId)/comments/$(request.resource.data.lastDeletedCommentId))
         )
       );
 
@@ -274,15 +366,12 @@ service cloud.firestore {
       match /likes/{userId} {
         allow read: if true;
 
-        // Atomic Like creation: caller must own the like document, fields whitelist, and parent video must exist
-        // Note: The atomic +1 increment and existsAfter pairing is strictly verified by the parent video rule
         allow create: if isSignedIn() &&
           request.auth.uid == userId &&
           request.resource.data.userId == request.auth.uid &&
           request.resource.data.keys().hasOnly(['userId', 'displayName', 'photoURL', 'createdAt']) &&
           exists(/databases/$(database)/documents/videos/$(videoId));
 
-        // Atomic Unlike deletion: must be like owner (or Super Admin)
         allow delete: if isAdmin() || (
           isSignedIn() &&
           request.auth.uid == userId
@@ -295,8 +384,6 @@ service cloud.firestore {
       match /views/{viewerId} {
         allow read: if (isSignedIn() && request.auth.uid == viewerId) || isAdmin();
 
-        // Atomic View creation: authenticated viewer only, viewerId matches caller, parent video must exist
-        // Note: The atomic +1 view count increment and existsAfter pairing is strictly verified by the parent video rule
         allow create: if isSignedIn() &&
           request.auth.uid == viewerId &&
           request.resource.data.viewerId == request.auth.uid &&
@@ -305,12 +392,158 @@ service cloud.firestore {
         allow update: if false;
         allow delete: if isAdmin();
       }
+
+      // --- Comments Subcollection: /videos/{videoId}/comments/{commentId} ---
+      match /comments/{commentId} {
+        allow read: if true;
+
+        allow create: if isSignedIn() &&
+          isValidId(commentId) &&
+          commentId.matches('^' + request.auth.uid + '_.*') &&
+          request.resource.data.keys().hasAll(['authorUid', 'authorName', 'authorPhoto', 'text', 'createdAt']) &&
+          request.resource.data.keys().hasOnly(['authorUid', 'authorName', 'authorPhoto', 'text', 'createdAt']) &&
+          request.resource.data.authorUid == request.auth.uid &&
+          request.resource.data.authorName is string && request.resource.data.authorName.size() <= 100 &&
+          request.resource.data.authorPhoto is string && request.resource.data.authorPhoto.size() <= 1000 &&
+          request.resource.data.text is string && request.resource.data.text.size() >= 1 && request.resource.data.text.size() <= 500 &&
+          request.resource.data.createdAt == request.time &&
+          exists(/databases/$(database)/documents/videos/$(videoId));
+
+        allow update: if false;
+        allow delete: if isAdmin() || (
+          isSignedIn() && (
+            resource.data.authorUid == request.auth.uid ||
+            isVideoOwner(get(/databases/$(database)/documents/videos/$(videoId)).data)
+          )
+        );
+      }
+    }
+
+    // --- user_posts Collection (Centralized Home Social Photo/Post Feed) ---
+    match /user_posts/{postId} {
+      allow read: if isAdmin() || (
+        resource != null && (
+          resource.data.publicationStatus == 'published' ||
+          (isSignedIn() && resource.data.authorUid == request.auth.uid)
+        )
+      );
+
+      allow create: if isSignedIn() &&
+        isValidId(postId) &&
+        request.resource.data.keys().hasAll([
+          'contentType', 'publicationStatus', 'authorUid', 'authorName', 'authorPhoto',
+          'mediaUrl', 'thumbnailUrl', 'caption', 'likesCount', 'commentsCount', 'createdAt', 'updatedAt'
+        ]) &&
+        request.resource.data.keys().hasOnly([
+          'contentType', 'publicationStatus', 'authorUid', 'authorName', 'authorPhoto',
+          'mediaUrl', 'thumbnailUrl', 'caption', 'likesCount', 'commentsCount',
+          'source', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(request.auth.uid) &&
+        request.resource.data.authorUid == request.auth.uid &&
+        request.resource.data.authorName is string && request.resource.data.authorName.size() >= 1 && request.resource.data.authorName.size() <= 100 &&
+        request.resource.data.authorPhoto is string && request.resource.data.authorPhoto.size() <= 1000 &&
+        request.resource.data.contentType in ['photo', 'video'] &&
+        request.resource.data.publicationStatus == 'published' &&
+        request.resource.data.mediaUrl is string && request.resource.data.mediaUrl.size() >= 10 && request.resource.data.mediaUrl.size() <= 2000 &&
+        request.resource.data.thumbnailUrl is string && request.resource.data.thumbnailUrl.size() <= 2000 &&
+        request.resource.data.caption is string && request.resource.data.caption.size() <= 500 &&
+        request.resource.data.likesCount == 0 &&
+        request.resource.data.commentsCount == 0 &&
+        request.resource.data.createdAt == request.time &&
+        request.resource.data.updatedAt == request.time;
+
+      allow update: if isAdmin() || (
+        isSignedIn() && (
+          // Owner caption edit
+          (
+            resource.data.authorUid == request.auth.uid &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['caption', 'updatedAt']) &&
+            request.resource.data.caption is string && request.resource.data.caption.size() <= 500 &&
+            request.resource.data.updatedAt == request.time
+          ) ||
+          // Atomic Like (+1)
+          (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likesCount']) &&
+            request.resource.data.likesCount == getDocCounter(resource.data, 'likesCount') + 1 &&
+            !exists(/databases/$(database)/documents/user_posts/$(postId)/likes/$(request.auth.uid)) &&
+            existsAfter(/databases/$(database)/documents/user_posts/$(postId)/likes/$(request.auth.uid))
+          ) ||
+          // Atomic Unlike (-1)
+          (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likesCount']) &&
+            request.resource.data.likesCount == (getDocCounter(resource.data, 'likesCount') > 0 ? getDocCounter(resource.data, 'likesCount') - 1 : 0) &&
+            exists(/databases/$(database)/documents/user_posts/$(postId)/likes/$(request.auth.uid)) &&
+            !existsAfter(/databases/$(database)/documents/user_posts/$(postId)/likes/$(request.auth.uid))
+          ) ||
+          // Atomic Comment create (+1)
+          (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['commentsCount', 'lastCommentId']) &&
+            request.resource.data.commentsCount == getDocCounter(resource.data, 'commentsCount') + 1 &&
+            isValidId(request.resource.data.lastCommentId) &&
+            request.resource.data.lastCommentId.matches('^' + request.auth.uid + '_.*') &&
+            !exists(/databases/$(database)/documents/user_posts/$(postId)/comments/$(request.resource.data.lastCommentId)) &&
+            existsAfter(/databases/$(database)/documents/user_posts/$(postId)/comments/$(request.resource.data.lastCommentId))
+          ) ||
+          // Atomic Comment delete (-1)
+          (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['commentsCount', 'lastDeletedCommentId']) &&
+            request.resource.data.commentsCount == (getDocCounter(resource.data, 'commentsCount') > 0 ? getDocCounter(resource.data, 'commentsCount') - 1 : 0) &&
+            isValidId(request.resource.data.lastDeletedCommentId) &&
+            exists(/databases/$(database)/documents/user_posts/$(postId)/comments/$(request.resource.data.lastDeletedCommentId)) &&
+            !existsAfter(/databases/$(database)/documents/user_posts/$(postId)/comments/$(request.resource.data.lastDeletedCommentId))
+          )
+        )
+      );
+
+      allow delete: if isAdmin() || (isSignedIn() && resource.data.authorUid == request.auth.uid);
+
+      match /likes/{userId} {
+        allow read: if true;
+        allow create: if isSignedIn() &&
+          request.auth.uid == userId &&
+          request.resource.data.userId == request.auth.uid &&
+          request.resource.data.keys().hasOnly(['userId', 'displayName', 'photoURL', 'createdAt']) &&
+          exists(/databases/$(database)/documents/user_posts/$(postId));
+        allow delete: if isAdmin() || (isSignedIn() && request.auth.uid == userId);
+        allow update: if false;
+      }
+
+      match /comments/{commentId} {
+        allow read: if true;
+        allow create: if isSignedIn() &&
+          isValidId(commentId) &&
+          commentId.matches('^' + request.auth.uid + '_.*') &&
+          request.resource.data.keys().hasAll(['authorUid', 'authorName', 'authorPhoto', 'text', 'createdAt']) &&
+          request.resource.data.keys().hasOnly(['authorUid', 'authorName', 'authorPhoto', 'text', 'createdAt']) &&
+          request.resource.data.authorUid == request.auth.uid &&
+          request.resource.data.authorName is string && request.resource.data.authorName.size() <= 100 &&
+          request.resource.data.authorPhoto is string && request.resource.data.authorPhoto.size() <= 1000 &&
+          request.resource.data.text is string && request.resource.data.text.size() >= 1 && request.resource.data.text.size() <= 500 &&
+          request.resource.data.createdAt == request.time &&
+          exists(/databases/$(database)/documents/user_posts/$(postId));
+        allow update: if false;
+        allow delete: if isAdmin() || (
+          isSignedIn() && (
+            resource.data.authorUid == request.auth.uid ||
+            get(/databases/$(database)/documents/user_posts/$(postId)).data.authorUid == request.auth.uid
+          )
+        );
+      }
     }
 
     // --- king_games Collection ---
-    // Public read; writes strictly restricted to Super Admin
+    // Public reads ONLY approved & published games; pending, rejected, unpublished & all writes strictly Super Admin
     match /king_games/{gameId} {
-      allow read: if true;
+      allow read: if isAdmin() || (
+        resource != null &&
+        resource.data.status != 'pending' &&
+        resource.data.status != 'rejected' &&
+        resource.data.status != 'unpublished' &&
+        resource.data.publicationStatus != 'unpublished' &&
+        resource.data.approved != false &&
+        resource.data.isApproved != false
+      );
       allow create, update, delete: if isAdmin();
     }
 
@@ -367,12 +600,6 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
-    // --- king_affiliates Collection ---
-    // Public reads Daraz carousel banners; writes strictly restricted to Super Admin
-    match /king_affiliates/{affiliateId} {
-      allow read: if true;
-      allow write: if isAdmin();
-    }
 
     // --- Blocks Collection (/blocks/{blockerUid_blockedUid}) ---
     // Only blocker can read/list/delete their own blocks; blocked users cannot enumerate who blocked them

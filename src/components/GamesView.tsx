@@ -5,6 +5,7 @@ import { games as staticVerifiedGames, Game } from '../data/games';
 import { db } from '../firebase';
 import { collection, onSnapshot } from 'firebase/firestore';
 import { Play, Sparkles, AlertCircle, RotateCcw, Gamepad2, Star } from 'lucide-react';
+import { isGameApprovedAndPublished } from '../services/centralContentService';
 
 // Maintained for backward compatibility with other components
 export interface GameItem {
@@ -57,25 +58,7 @@ function isValidGameRecord(g: any): boolean {
   return true;
 }
 
-/**
- * Strict approval validator:
- * Must not be pending or rejected.
- */
-function isGameApproved(data: any): boolean {
-  if (!data || typeof data !== 'object') return false;
-
-  // Explicitly reject pending or rejected records
-  if (data.status === 'pending' || data.status === 'rejected') return false;
-  if (data.approved === false || data.isApproved === false) return false;
-
-  // Explicitly accept approved records
-  if (data.status === 'approved' || data.approved === true || data.isApproved === true || data.status === 'active') {
-    return true;
-  }
-
-  // Legacy records with no explicit status are considered active unless flagged
-  return data.status !== 'pending' && data.status !== 'rejected';
-}
+/* Strict approval validator imported from centralContentService (isGameApprovedAndPublished) */
 
 /**
  * Normalize category string to standard category set
@@ -96,14 +79,20 @@ export default function GamesView({
   gamingTab = 'LOBBY',
   onSelectGamingTab,
   onOpenGamePix,
+  onOverlayChange,
 }: { 
   gamingTab?: string;
   onSelectGamingTab?: (tab: string) => void;
   onOpenGamePix?: () => void;
+  onOverlayChange?: (isOpen: boolean) => void;
 }) {
   const [currentCategory, setCurrentCategory] = useState<string>('all');
   const [visibleCount, setVisibleCount] = useState<number>(24);
   const [activeGame, setActiveGame] = useState<Game | null>(null);
+
+  useEffect(() => {
+    onOverlayChange?.(Boolean(activeGame));
+  }, [activeGame, onOverlayChange]);
 
   // Firestore subscription state
   const [firestoreGames, setFirestoreGames] = useState<Game[]>([]);
@@ -128,8 +117,8 @@ export default function GamesView({
           snapshot.forEach((docSnap) => {
             const data = docSnap.data();
 
-            // 1. Only proceed if approved (not pending or rejected)
-            if (!isGameApproved(data)) return;
+            // 1. Only proceed if approved & published (not pending, rejected, or unpublished)
+            if (!isGameApprovedAndPublished(data)) return;
 
             // 2. Validate essential fields (title, url, legitimate thumbnail)
             if (!isValidGameRecord(data)) return;

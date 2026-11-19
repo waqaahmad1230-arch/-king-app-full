@@ -7,11 +7,6 @@ body,
   padding: 0;
 }
 
-.king-sticky-top-header {
-  position: sticky !important;
-  top: 0 !important;
-}
-
 /* Hide browser native 3-dot overflow button / menu inside video controls */
 video::-webkit-media-controls-overflow-button,
 video::-webkit-media-controls-enclosure::-webkit-media-controls-overflow-button {

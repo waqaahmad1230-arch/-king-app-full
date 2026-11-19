@@ -109,6 +109,7 @@ export const STATUS_PRIVACY_OPTIONS: StatusPrivacyOptionMeta[] = [
 
 export type StatusMediaType = 'image' | 'video' | 'text';
 export type StatusTextStyle = 'classic' | 'bold' | 'editorial' | 'mono';
+export type StatusEditorTextFont = 'sans' | 'serif' | 'mono' | 'display' | 'handwritten';
 export type StatusCloudinaryDeliveryType = 'upload' | 'authenticated' | 'none';
 export type StatusReactionEmoji = '❤️' | '🔥' | '👑' | '😂' | '😮' | '👏';
 
@@ -120,6 +121,39 @@ export const STATUS_REACTION_EMOJIS: readonly StatusReactionEmoji[] = [
   '😮',
   '👏',
 ] as const;
+
+export interface StatusWhatsAppCta {
+  enabled: boolean;
+  url: string;
+  label: string;
+}
+
+export type StatusOverlayTextEffect = 'none' | 'shadow' | 'outline';
+
+export interface StatusMediaOverlay {
+  id: string;
+  kind: 'text' | 'sticker';
+  content: string;
+  x: number; // normalized 0..1
+  y: number; // normalized 0..1
+  scale: number; // e.g. 0.5..2.8
+  rotation?: number; // degrees -180..180
+  font?: StatusEditorTextFont;
+  color?: string;
+  bold?: boolean;
+  italic?: boolean;
+  align?: 'left' | 'center' | 'right';
+  bgMode?: 'none' | 'dark' | 'accent' | 'custom';
+  bgColor?: string;
+  effect?: StatusOverlayTextEffect;
+}
+
+export interface StatusVideoEdits {
+  trimStartSec: number;
+  trimEndSec: number;
+  muted: boolean;
+  overlays: StatusMediaOverlay[];
+}
 
 export interface StatusAudioTrack {
   mode: 'original' | 'royalty_free' | 'custom_audio';
@@ -146,6 +180,8 @@ export interface StatusRecord {
   textStyle: StatusTextStyle;
   durationSec: number;
   audioTrack: StatusAudioTrack;
+  whatsappCta?: StatusWhatsAppCta;
+  videoEdits?: StatusVideoEdits;
   privacyMode: StatusPrivacyMode;
   allowedUids?: string[];
   excludedUids?: string[];

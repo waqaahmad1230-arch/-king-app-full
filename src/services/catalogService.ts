@@ -31,8 +31,8 @@ export const DEFAULT_DEMO_PRODUCTS: CatalogProduct[] = [
     ],
     videoUrls: [],
     isActive: true,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
+    createdAt: '2025-01-01T00:00:00.000Z',
+    updatedAt: '2025-01-01T00:00:00.000Z'
   },
   {
     id: 'demo-prod-2',
@@ -48,8 +48,8 @@ export const DEFAULT_DEMO_PRODUCTS: CatalogProduct[] = [
     ],
     videoUrls: [],
     isActive: true,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
+    createdAt: '2025-01-01T00:00:00.000Z',
+    updatedAt: '2025-01-01T00:00:00.000Z'
   },
   {
     id: 'demo-prod-3',
@@ -65,8 +65,8 @@ export const DEFAULT_DEMO_PRODUCTS: CatalogProduct[] = [
     ],
     videoUrls: [],
     isActive: true,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
+    createdAt: '2025-01-01T00:00:00.000Z',
+    updatedAt: '2025-01-01T00:00:00.000Z'
   },
   {
     id: 'demo-prod-4',
@@ -82,8 +82,8 @@ export const DEFAULT_DEMO_PRODUCTS: CatalogProduct[] = [
     ],
     videoUrls: [],
     isActive: true,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
+    createdAt: '2025-01-01T00:00:00.000Z',
+    updatedAt: '2025-01-01T00:00:00.000Z'
   }
 ];
 
@@ -109,7 +109,7 @@ export function subscribeCatalogProducts(
     (snapshot) => {
       const list: CatalogProduct[] = [];
       snapshot.forEach((docSnap) => {
-        const data = docSnap.data();
+        const data = docSnap.data({ serverTimestamps: 'estimate' });
         const item: CatalogProduct = {
           id: docSnap.id,
           name: data.name || 'KING Product',

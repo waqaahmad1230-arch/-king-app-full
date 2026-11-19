@@ -99,6 +99,14 @@ interface MyKINGChannelProps {
 }
 
 export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUserId, onOpenTab }: MyKINGChannelProps) {
+  const authUser = currentUser || auth.currentUser;
+  const signedInUid = authUser?.uid || '';
+  const [internalProfileUid, setInternalProfileUid] = useState<string | null>(null);
+  const [socialCounts, setSocialCounts] = useState({ friends: 0, incomingRequests: 0, followers: 0, following: 0 });
+  const openAuthModal = (_mode: string) => {
+    alert('Please sign in first');
+  };
+
   // Navigation sub-views: channel, settings, liked, notifications
   const [subView, setSubView] = useState<'channel' | 'settings' | 'liked' | 'notifications'>('channel');
   
@@ -120,22 +128,101 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
   });
   const [savingSocialKey, setSavingSocialKey] = useState<string | null>(null);
 
-  // Use reactive user from AuthContext
-  const { user: authUser, openAuthModal } = useAuth();
-  const signedInUid = authUser?.uid || currentUser?.uid || auth.currentUser?.uid || null;
-  const [internalProfileUid, setInternalProfileUid] = useState<string | null>(null);
-  const [socialCounts, setSocialCounts] = useState({
-    friends: 0,
-    incomingRequests: 0,
-    followers: 0,
-    following: 0,
-  });
-
   const activeTargetProfileUid = internalProfileUid ?? profileUserId ?? null;
   const effectiveUserId = activeTargetProfileUid || signedInUid;
   const isViewingOtherCreator = Boolean(
     activeTargetProfileUid && activeTargetProfileUid !== signedInUid
   );
+
+  // Meta Business Connections State
+  const [metaConnections, setMetaConnections] = useState<any[]>([]);
+  const [loadingMeta, setLoadingMeta] = useState(false);
+
+  const fetchMetaConnections = async () => {
+    if (!auth.currentUser) return;
+    try {
+      setLoadingMeta(true);
+      const idToken = await auth.currentUser.getIdToken();
+      const res = await fetch('/api/meta/connections', {
+        headers: { Authorization: `Bearer ${idToken}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setMetaConnections(data.connections || []);
+      }
+    } catch (err) {
+      console.error('Error fetching meta connections:', err);
+    } finally {
+      setLoadingMeta(false);
+    }
+  };
+
+  useEffect(() => {
+    if (signedInUid && !isViewingOtherCreator) {
+      fetchMetaConnections();
+    }
+  }, [signedInUid, isViewingOtherCreator]);
+
+  const handleConnectMetaBusiness = async () => {
+    if (!auth.currentUser) {
+      openAuthModal('login');
+      return;
+    }
+    try {
+      const idToken = await auth.currentUser.getIdToken();
+      const res = await fetch('/api/meta/auth-url', {
+        headers: { Authorization: `Bearer ${idToken}` },
+      });
+      if (!res.ok) {
+        throw new Error('Failed to get Meta auth URL');
+      }
+      const { url } = await res.json();
+      const authWindow = window.open(url, 'meta_oauth', 'width=600,height=700');
+      if (!authWindow) {
+        alert('Please allow popups for this site to connect Meta Business.');
+      }
+    } catch (err: any) {
+      showToast(err?.message || 'Could not initiate Meta connection.');
+    }
+  };
+
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      const origin = event.origin;
+      if (!origin.endsWith('.run.app') && !origin.includes('localhost') && !origin.includes('127.0.0.1')) {
+        return;
+      }
+      if (event.data?.type === 'META_OAUTH_SUCCESS') {
+        showToast('Meta Business Connected Successfully!');
+        fetchMetaConnections();
+      }
+    };
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, []);
+
+  const handleDisconnectMeta = async (pageId: string) => {
+    if (!auth.currentUser) return;
+    try {
+      const idToken = await auth.currentUser.getIdToken();
+      const res = await fetch('/api/meta/disconnect', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({ pageId }),
+      });
+      if (res.ok) {
+        showToast('Meta Account Disconnected.');
+        fetchMetaConnections();
+      } else {
+        showToast('Failed to disconnect account.');
+      }
+    } catch {
+      showToast('Error disconnecting Meta account.');
+    }
+  };
 
   // Reset subView and internal navigation whenever external profileUserId or open state changes
   useEffect(() => {
@@ -317,7 +404,7 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
   // Liked videos state
   const [likedList, setLikedList] = useState([
     { id: 101, title: 'KING App • Official Viral Promo', channel: 'KING AI Studio', duration: '0:16' },
-    { id: 102, title: 'Daraz 11.11 Flash Sale Hacks', channel: 'Deals Master PK', duration: '4:20' },
+    { id: 102, title: 'KING Shop Cyber Audio Showcase', channel: 'KING Shop Official', duration: '4:20' },
   ]);
 
   // Real-time Firestore Notifications (Status reactions, replies & social alerts)
@@ -351,7 +438,12 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
       (snap) => {
         const all = snap.docs.map(d => ({ id: d.id, ...d.data() }));
         const channelVids = all.filter((v: any) => {
-          return v.uid === effectiveUserId || v.userId === effectiveUserId;
+          const belongs = v.uid === effectiveUserId || v.userId === effectiveUserId;
+          if (!belongs) return false;
+          if (isViewingOtherCreator && (v.publicationStatus === 'unpublished' || v.publicationStatus === 'rejected' || v.status === 'unpublished' || v.status === 'rejected')) {
+            return false;
+          }
+          return true;
         });
         console.log("Total Channel Videos:", channelVids.length);
         setChannelVideos(channelVids as ChannelVideoItem[]);
@@ -781,8 +873,12 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
         channelAvatar: realPhoto || "",
         uploaderName: realName || "KING Creator",
         channelName: realName || "KING Creator",
+        contentType: "video",
+        publicationStatus: "published",
+        status: "published",
         likes: 0,
         views: 0,
+        commentsCount: 0,
         createdAt: serverTimestamp(),
         type: "video"
       });
@@ -1239,6 +1335,97 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
           </div>
 
 
+
+          {/* Meta Business Connection Card */}
+          {!isViewingOtherCreator && (
+            <div className="bg-[#0b1222] border border-blue-500/40 p-4 rounded-2xl space-y-3 shadow-lg shadow-blue-950/30">
+              <div className="flex items-center justify-between pb-2 border-b border-gray-800">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-xl bg-blue-600/20 text-blue-400 flex items-center justify-center border border-blue-500/30">
+                    <Facebook className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-xs font-bold text-white uppercase tracking-wider">Meta Business Connection</h3>
+                    <p className="text-[10px] text-slate-400">Facebook Pages & Instagram Professional</p>
+                  </div>
+                </div>
+                <span className="text-[10px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded-full font-bold">
+                  Ready for Auto-Publish
+                </span>
+              </div>
+
+              {metaConnections.length === 0 ? (
+                <div className="space-y-2.5 pt-1">
+                  <p className="text-xs text-slate-300">
+                    Connect your Meta Business account to enable one-click publishing from KING to your Facebook Page and Instagram Professional account.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleConnectMetaBusiness}
+                    className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-blue-600 via-indigo-600 to-blue-700 hover:from-blue-500 hover:to-indigo-500 text-white font-black text-xs flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(24,119,242,0.5)] border border-blue-400/40 cursor-pointer transition active:scale-95"
+                  >
+                    <Facebook className="w-4 h-4 fill-current" />
+                    <span>Connect Meta Business</span>
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-3 pt-1">
+                  <div className="text-xs font-bold text-emerald-400 flex items-center gap-1.5">
+                    <Check className="w-4 h-4" />
+                    <span>Connected Accounts ({metaConnections.length})</span>
+                  </div>
+
+                  <div className="space-y-2">
+                    {metaConnections.map((conn: any) => (
+                      <div key={conn.pageId} className="bg-[#060a14] border border-slate-800 p-3 rounded-xl flex items-center justify-between gap-2">
+                        <div className="min-w-0 space-y-0.5">
+                          <div className="text-xs font-bold text-white truncate flex items-center gap-1.5">
+                            <Facebook className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                            <span>{conn.pageName || 'Facebook Page'}</span>
+                          </div>
+                          {conn.igUsername ? (
+                            <div className="text-[11px] text-pink-400 truncate flex items-center gap-1.5">
+                              <span className="font-semibold">IG:</span> @{conn.igUsername}
+                            </div>
+                          ) : (
+                            <div className="text-[10px] text-slate-500">No Instagram Professional account linked</div>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={handleConnectMetaBusiness}
+                            className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[10px] font-bold cursor-pointer"
+                            title="Reconnect or add accounts"
+                          >
+                            Manage
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDisconnectMeta(conn.pageId)}
+                            className="px-2.5 py-1 rounded-lg bg-rose-950/60 hover:bg-rose-900 text-rose-300 border border-rose-500/30 text-[10px] font-bold cursor-pointer"
+                          >
+                            Disconnect
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="flex gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={handleConnectMetaBusiness}
+                      className="flex-1 py-2 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/40 text-xs font-bold transition cursor-pointer"
+                    >
+                      Reconnect / Add More
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Status Privacy Settings (Phase 1 pre-configuration for future Status visibility) */}
           <StatusPrivacySettingsCard

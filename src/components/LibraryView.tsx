@@ -43,7 +43,11 @@ import {
   Folder
 } from 'lucide-react';
 
-export default function LibraryView() {
+export default function LibraryView({
+  onOverlayChange,
+}: {
+  onOverlayChange?: (isOpen: boolean) => void;
+}) {
   const [watchHistory, setWatchHistory] = useState<any[]>([]);
   const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [activeHistoryMenuIndex, setActiveHistoryMenuIndex] = useState<number | null>(null);
@@ -85,6 +89,26 @@ export default function LibraryView() {
   const [renameInputTitle, setRenameInputTitle] = useState<string>('');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    const isAnyOverlayOpen = Boolean(
+      showHistoryModal ||
+        showDownloadsModal ||
+        activePlayingVideo ||
+        deleteConfirmVideo ||
+        showBulkDeleteConfirm ||
+        renameModalVideo
+    );
+    onOverlayChange?.(isAnyOverlayOpen);
+  }, [
+    showHistoryModal,
+    showDownloadsModal,
+    activePlayingVideo,
+    deleteConfirmVideo,
+    showBulkDeleteConfirm,
+    renameModalVideo,
+    onOverlayChange,
+  ]);
 
   const showToast = (msg: string) => {
     if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);

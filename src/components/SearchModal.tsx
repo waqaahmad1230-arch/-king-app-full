@@ -15,7 +15,7 @@ export default function SearchModal({ isOpen, onClose, onSelectResult, onOpenQR,
   if (!isOpen) return null;
 
   const trendingTags = [
-    'Daraz 11.11 Mega Deals',
+    'KING Shop Flash Deals',
     'Free Jazz 4G Package',
     'GTA 5 Mobile Cloud',
     'KING AI Reels',

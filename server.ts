@@ -4,6 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
+import { getFirestore } from 'firebase-admin/firestore';
 import {
   buildSignedStatusUploadPayload,
   handleDeleteSingleStatusServer,
@@ -11,6 +12,7 @@ import {
   handleRunExpiredStatusCleanup,
   verifyFirebaseBearerToken,
 } from './api/_lib/statusBackend.ts';
+import { getPostAiCapabilityStatus, handlePostAiPhotoEdit } from './api/_lib/postAiBackend.ts';
 
 const app = express();
 
@@ -400,6 +402,33 @@ app.all('/api/status/cleanup', generalApiRateLimiter, express.json({ limit: '16k
   }
 });
 
+// --- POST EDITOR AI STUDIO ENDPOINT (Mirrors Vercel /api/post-editor/ai-edit) ---
+app.get('/api/post-editor/ai-edit', generalApiRateLimiter, (_req, res) => {
+  return res.status(200).json(getPostAiCapabilityStatus());
+});
+
+app.post(
+  '/api/post-editor/ai-edit',
+  generalApiRateLimiter,
+  express.json({ limit: '15mb' }),
+  async (req, res) => {
+    try {
+      const result = await handlePostAiPhotoEdit({
+        authHeader: req.headers.authorization,
+        body: req.body,
+      });
+      return res.status(result.status).json(result.payload);
+    } catch (err: any) {
+      console.error('[server.ts /api/post-editor/ai-edit] Error:', err);
+      return res.status(500).json({
+        ok: false,
+        code: 'POST_AI_INTERNAL_ERROR',
+        error: err?.message || 'Unexpected AI editor server error.',
+      });
+    }
+  }
+);
+
 // Serve GamePix ads.txt directly with Content-Type text/plain
 app.get('/ads.txt', (_req, res) => {
   const adsPath = path.resolve(process.cwd(), 'public/ads.txt');
@@ -545,6 +574,205 @@ function injectDynamicVideoOgTags(html: string, videoId: string, meta: {
 
   return cleanedHtml.replace(/<head([^>]*)>/i, `<head$1>${dynamicTags}`);
 }
+
+// --- META BUSINESS / FACEBOOK & INSTAGRAM OAUTH & CONNECTIONS ---
+const META_APP_ID = process.env.META_APP_ID || '1801486577814226';
+const META_APP_SECRET = process.env.META_APP_SECRET || '';
+const FIRESTORE_DB_ID = 'ai-studio-king-4e115b8f-6ca5-4501-8ff0-73c2c7c21a47';
+
+app.get('/api/meta/auth-url', authenticateFirebaseToken, async (req, res) => {
+  try {
+    const user = (req as any).user;
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const host = req.get('host');
+    const redirectUri = `${protocol}://${host}/api/meta/callback`;
+    const scopes = 'pages_show_list,pages_read_engagement,pages_manage_posts,instagram_basic,instagram_content_publishing';
+    const authUrl = `https://www.facebook.com/v19.0/dialog/oauth?client_id=${META_APP_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(scopes)}&response_type=code&state=${encodeURIComponent(user.uid)}`;
+    return res.json({ url: authUrl });
+  } catch (err: any) {
+    return res.status(500).json({ error: { message: err.message || 'Failed to generate Meta auth URL' } });
+  }
+});
+
+// FBE (Facebook Business Extension) / Business Apps Authentication URL with external_business_id
+app.get('/api/meta/fbe/auth-url', authenticateFirebaseToken, async (req, res) => {
+  try {
+    const user = (req as any).user;
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const host = req.get('host');
+    const redirectUri = `${protocol}://${host}/api/meta/callback`;
+    const externalBusinessId = `king_user_${user.uid}`;
+    const scopes = 'pages_show_list,pages_read_engagement,pages_manage_posts,instagram_basic,instagram_content_publishing';
+    
+    // Facebook Login for Business / Business Extension URL format
+    const fbeUrl = `https://www.facebook.com/v19.0/dialog/oauth?client_id=${META_APP_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(scopes)}&response_type=code&state=${encodeURIComponent(user.uid)}&external_business_id=${encodeURIComponent(externalBusinessId)}`;
+    return res.json({ url: fbeUrl, external_business_id: externalBusinessId });
+  } catch (err: any) {
+    return res.status(500).json({ error: { message: err.message || 'Failed to generate FBE auth URL' } });
+  }
+});
+
+// Meta Business Extension Webhook Endpoint (GET for challenge verification, POST for uninstall / asset update notifications)
+const META_VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || 'king_meta_verify_token_secure';
+
+app.get('/api/meta/webhook', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && token === META_VERIFY_TOKEN) {
+    console.log('[Meta Webhook] Verified successfully');
+    return res.status(200).send(challenge);
+  }
+  return res.sendStatus(403);
+});
+
+app.post('/api/meta/webhook', express.json(), async (req, res) => {
+  try {
+    const body = req.body;
+    console.log('[Meta Webhook Event Received]:', JSON.stringify(body, null, 2));
+
+    // Handle FBE installation / uninstall or asset updates
+    if (body.object === 'page' || body.object === 'instagram' || body.object === 'application') {
+      const entries = body.entry || [];
+      for (const entry of entries) {
+        // Process entry events (e.g. app uninstalled, page token updated)
+        if (entry.changes) {
+          for (const change of entry.changes) {
+            if (change.field === 'uninstall' || change.field === 'permissions') {
+              console.log('[Meta Webhook] Change detected:', change.field);
+            }
+          }
+        }
+      }
+    }
+
+    return res.status(200).send('EVENT_RECEIVED');
+  } catch (err) {
+    console.error('[Meta Webhook Error]:', err);
+    return res.sendStatus(500);
+  }
+});
+
+app.get('/api/meta/callback', async (req, res) => {
+  try {
+    const { code, state: uid, error, error_description } = req.query;
+    if (error) {
+      return res.status(400).send(`<html><body style="background:#060a14; color:white; font-family:sans-serif; text-align:center; padding-top:50px;"><h3>Meta Auth Failed:</h3><p>${error_description || error}</p><script>setTimeout(() => window.close(), 3000);</script></body></html>`);
+    }
+    if (!code || !uid || typeof uid !== 'string') {
+      return res.status(400).send(`<html><body style="background:#060a14; color:white; font-family:sans-serif; text-align:center; padding-top:50px;"><h3>Invalid OAuth Request</h3><script>setTimeout(() => window.close(), 2000);</script></body></html>`);
+    }
+
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const host = req.get('host');
+    const redirectUri = `${protocol}://${host}/api/meta/callback`;
+
+    const tokenRes = await fetch(`https://graph.facebook.com/v19.0/oauth/access_token?client_id=${META_APP_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&client_secret=${META_APP_SECRET}&code=${code}`);
+    const tokenData = await tokenRes.json() as any;
+    if (!tokenData.access_token) {
+      throw new Error(tokenData.error?.message || 'Failed to obtain Meta access token');
+    }
+
+    const longTokenRes = await fetch(`https://graph.facebook.com/v19.0/oauth/access_token?grant_type=fb_exchange_token&client_id=${META_APP_ID}&client_secret=${META_APP_SECRET}&fb_exchange_token=${tokenData.access_token}`);
+    const longTokenData = await longTokenRes.json() as any;
+    const userAccessToken = longTokenData.access_token || tokenData.access_token;
+
+    const pagesRes = await fetch(`https://graph.facebook.com/v19.0/me/accounts?access_token=${encodeURIComponent(userAccessToken)}`);
+    const pagesData = await pagesRes.json() as any;
+    const pages = pagesData.data || [];
+
+    const dbAdmin = getFirestore(adminApp, FIRESTORE_DB_ID);
+    const connectionsRef = dbAdmin.collection('users').doc(uid).collection('metaConnections');
+
+    for (const page of pages) {
+      const pageId = page.id;
+      const pageName = page.name;
+      const pageAccessToken = page.access_token;
+
+      let igUserId = '';
+      let igUsername = '';
+
+      try {
+        const igRes = await fetch(`https://graph.facebook.com/v19.0/${pageId}?fields=instagram_business_account&access_token=${encodeURIComponent(pageAccessToken)}`);
+        const igData = await igRes.json() as any;
+        if (igData.instagram_business_account?.id) {
+          igUserId = igData.instagram_business_account.id;
+          const igUserRes = await fetch(`https://graph.facebook.com/v19.0/${igUserId}?fields=username&access_token=${encodeURIComponent(pageAccessToken)}`);
+          const igUserData = await igUserRes.json() as any;
+          igUsername = igUserData.username || '';
+        }
+      } catch (igErr) {
+        console.warn(`[Meta OAuth] Could not fetch IG account for page ${pageId}:`, igErr);
+      }
+
+      await connectionsRef.doc(pageId).set({
+        pageId,
+        pageName,
+        pageAccessToken,
+        igUserId,
+        igUsername,
+        updatedAt: new Date().toISOString(),
+        connected: true,
+      }, { merge: true });
+    }
+
+    return res.send(`
+      <html>
+        <body style="background:#060a14; color:white; font-family:sans-serif; text-align:center; padding-top:50px;">
+          <h2 style="color:#00d4ff;">Meta Business Connection Successful!</h2>
+          <p>Facebook Pages and Instagram accounts linked successfully.</p>
+          <script>
+            if (window.opener) {
+              window.opener.postMessage({ type: 'META_OAUTH_SUCCESS' }, '*');
+              setTimeout(() => window.close(), 1200);
+            } else {
+              setTimeout(() => window.location.href = '/', 1500);
+            }
+          </script>
+        </body>
+      </html>
+    `);
+  } catch (err: any) {
+    console.error('[Meta Callback Error]:', err);
+    return res.status(500).send(`<html><body style="background:#060a14; color:white; font-family:sans-serif; text-align:center; padding-top:50px;"><h3>Meta Connection Error</h3><p>${err.message}</p></body></html>`);
+  }
+});
+
+app.get('/api/meta/connections', authenticateFirebaseToken, async (req, res) => {
+  try {
+    const user = (req as any).user;
+    const dbAdmin = getFirestore(adminApp, FIRESTORE_DB_ID);
+    const snap = await dbAdmin.collection('users').doc(user.uid).collection('metaConnections').get();
+    const connections = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const sanitized = connections.map((c: any) => ({
+      pageId: c.pageId,
+      pageName: c.pageName,
+      igUserId: c.igUserId,
+      igUsername: c.igUsername,
+      connected: c.connected,
+      updatedAt: c.updatedAt,
+    }));
+    return res.json({ connections: sanitized });
+  } catch (err: any) {
+    return res.status(500).json({ error: { message: err.message || 'Failed to fetch meta connections' } });
+  }
+});
+
+app.post('/api/meta/disconnect', authenticateFirebaseToken, async (req, res) => {
+  try {
+    const user = (req as any).user;
+    const { pageId } = req.body;
+    if (!pageId) {
+      return res.status(400).json({ error: { message: 'Page ID is required' } });
+    }
+    const dbAdmin = getFirestore(adminApp, FIRESTORE_DB_ID);
+    await dbAdmin.collection('users').doc(user.uid).collection('metaConnections').doc(pageId).delete();
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: { message: err.message || 'Failed to disconnect meta account' } });
+  }
+});
 
 async function startServer() {
   const PORT = Number(process.env.PORT) || 3000;

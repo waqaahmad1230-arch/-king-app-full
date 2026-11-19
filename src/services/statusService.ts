@@ -26,7 +26,9 @@ import {
   StatusRecord,
   StatusReplyRecord,
   StatusTextStyle,
+  StatusVideoEdits,
   StatusViewRecord,
+  StatusWhatsAppCta,
 } from '../types/social';
 import { sanitizeUid, resolveSocialErrorMessage } from './socialGraphService';
 import { MAX_STATUS_VIDEO_SECONDS } from '../utils/statusMediaUtils';
@@ -73,6 +75,8 @@ export interface CreateStatusInput {
   textStyle?: StatusTextStyle;
   durationSec: number;
   audioTrack: StatusAudioTrack;
+  whatsappCta?: StatusWhatsAppCta;
+  videoEdits?: StatusVideoEdits;
   privacyMode: StatusPrivacyMode;
   allowedUids?: string[];
   excludedUids?: string[];
@@ -167,6 +171,47 @@ export async function createStatusPost(input: CreateStatusInput): Promise<Status
     audioTrack: sessionAudioTrack,
   });
 
+  const sanitizedWhatsappCta =
+    input.whatsappCta?.enabled && input.whatsappCta?.url
+      ? {
+          enabled: true,
+          url: String(input.whatsappCta.url).trim().slice(0, 300),
+          label: String(input.whatsappCta.label || 'Chat on WhatsApp').trim().slice(0, 40) || 'Chat on WhatsApp',
+        }
+      : undefined;
+
+  const sanitizedVideoEdits: StatusVideoEdits | undefined = input.videoEdits
+    ? {
+        trimStartSec: Math.max(0, Number(input.videoEdits.trimStartSec) || 0),
+        trimEndSec: Math.max(
+          Math.max(0, Number(input.videoEdits.trimStartSec) || 0),
+          Number(input.videoEdits.trimEndSec) || durationSec
+        ),
+        muted: Boolean(input.videoEdits.muted),
+        overlays: Array.isArray(input.videoEdits.overlays)
+          ? input.videoEdits.overlays.slice(0, 25).map((ov) => ({
+              id: String(ov.id || '').slice(0, 40),
+              kind: ov.kind === 'sticker' ? 'sticker' : 'text',
+              content: String(ov.content || '').slice(0, 240),
+              x: Math.max(0.04, Math.min(0.96, Number(ov.x) || 0.5)),
+              y: Math.max(0.06, Math.min(0.94, Number(ov.y) || 0.5)),
+              scale: Math.max(0.5, Math.min(3, Number(ov.scale) || 1)),
+              ...(typeof ov.rotation === 'number' && Number.isFinite(ov.rotation)
+                ? { rotation: Math.max(-180, Math.min(180, Math.round(ov.rotation))) }
+                : {}),
+              ...(ov.font ? { font: ov.font } : {}),
+              ...(ov.color ? { color: String(ov.color).slice(0, 32) } : {}),
+              ...(typeof ov.bold === 'boolean' ? { bold: ov.bold } : {}),
+              ...(typeof ov.italic === 'boolean' ? { italic: ov.italic } : {}),
+              ...(ov.align ? { align: ov.align } : {}),
+              ...(ov.bgMode ? { bgMode: ov.bgMode } : {}),
+              ...(ov.bgColor ? { bgColor: String(ov.bgColor).slice(0, 32) } : {}),
+              ...(ov.effect ? { effect: ov.effect } : {}),
+            }))
+          : [],
+      }
+    : undefined;
+
   const docPayload = {
     authorUid,
     authorName: String(input.authorName || 'KING Creator').trim().slice(0, 100) || 'KING Creator',
@@ -183,6 +228,8 @@ export async function createStatusPost(input: CreateStatusInput): Promise<Status
     textStyle: input.textStyle || 'classic',
     durationSec,
     audioTrack: persistedUrls.audioTrack,
+    ...(sanitizedWhatsappCta ? { whatsappCta: sanitizedWhatsappCta } : {}),
+    ...(sanitizedVideoEdits ? { videoEdits: sanitizedVideoEdits } : {}),
     privacyMode: input.privacyMode,
     allowedUids,
     excludedUids,
@@ -245,6 +292,16 @@ export function subscribeMyActiveStatuses(
           textStyle: d.textStyle || 'classic',
           durationSec: Number(d.durationSec) || 6,
           audioTrack: d.audioTrack || { mode: 'original', label: 'Original Sound' },
+          ...(d.whatsappCta?.enabled && d.whatsappCta?.url
+            ? {
+                whatsappCta: {
+                  enabled: true,
+                  url: String(d.whatsappCta.url),
+                  label: String(d.whatsappCta.label || 'Chat on WhatsApp'),
+                },
+              }
+            : {}),
+          ...(d.videoEdits ? { videoEdits: d.videoEdits as StatusVideoEdits } : {}),
           privacyMode: d.privacyMode || 'friends',
           allowedUids: Array.isArray(d.allowedUids) ? d.allowedUids : [],
           excludedUids: Array.isArray(d.excludedUids) ? d.excludedUids : [],

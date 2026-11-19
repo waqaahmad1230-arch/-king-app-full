@@ -123,6 +123,9 @@
         "channelAvatar": { "type": "string" },
         "views": { "type": "number" },
         "likes": { "type": "number" },
+        "commentsCount": { "type": "number" },
+        "publicationStatus": { "type": "string" },
+        "contentType": { "type": "string" },
         "createdAt": { "type": "string" },
         "type": { "type": "string" }
       },
@@ -233,6 +236,8 @@
         "textStyle": { "type": "string" },
         "durationSec": { "type": "number" },
         "audioTrack": { "type": "object" },
+        "whatsappCta": { "type": "object" },
+        "videoEdits": { "type": "object" },
         "privacyMode": { "type": "string" },
         "allowedUids": { "type": "array" },
         "excludedUids": { "type": "array" },
@@ -309,6 +314,54 @@
         "expiresAt": { "type": "string" }
       },
       "required": ["recipientUid", "actorUid", "type", "title", "read"]
+    },
+    "UserPost": {
+      "title": "UserPost",
+      "description": "User published photo or social post shown in Home Community Feed",
+      "type": "object",
+      "properties": {
+        "contentType": { "type": "string" },
+        "publicationStatus": { "type": "string" },
+        "authorUid": { "type": "string" },
+        "authorName": { "type": "string" },
+        "authorPhoto": { "type": "string" },
+        "mediaUrl": { "type": "string" },
+        "thumbnailUrl": { "type": "string" },
+        "caption": { "type": "string" },
+        "likesCount": { "type": "number" },
+        "commentsCount": { "type": "number" },
+        "lastCommentId": { "type": "string" },
+        "lastDeletedCommentId": { "type": "string" },
+        "source": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["contentType", "publicationStatus", "authorUid", "mediaUrl", "createdAt"]
+    },
+    "PostLike": {
+      "title": "PostLike",
+      "description": "Unique like record per user on a UserPost",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["userId"]
+    },
+    "FeedComment": {
+      "title": "FeedComment",
+      "description": "Comment on a UserPost or Video document",
+      "type": "object",
+      "properties": {
+        "authorUid": { "type": "string" },
+        "authorName": { "type": "string" },
+        "authorPhoto": { "type": "string" },
+        "text": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["authorUid", "text", "createdAt"]
     }
   },
   "firestore": {
@@ -379,6 +432,22 @@
     "/status_replies/{replyId}": {
       "schema": "StatusReply",
       "description": "Private replies to Status updates"
+    },
+    "/videos/{videoId}/comments/{commentId}": {
+      "schema": "FeedComment",
+      "description": "User comments on an uploaded video"
+    },
+    "/user_posts/{postId}": {
+      "schema": "UserPost",
+      "description": "User published photo posts for Home Social Feed"
+    },
+    "/user_posts/{postId}/likes/{userId}": {
+      "schema": "PostLike",
+      "description": "Unique like per user on a user post"
+    },
+    "/user_posts/{postId}/comments/{commentId}": {
+      "schema": "FeedComment",
+      "description": "User comments on a user post"
     },
     "/notifications/{notificationId}": {
       "schema": "Notification",

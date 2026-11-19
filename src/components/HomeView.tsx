@@ -1,745 +1,1432 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { 
-  ShoppingBag, 
-  Gamepad2, 
-  Film, 
-  Sparkles, 
-  ChevronRight, 
-  Clock, 
-  Flame, 
-  Heart, 
-  Share2, 
-  Bell, 
-  Play, 
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  ShoppingBag,
+  Gamepad2,
+  Film,
+  Sparkles,
+  ChevronRight,
+  ThumbsUp,
+  Share2,
+  Play,
   Star,
-  ExternalLink,
   Download,
   Check,
-  Copy
+  MessageCircle,
+  Trash2,
+  Send,
+  Loader2,
+  AlertCircle,
+  RotateCcw,
+  Image as ImageIcon,
+  X,
+  Clock,
+  Copy,
+  ExternalLink,
 } from 'lucide-react';
-import { collection, onSnapshot } from 'firebase/firestore';
+import { doc, onSnapshot } from 'firebase/firestore';
 import { db } from '../firebase';
+import { useAuth } from '../context/AuthContext';
 import AdMobBannerAd from './AdMobBannerAd';
 import { downloadVideoFile } from '../utils/downloadUtils';
 import { GamePlayer } from './GamePlayer';
 import { formatLastUpdated, DailyGame } from '../services/dailyGameSync';
 import CreatorAvatar, { CreatorDisplayName } from './CreatorAvatar';
 import StatusBar from './StatusBar';
+import { CatalogProduct } from '../types/catalog';
+import { orderOnWhatsApp, subscribeCatalogProducts } from '../services/catalogService';
+import {
+  addFeedComment,
+  canUserManageItem,
+  deduplicateByKeys,
+  deleteFeedComment,
+  deleteFeedItem,
+  mergeHomeSocialFeed,
+  mergeUnifiedLatestFeed,
+  subscribeFeedComments,
+  subscribePublishedGames,
+  subscribePublishedUserPosts,
+  subscribePublishedVideos,
+  toggleFeedItemLike,
+} from '../services/centralContentService';
+import { CentralFeedItem, ContentComment, UnifiedLatestItem, UserPost } from '../types/content';
 
 interface HomeViewProps {
   onOpenQR: () => void;
-  onOpenTab: (tab: 'home' | 'games' | 'videos' | 'library') => void;
+  onOpenWatchVideo?: (videoId: string) => void;
+  onOpenTab: (tab: 'home' | 'games' | 'videos' | 'library' | 'CATALOG') => void;
+  onFullScreenOverlayChange?: (isOpen: boolean) => void;
 }
 
-interface AffiliateBanner {
-  id: string;
+interface ShareTarget {
   title: string;
-  link: string;
-  image: string;
-  badge?: string;
+  text: string;
+  url: string;
 }
 
-const DEFAULT_DEMO_BANNERS: AffiliateBanner[] = [
-  {
-    id: 'demo-1',
-    title: 'Daraz Grand Shopping Sale • 50% OFF Gaming Earbuds',
-    link: 'https://daraz.pk',
-    image: 'https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=800&auto=format&fit=crop&q=80',
-    badge: 'Daraz 50% OFF 🛍️',
-  },
-  {
-    id: 'demo-2',
-    title: 'Cyber Gaming Headphones & RGB Accessories',
-    link: 'https://daraz.pk',
-    image: 'https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=800&auto=format&fit=crop&q=80',
-    badge: 'Flash Deal 🔥',
-  },
-  {
-    id: 'demo-3',
-    title: 'High-Speed Smart Watches & Fitness Bands Mega Deal',
-    link: 'https://daraz.pk',
-    image: 'https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=800&auto=format&fit=crop&q=80',
-    badge: 'Exclusive Offer ⚡',
-  },
-];
+function formatRelativeTime(ts: any): string {
+  if (!ts) return 'Just now';
+  let date: Date;
+  if (typeof ts?.toDate === 'function') {
+    date = ts.toDate();
+  } else if (typeof ts?.seconds === 'number') {
+    date = new Date(ts.seconds * 1000);
+  } else {
+    date = new Date(ts);
+  }
+  if (isNaN(date.getTime())) return 'Just now';
+  const diffSec = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
+  if (diffSec < 60) return 'Just now';
+  const mins = Math.floor(diffSec / 60);
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h`;
+  const days = Math.floor(hrs / 24);
+  if (days < 7) return `${days}d`;
+  return date.toLocaleDateString();
+}
 
-export default function HomeView({ onOpenQR, onOpenTab }: HomeViewProps) {
-  const [likedReels, setLikedReels] = useState<Record<string | number, boolean>>({});
-  const [subscribed, setSubscribed] = useState<Record<string | number, boolean>>({});
+function FeedCommentsDrawer({
+  item,
+  onToast,
+}: {
+  item: CentralFeedItem;
+  onToast: (msg: string) => void;
+}) {
+  const { user, openAuthModal } = useAuth();
+  const [comments, setComments] = useState<ContentComment[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [text, setText] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    setLoading(true);
+    const unsub = subscribeFeedComments(
+      item.sourceCollection,
+      item.id,
+      (list) => {
+        setComments(list);
+        setLoading(false);
+      },
+      () => setLoading(false)
+    );
+    return () => unsub();
+  }, [item.sourceCollection, item.id]);
+
+  const handlePostComment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user) {
+      openAuthModal('login');
+      return;
+    }
+    const clean = text.trim();
+    if (!clean || submitting) return;
+    setSubmitting(true);
+    try {
+      await addFeedComment(item.sourceCollection, item.id, clean, {
+        uid: user.uid,
+        displayName: user.displayName,
+        photoURL: user.photoURL,
+        email: user.email,
+      });
+      setText('');
+    } catch (err: any) {
+      onToast(err?.message || 'Could not post comment.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div
+      className="px-3.5 pb-3 pt-2.5 border-t border-slate-100 bg-slate-50/70 space-y-2.5 animate-in fade-in duration-150"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <form onSubmit={handlePostComment} className="flex items-center gap-2">
+        <input
+          type="text"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          maxLength={500}
+          placeholder={user ? 'Write a comment...' : 'Sign in to comment...'}
+          className="flex-1 bg-white border border-slate-200 focus:border-[#1877F2] rounded-full px-3.5 py-2 text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none"
+        />
+        <button
+          type="submit"
+          disabled={submitting || !text.trim()}
+          aria-label="Send comment"
+          className="w-9 h-9 rounded-full bg-[#1877F2] hover:bg-[#166FE5] disabled:opacity-40 text-white font-bold flex items-center justify-center cursor-pointer transition shrink-0"
+        >
+          {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+        </button>
+      </form>
+
+      {loading ? (
+        <div className="text-[11px] text-slate-500 py-1">Loading comments...</div>
+      ) : comments.length === 0 ? (
+        <div className="text-[11px] text-slate-500 py-1">No comments yet. Be the first!</div>
+      ) : (
+        <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+          {comments.map((c) => {
+            const canDelete = canUserManageItem(c.authorUid, user) || canUserManageItem(item.authorUid, user);
+            return (
+              <div
+                key={c.id}
+                className="flex items-start justify-between gap-2 bg-white border border-slate-200/80 rounded-2xl p-2.5"
+              >
+                <div className="flex items-start gap-2 min-w-0">
+                  <CreatorAvatar
+                    uid={c.authorUid}
+                    fallbackPhoto={c.authorPhoto}
+                    fallbackName={c.authorName}
+                    className="w-6 h-6 rounded-full shrink-0 overflow-hidden border border-slate-200"
+                  />
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 text-[11px]">
+                      <span className="font-bold text-slate-900 truncate">{c.authorName}</span>
+                      <span className="text-slate-400">{formatRelativeTime(c.createdAt)}</span>
+                    </div>
+                    <p className="text-xs text-slate-700 break-words mt-0.5">{c.text}</p>
+                  </div>
+                </div>
+                {canDelete && (
+                  <button
+                    type="button"
+                    onClick={() => void deleteFeedComment(item.sourceCollection, item.id, c.id)}
+                    className="text-slate-400 hover:text-rose-600 p-1 cursor-pointer shrink-0"
+                    title="Delete comment"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FeedLikeButton({
+  item,
+  onToast,
+}: {
+  item: CentralFeedItem;
+  onToast: (msg: string) => void;
+}) {
+  const { user, openAuthModal } = useAuth();
+  const [isLiked, setIsLiked] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!user?.uid) {
+      setIsLiked(false);
+      return;
+    }
+    const likeRef = doc(db, item.sourceCollection, item.id, 'likes', user.uid);
+    return onSnapshot(
+      likeRef,
+      (snap) => setIsLiked(snap.exists()),
+      () => setIsLiked(false)
+    );
+  }, [item.sourceCollection, item.id, user?.uid]);
+
+  const handleClick = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!user) {
+      openAuthModal('login');
+      return;
+    }
+    if (busy) return;
+    setBusy(true);
+    try {
+      await toggleFeedItemLike(item.sourceCollection, item.id, {
+        uid: user.uid,
+        displayName: user.displayName,
+        photoURL: user.photoURL,
+      });
+    } catch (err: any) {
+      onToast(err?.message || 'Could not update like.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={handleClick}
+      disabled={busy}
+      className={`flex-1 min-h-[38px] py-1.5 px-2 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer ${
+        isLiked
+          ? 'text-[#1877F2] bg-blue-50 hover:bg-blue-100/80'
+          : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+      }`}
+    >
+      <ThumbsUp className={`w-4 h-4 ${isLiked ? 'fill-current text-[#1877F2]' : ''}`} />
+      <span className="tabular-nums">
+        {isLiked ? 'Liked' : 'Like'}
+        {item.likesCount > 0 ? ` (${item.likesCount})` : ''}
+      </span>
+    </button>
+  );
+}
+
+export default function HomeView({
+  onOpenWatchVideo,
+  onOpenTab,
+  onFullScreenOverlayChange,
+}: HomeViewProps) {
+  const { user } = useAuth();
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [activePhotoModal, setActivePhotoModal] = useState<CentralFeedItem | null>(null);
+  const [activeShareModal, setActiveShareModal] = useState<ShareTarget | null>(null);
+  const [statusOverlayOpen, setStatusOverlayOpen] = useState(false);
+  const [failedImages, setFailedImages] = useState<Record<string, boolean>>({});
+
+  const showToast = (msg: string) => {
+    setToastMsg(msg);
+    setTimeout(() => setToastMsg(null), 3000);
+  };
+
+  // --- 1. Centralized Featured Products (`catalog_products`, active only) ---
+  const [products, setProducts] = useState<CatalogProduct[]>([]);
+  const [productsLoading, setProductsLoading] = useState(true);
+  const [productsError, setProductsError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setProductsLoading(true);
+    setProductsError(null);
+    const unsub = subscribeCatalogProducts(
+      false,
+      (list) => {
+        const deduped = deduplicateByKeys(
+          list.filter((p) => p.isActive !== false),
+          (p) => [p.id]
+        );
+        setProducts(deduped);
+        setProductsLoading(false);
+      },
+      (err) => {
+        setProductsError(err?.message || 'Unable to sync catalog products.');
+        setProductsLoading(false);
+      }
+    );
+    return () => unsub();
+  }, []);
+
+  // --- 2. Centralized Approved Games (`king_games`, approved & published only) ---
   const [homeGames, setHomeGames] = useState<DailyGame[]>([]);
-  const [lastUpdateTimestamp, setLastUpdateTimestamp] = useState<number | null>(() => {
+  const [gamesLoading, setGamesLoading] = useState(true);
+  const [gamesError, setGamesError] = useState<string | null>(null);
+  const [activeGamePlayer, setActiveGamePlayer] = useState<DailyGame | null>(null);
+  const [lastUpdateTimestamp] = useState<number | null>(() => {
     const raw = localStorage.getItem('king_daily_games_last_update_v2');
     return raw ? Number(raw) : Date.now();
   });
-  const [activeGamePlayer, setActiveGamePlayer] = useState<DailyGame | null>(null);
-  const [downloadingReelId, setDownloadingReelId] = useState<string | number | null>(null);
-  const [downloadedReelIds, setDownloadedReelIds] = useState<Record<string | number, boolean>>({});
 
-  // Daraz Affiliate Banner Slider State
-  const [affiliateBanners, setAffiliateBanners] = useState<AffiliateBanner[]>(DEFAULT_DEMO_BANNERS);
-  const [currentSlide, setCurrentSlide] = useState(0);
-  const touchStartXRef = useRef<number | null>(null);
-
-  // Real-time onSnapshot listener for king_affiliates collection
   useEffect(() => {
-    const ref = collection(db, 'king_affiliates');
-    const unsubscribe = onSnapshot(
-      ref,
-      (snapshot) => {
-        if (!snapshot.empty) {
-          const list: AffiliateBanner[] = [];
-          snapshot.forEach((docSnap) => {
-            const data = docSnap.data();
-            list.push({
-              id: docSnap.id,
-              title: data.title || 'Daraz Special Offer 🛍️',
-              link: data.link || data.url || 'https://daraz.pk',
-              image: data.image || 'https://images.unsplash.com/photo-1607082348824-0a96f2a4b9da?w=800&auto=format&fit=crop&q=80',
-              badge: data.badge || 'Daraz Sale 🛍️',
-            });
-          });
-          setAffiliateBanners(list);
-          setCurrentSlide(0);
-        } else {
-          setAffiliateBanners(DEFAULT_DEMO_BANNERS);
-        }
+    setGamesLoading(true);
+    setGamesError(null);
+    const unsub = subscribePublishedGames(
+      (list) => {
+        setHomeGames(list);
+        setGamesLoading(false);
       },
       (err) => {
-        console.warn('onSnapshot king_affiliates error:', err);
+        setGamesError(err?.message || 'Unable to load approved games.');
+        setGamesLoading(false);
+      }
+    );
+    return () => unsub();
+  }, []);
+
+  // --- 3. Centralized Community Social Feed (`user_posts` photos + `videos` reels) ---
+  const [feedLimit, setFeedLimit] = useState(12);
+  const [latestLimit, setLatestLimit] = useState(8);
+  const [userPosts, setUserPosts] = useState<UserPost[]>([]);
+  const [publishedVideos, setPublishedVideos] = useState<any[]>([]);
+  const [feedLoading, setFeedLoading] = useState(true);
+  const [feedError, setFeedError] = useState<string | null>(null);
+  const [retrySeed, setRetrySeed] = useState(0);
+
+  const queryFetchLimit = Math.max(feedLimit, latestLimit + 12);
+
+  useEffect(() => {
+    setFeedLoading(true);
+    setFeedError(null);
+    let postsReady = false;
+    let videosReady = false;
+
+    const markReady = () => {
+      if (postsReady && videosReady) {
+        setFeedLoading(false);
+      }
+    };
+
+    const unsubPosts = subscribePublishedUserPosts(
+      queryFetchLimit,
+      (list) => {
+        setUserPosts(list);
+        postsReady = true;
+        markReady();
+      },
+      (err) => {
+        setFeedError(err?.message || 'Error loading community photo posts.');
+        postsReady = true;
+        markReady();
       }
     );
 
-    return () => unsubscribe();
-  }, []);
-
-  // 3-Second Auto-Slide Timer (Smooth sliding)
-  useEffect(() => {
-    if (affiliateBanners.length <= 1) return;
-    const timer = setInterval(() => {
-      setCurrentSlide((prev) => (prev + 1) % affiliateBanners.length);
-    }, 3000);
-    return () => clearInterval(timer);
-  }, [affiliateBanners.length]);
-
-  // Touch-swipe handlers
-  const handleTouchStartSlide = (e: React.TouchEvent) => {
-    touchStartXRef.current = e.touches[0].clientX;
-  };
-
-  const handleTouchEndSlide = (e: React.TouchEvent) => {
-    if (touchStartXRef.current === null) return;
-    const diff = touchStartXRef.current - e.changedTouches[0].clientX;
-    if (Math.abs(diff) > 40) {
-      if (diff > 0) {
-        // Swiped Left
-        setCurrentSlide((prev) => (prev + 1) % affiliateBanners.length);
-      } else {
-        // Swiped Right
-        setCurrentSlide((prev) => (prev - 1 + affiliateBanners.length) % affiliateBanners.length);
-      }
-    }
-    touchStartXRef.current = null;
-  };
-
-  const handleOpenAffiliateLink = (link: string) => {
-    const targetUrl = link.startsWith('http') ? link : `https://${link}`;
-    window.open(targetUrl, '_blank', 'noopener,noreferrer');
-  };
-
-  // --- SECTION B: Firestore king_games collection (Approved Games only) ---
-  useEffect(() => {
-    let isMounted = true;
-
-    const gamesRef = collection(db, 'king_games');
-    const unsubscribe = onSnapshot(
-      gamesRef,
-      (snapshot) => {
-        if (isMounted) {
-          const firestoreGames: DailyGame[] = [];
-          snapshot.forEach((docSnap) => {
-            const data = docSnap.data();
-            const isApproved =
-              data.status === 'approved' ||
-              data.approved === true ||
-              data.isApproved === true;
-            const url = data.url || data.link;
-
-            if (isApproved && url && typeof url === 'string' && url.startsWith('http')) {
-              firestoreGames.push({
-                id: docSnap.id,
-                title: (data.title || data.name || 'KING Game').trim(),
-                name: (data.name || data.title || 'KING Game').trim(),
-                url,
-                link: url,
-                thumbnail: data.thumbnail || data.image || '',
-                image: data.thumbnail || data.image || '',
-                category: data.category || 'Arcade',
-                source: data.source || 'KING Games',
-                status: 'approved',
-                approved: true,
-                isApproved: true,
-                featuredOnHome: true,
-                isNewToday: data.isNewToday || false,
-                rating: data.rating || 4.9,
-                plays: data.plays || '1.5K Plays',
-                addedAt: (data.createdAt?.toMillis?.()) || Date.now(),
-              });
-            }
-          });
-
-          setHomeGames(firestoreGames);
-        }
+    const unsubVideos = subscribePublishedVideos(
+      queryFetchLimit,
+      (list) => {
+        setPublishedVideos(list);
+        videosReady = true;
+        markReady();
       },
-      (error) => {
-        console.warn('onSnapshot king_games warning:', error);
+      (err) => {
+        setFeedError(err?.message || 'Error loading videos feed.');
+        videosReady = true;
+        markReady();
       }
     );
 
     return () => {
-      isMounted = false;
-      unsubscribe();
+      unsubPosts();
+      unsubVideos();
     };
-  }, []);
+  }, [queryFetchLimit, retrySeed]);
 
-  // Countdown timer for Flash Sale
-  const [timeLeft, setTimeLeft] = useState({ hours: 2, minutes: 36, seconds: 40 });
+  const feedItems = useMemo(
+    () => mergeHomeSocialFeed(userPosts, publishedVideos),
+    [userPosts, publishedVideos]
+  );
 
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setTimeLeft((prev) => {
-        if (prev.seconds > 0) return { ...prev, seconds: prev.seconds - 1 };
-        if (prev.minutes > 0) return { ...prev, minutes: 59, seconds: 59 };
-        if (prev.hours > 0) return { hours: prev.hours - 1, minutes: 59, seconds: 59 };
-        return { hours: 2, minutes: 45, seconds: 0 };
-      });
-    }, 1000);
-    return () => clearInterval(timer);
-  }, []);
-
-  const formatTimer = () => {
-    const h = String(timeLeft.hours).padStart(2, '0');
-    const m = String(timeLeft.minutes).padStart(2, '0');
-    const s = String(timeLeft.seconds).padStart(2, '0');
-    return `${h}:${m}:${s}`;
-  };
-
-  const banners = [
-    {
-      title: 'Special Mobile Offer',
-      subtitle: 'Flash Sale • Up to 65% OFF',
-      bullets: ['Mobiles', 'Fashion', 'Electronics'],
-      image: 'https://images.unsplash.com/photo-1511707171634-5f897ff02aa9?w=800&auto=format&fit=crop&q=80',
-    },
-    {
-      title: 'High Speed 4G Package',
-      subtitle: 'Jazz & Zong Super Combo',
-      bullets: ['100 GB Data', 'All-Net Mins', 'Cashback PKR 200'],
-      image: 'https://images.unsplash.com/photo-1544717305-2782549b5136?w=800&auto=format&fit=crop&q=80',
-    },
-    {
-      title: 'Wireless Gaming Earbuds',
-      subtitle: 'Zero Latency • ANC Audio',
-      bullets: ['48H Playtime', 'Deep Bass', 'Free Delivery'],
-      image: 'https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=800&auto=format&fit=crop&q=80',
-    },
-  ];
-
-  const [reels, setReels] = useState<any[]>([]);
-
-  // Real-time onSnapshot listener for user uploaded videos in Firestore `videos` collection
-  useEffect(() => {
-    const ref = collection(db, 'videos');
-    const unsubscribe = onSnapshot(
-      ref,
-      (snapshot) => {
-        if (!snapshot.empty) {
-          const fetched: any[] = [];
-          snapshot.forEach((docSnap) => {
-            const data = docSnap.data();
-            fetched.push({
-              id: docSnap.id,
-              userId: data.userId || data.uid,
-              uid: data.uid || data.userId,
-              title: data.title || 'User Uploaded Video',
-              views: data.views || '1 view',
-              duration: data.duration || '0:30',
-              channel: data.channel || data.channelName || data.uploaderName || 'KING Creator',
-              subscribers: '1.2K Subscribers',
-              likes: data.likes || 1,
-              badge: 'HD',
-              thumbnail: data.thumbnail || data.thumbnailUrl || 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600&auto=format&fit=crop&q=80',
-              url: data.url || data.videoUrl,
-              channelAvatar: data.channelAvatar || data.uploaderPhoto,
-            });
-          });
-          setReels(fetched);
-        } else {
-          setReels([]);
-        }
-      },
-      (err) => {
-        console.warn('onSnapshot videos error:', err);
-      }
+  const liveActivePhotoModal = useMemo(() => {
+    if (!activePhotoModal) return null;
+    return (
+      feedItems.find(
+        (i) => i.sourceCollection === activePhotoModal.sourceCollection && i.id === activePhotoModal.id
+      ) || activePhotoModal
     );
+  }, [activePhotoModal, feedItems]);
 
-    return () => unsubscribe();
-  }, []);
+  // --- 4. Unified "Latest on KING" Feed (Photos + Videos + Products + Approved Games) ---
+  const latestItems = useMemo<UnifiedLatestItem[]>(
+    () =>
+      mergeUnifiedLatestFeed({
+        posts: userPosts,
+        videos: publishedVideos,
+        products,
+        games: homeGames,
+      }),
+    [userPosts, publishedVideos, products, homeGames]
+  );
 
-  const toggleLike = (id: number | string) => {
-    setLikedReels((prev) => ({ ...prev, [id]: !prev[id] }));
+  const isLatestInitialLoading =
+    latestItems.length === 0 && feedLoading && productsLoading && gamesLoading;
+  const latestAnyError = feedError || productsError || gamesError;
+  const [latestFilter, setLatestFilter] = useState<'all' | 'posts' | 'shop' | 'games'>('all');
+
+  const filteredLatestItems = useMemo(() => {
+    if (latestFilter === 'posts') {
+      return latestItems.filter((i) => i.kind === 'photo' || i.kind === 'video');
+    }
+    if (latestFilter === 'shop') {
+      return latestItems.filter((i) => i.kind === 'product');
+    }
+    if (latestFilter === 'games') {
+      return latestItems.filter((i) => i.kind === 'game');
+    }
+    return latestItems;
+  }, [latestItems, latestFilter]);
+
+  const visibleLatestItems = useMemo(
+    () => filteredLatestItems.slice(0, latestLimit),
+    [filteredLatestItems, latestLimit]
+  );
+  const hasMoreLatest =
+    filteredLatestItems.length > latestLimit ||
+    userPosts.length >= queryFetchLimit ||
+    publishedVideos.length >= queryFetchLimit;
+
+  const [openCommentsId, setOpenCommentsId] = useState<string | null>(null);
+  const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
+  const [deletingKey, setDeletingKey] = useState<string | null>(null);
+  const [playingVideoId, setPlayingVideoId] = useState<string | null>(null);
+  const [downloadingReelId, setDownloadingReelId] = useState<string | null>(null);
+  const [downloadedReelIds, setDownloadedReelIds] = useState<Record<string, boolean>>({});
+
+  // Hide TopHeader whenever any overlay/detail/player/share modal/status viewer-editor is active
+  useEffect(() => {
+    const isAnyOverlayOpen = Boolean(
+      liveActivePhotoModal || activeGamePlayer || statusOverlayOpen || activeShareModal
+    );
+    onFullScreenOverlayChange?.(isAnyOverlayOpen);
+  }, [
+    liveActivePhotoModal,
+    activeGamePlayer,
+    statusOverlayOpen,
+    activeShareModal,
+    onFullScreenOverlayChange,
+  ]);
+
+  const openShareModalForFeedItem = (item: CentralFeedItem) => {
+    const shareUrl =
+      item.sourceCollection === 'videos' && typeof window !== 'undefined'
+        ? `${window.location.origin}/watch/${encodeURIComponent(item.id)}`
+        : item.mediaUrl || (typeof window !== 'undefined' ? window.location.origin : '');
+    setActiveShareModal({
+      title: item.title || item.caption || `${item.authorName} on KING`,
+      text: item.caption || item.title || 'Check this out on KING',
+      url: shareUrl,
+    });
   };
 
-  const toggleSub = (id: number | string) => {
-    setSubscribed((prev) => ({ ...prev, [id]: !prev[id] }));
+  const openShareModalForProduct = (product: CatalogProduct) => {
+    const origin = typeof window !== 'undefined' ? window.location.origin : '';
+    const displayPrice =
+      product.discountPrice && product.discountPrice > 0
+        ? product.discountPrice
+        : product.originalPrice;
+    setActiveShareModal({
+      title: product.name,
+      text: `${product.name} — Rs. ${displayPrice.toLocaleString()} on KING SHOP`,
+      url: `${origin}/catalog`,
+    });
+  };
+
+  const openShareModalForGame = (game: DailyGame) => {
+    const origin = typeof window !== 'undefined' ? window.location.origin : '';
+    const title = game.title || game.name || 'KING Game';
+    setActiveShareModal({
+      title,
+      text: `Play ${title} instantly on KING Play Games`,
+      url: game.url || game.link || origin,
+    });
+  };
+
+  const handleCopyShareLink = async () => {
+    if (!activeShareModal?.url) return;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(activeShareModal.url);
+      }
+      showToast('Link copied to clipboard!');
+      setActiveShareModal(null);
+    } catch {
+      showToast('Could not copy link.');
+    }
+  };
+
+  const handleNativeShare = async () => {
+    if (!activeShareModal) return;
+    try {
+      if (navigator.share) {
+        await navigator.share({
+          title: activeShareModal.title,
+          text: activeShareModal.text,
+          url: activeShareModal.url,
+        });
+        setActiveShareModal(null);
+      } else {
+        await handleCopyShareLink();
+      }
+    } catch {
+      // User dismissed native share dialog
+    }
+  };
+
+  const handleConfirmDeleteItem = async (item: CentralFeedItem) => {
+    const key = `${item.sourceCollection}:${item.id}`;
+    setDeletingKey(key);
+    try {
+      await deleteFeedItem(item.sourceCollection, item.id);
+      setConfirmDeleteKey(null);
+      showToast(
+        item.contentType === 'video'
+          ? 'Video removed from Home Feed & Videos Section.'
+          : 'Post removed from Home Social Feed.'
+      );
+    } catch (err: any) {
+      showToast(err?.message || 'Could not delete item.');
+    } finally {
+      setDeletingKey(null);
+    }
+  };
+
+  const handleOpenVideoItem = (item: CentralFeedItem, scopeKey: string) => {
+    if (onOpenWatchVideo) {
+      onOpenWatchVideo(item.id);
+    } else {
+      setPlayingVideoId(scopeKey);
+    }
+  };
+
+  const renderCompactSocialCard = (
+    item: CentralFeedItem,
+    cardKey: string,
+    allowInlinePlay: boolean
+  ) => {
+    const itemKey = `${item.sourceCollection}:${item.id}`;
+    const commentsOpen = openCommentsId === cardKey;
+    const isPlayingHere = allowInlinePlay && playingVideoId === cardKey;
+    const isOwnerOrAdmin = canUserManageItem(item.authorUid, user);
+    const thumb = item.contentType === 'photo' ? item.mediaUrl : item.thumbnailUrl;
+
+    return (
+      <article
+        key={cardKey}
+        onClick={() => {
+          if (item.contentType === 'photo') {
+            setActivePhotoModal(item);
+          } else {
+            handleOpenVideoItem(item, cardKey);
+          }
+        }}
+        className="bg-white border border-slate-200/90 hover:border-slate-300 rounded-2xl overflow-hidden shadow-sm cursor-pointer transition"
+      >
+        {isPlayingHere ? (
+          <div className="p-3 space-y-2.5" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <CreatorAvatar
+                  uid={item.authorUid}
+                  fallbackPhoto={item.authorPhoto}
+                  fallbackName={item.authorName}
+                  className="w-8 h-8 rounded-full shrink-0 overflow-hidden border border-slate-200"
+                />
+                <div className="min-w-0">
+                  <div className="text-xs font-bold text-slate-900 truncate">
+                    <CreatorDisplayName uid={item.authorUid} fallback={item.authorName} />
+                  </div>
+                  <div className="text-[11px] text-slate-500">
+                    Video · {formatRelativeTime(item.createdAt)}
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPlayingVideoId(null)}
+                className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-xs font-semibold text-slate-700 cursor-pointer"
+              >
+                Collapse
+              </button>
+            </div>
+
+            {item.caption && (
+              <p className="text-xs text-slate-700 break-words">{item.caption}</p>
+            )}
+
+            <div className="relative aspect-video rounded-xl overflow-hidden bg-black">
+              <video
+                src={item.mediaUrl}
+                poster={item.thumbnailUrl}
+                controls
+                autoPlay
+                playsInline
+                className="w-full h-full object-contain"
+              />
+            </div>
+          </div>
+        ) : (
+          <div className="p-3.5 flex items-start justify-between gap-3">
+            {/* Left Side: User Name, Title, Description */}
+            <div className="flex-1 min-w-0 space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <CreatorAvatar
+                    uid={item.authorUid}
+                    fallbackPhoto={item.authorPhoto}
+                    fallbackName={item.authorName}
+                    className="w-8 h-8 rounded-full shrink-0 overflow-hidden border border-slate-200"
+                  />
+                  <div className="min-w-0">
+                    <div className="text-xs font-bold text-slate-900 truncate">
+                      <CreatorDisplayName uid={item.authorUid} fallback={item.authorName} />
+                    </div>
+                    <div className="text-[11px] text-slate-500 flex items-center gap-1">
+                      <span className="font-semibold text-[#1877F2]">
+                        {item.contentType === 'photo' ? 'Photo' : 'Video'}
+                      </span>
+                      <span aria-hidden="true">·</span>
+                      <span>{formatRelativeTime(item.createdAt)}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {isOwnerOrAdmin && (
+                  <div
+                    className="flex items-center gap-1 shrink-0"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {confirmDeleteKey === itemKey ? (
+                      <>
+                        <button
+                          type="button"
+                          disabled={deletingKey === itemKey}
+                          onClick={() => void handleConfirmDeleteItem(item)}
+                          className="px-2 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-[10px] font-bold cursor-pointer"
+                        >
+                          {deletingKey === itemKey ? '...' : 'Delete'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteKey(null)}
+                          className="px-2 py-1 rounded-lg bg-slate-100 text-slate-600 text-[10px] font-semibold cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDeleteKey(itemKey)}
+                        aria-label="Delete post"
+                        className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {item.title && item.contentType === 'video' && (
+                <h4 className="text-sm font-bold text-slate-900 line-clamp-1 leading-snug">
+                  {item.title}
+                </h4>
+              )}
+
+              {item.caption ? (
+                <p className="text-xs sm:text-[13px] text-slate-700 line-clamp-3 break-words leading-relaxed">
+                  {item.caption}
+                </p>
+              ) : (
+                <p className="text-xs text-slate-500">
+                  {item.contentType === 'video'
+                    ? 'Tap to watch full video on KING'
+                    : 'Tap to view photo details'}
+                </p>
+              )}
+            </div>
+
+            {/* Right Side: Compact Square/Portrait Thumbnail */}
+            <div className="relative w-24 h-24 sm:w-28 sm:h-28 shrink-0 rounded-xl overflow-hidden bg-slate-100 border border-slate-200 flex items-center justify-center">
+              {thumb && !failedImages[cardKey] ? (
+                <img
+                  src={thumb}
+                  alt={item.title || item.caption || 'KING Media'}
+                  referrerPolicy="no-referrer"
+                  loading="lazy"
+                  onError={() =>
+                    setFailedImages((prev) => ({ ...prev, [cardKey]: true }))
+                  }
+                  className="w-full h-full object-cover"
+                />
+              ) : item.contentType === 'video' && item.mediaUrl ? (
+                <video
+                  src={item.mediaUrl}
+                  preload="metadata"
+                  muted
+                  className="w-full h-full object-cover"
+                />
+              ) : item.contentType === 'video' ? (
+                <Film className="w-6 h-6 text-slate-400" />
+              ) : (
+                <ImageIcon className="w-6 h-6 text-slate-400" />
+              )}
+
+              {item.contentType === 'video' && (
+                <div className="absolute inset-0 bg-black/20 flex items-center justify-center">
+                  <span className="w-8 h-8 rounded-full bg-white/95 text-[#1877F2] flex items-center justify-center shadow">
+                    <Play className="w-4 h-4 fill-current ml-0.5" />
+                  </span>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Facebook-Style Bottom Action Bar: Like | Comment | Share */}
+        <div
+          className="border-t border-slate-100 px-2 py-1 flex items-center gap-1 bg-white"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <FeedLikeButton item={item} onToast={showToast} />
+
+          <button
+            type="button"
+            onClick={() => setOpenCommentsId(commentsOpen ? null : cardKey)}
+            className={`flex-1 min-h-[38px] py-1.5 px-2 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer ${
+              commentsOpen
+                ? 'bg-blue-50 text-[#1877F2]'
+                : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+            }`}
+          >
+            <MessageCircle className="w-4 h-4" />
+            <span className="tabular-nums">
+              Comment{item.commentsCount > 0 ? ` (${item.commentsCount})` : ''}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => openShareModalForFeedItem(item)}
+            className="flex-1 min-h-[38px] py-1.5 px-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 hover:text-slate-900 flex items-center justify-center gap-1.5 transition cursor-pointer"
+          >
+            <Share2 className="w-4 h-4" />
+            <span>Share</span>
+          </button>
+
+          {item.contentType === 'video' && item.mediaUrl && (
+            <button
+              type="button"
+              onClick={async () => {
+                setDownloadingReelId(item.id);
+                try {
+                  await downloadVideoFile({
+                    id: item.id,
+                    title: item.title,
+                    videoUrl: item.mediaUrl,
+                    thumbnailUrl: item.thumbnailUrl,
+                  });
+                  setDownloadedReelIds((prev) => ({ ...prev, [item.id]: true }));
+                  setTimeout(() => {
+                    setDownloadedReelIds((prev) => ({ ...prev, [item.id]: false }));
+                  }, 3000);
+                } catch {
+                  showToast('Could not save video.');
+                } finally {
+                  setDownloadingReelId(null);
+                }
+              }}
+              disabled={downloadingReelId === item.id}
+              aria-label="Save video"
+              title="Save video"
+              className="min-h-[38px] px-2.5 py-1.5 rounded-xl text-slate-500 hover:bg-slate-100 hover:text-emerald-600 flex items-center justify-center transition cursor-pointer disabled:opacity-50"
+            >
+              {downloadedReelIds[item.id] ? (
+                <Check className="w-4 h-4 text-emerald-600" />
+              ) : (
+                <Download
+                  className={`w-4 h-4 ${
+                    downloadingReelId === item.id ? 'animate-bounce' : ''
+                  }`}
+                />
+              )}
+            </button>
+          )}
+        </div>
+
+        {commentsOpen && <FeedCommentsDrawer item={item} onToast={showToast} />}
+      </article>
+    );
+  };
+
+  const renderCompactProductCard = (product: CatalogProduct, cardKey: string) => {
+    const displayPrice =
+      product.discountPrice && product.discountPrice > 0
+        ? product.discountPrice
+        : product.originalPrice;
+    const hasDiscount =
+      Boolean(product.discountPrice) &&
+      (product.discountPrice || 0) < product.originalPrice;
+    const discountPercent = hasDiscount
+      ? Math.round(((product.originalPrice - (product.discountPrice || 0)) / product.originalPrice) * 100)
+      : 0;
+    const thumb = product.imageUrls[0] || '';
+
+    return (
+      <article
+        key={cardKey}
+        onClick={() => onOpenTab('CATALOG')}
+        className="bg-white border border-slate-200/90 hover:border-slate-300 rounded-2xl overflow-hidden shadow-sm cursor-pointer transition"
+      >
+        <div className="p-3.5 flex items-start justify-between gap-3">
+          {/* Left Side: Store/Author, Product Name, Price, Description */}
+          <div className="flex-1 min-w-0 space-y-1">
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="w-7 h-7 rounded-full bg-amber-100 text-amber-700 border border-amber-200 flex items-center justify-center shrink-0">
+                <ShoppingBag className="w-3.5 h-3.5" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-slate-900 truncate">KING SHOP</div>
+                <div className="text-[11px] text-slate-500 truncate">
+                  {product.category}
+                  {product.createdAt ? ` · ${formatRelativeTime(product.createdAt)}` : ''}
+                </div>
+              </div>
+            </div>
+
+            <h4 className="text-sm font-bold text-slate-900 line-clamp-1 pt-0.5">
+              {product.name}
+            </h4>
+
+            <div className="flex items-baseline flex-wrap gap-2 tabular-nums">
+              <span className="text-sm font-black text-[#1877F2]">
+                Rs. {displayPrice.toLocaleString()}
+              </span>
+              {hasDiscount && (
+                <span className="text-xs text-slate-400 line-through">
+                  Rs. {product.originalPrice.toLocaleString()}
+                </span>
+              )}
+              {hasDiscount && discountPercent > 0 && (
+                <span className="text-[10px] font-bold text-rose-600 bg-rose-50 border border-rose-200 px-1.5 py-0.5 rounded-md">
+                  {discountPercent}% OFF
+                </span>
+              )}
+              <span
+                className={`text-[10px] font-semibold ${
+                  product.stock > 0 ? 'text-emerald-600' : 'text-rose-600'
+                }`}
+              >
+                {product.stock > 0 ? `· In Stock (${product.stock})` : '· Out of stock'}
+              </span>
+            </div>
+
+            {product.description && (
+              <p className="text-xs text-slate-600 line-clamp-2 break-words">
+                {product.description}
+              </p>
+            )}
+          </div>
+
+          {/* Right Side: Compact Small Product Thumbnail */}
+          <div className="w-24 h-24 sm:w-28 sm:h-28 shrink-0 rounded-xl bg-slate-100 border border-slate-200 overflow-hidden flex items-center justify-center">
+            {thumb && !failedImages[cardKey] ? (
+              <img
+                src={thumb}
+                alt={product.name}
+                referrerPolicy="no-referrer"
+                onError={() =>
+                  setFailedImages((prev) => ({ ...prev, [cardKey]: true }))
+                }
+                className="w-full h-full object-cover"
+                loading="lazy"
+              />
+            ) : (
+              <ShoppingBag className="w-6 h-6 text-slate-400" />
+            )}
+          </div>
+        </div>
+
+        {/* Bottom Compact Action Bar: Shop Now + More to Shop Section */}
+        <div
+          className="border-t border-slate-100 px-3 py-2 flex items-center gap-2 bg-white"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            onClick={() => orderOnWhatsApp(product)}
+            className="flex-1 min-h-[38px] py-1.5 px-3 rounded-xl text-xs font-bold bg-[#1877F2] hover:bg-blue-600 text-white flex items-center justify-center gap-1.5 transition cursor-pointer shadow-sm active:scale-[0.98]"
+          >
+            <ShoppingBag className="w-4 h-4" />
+            <span>Shop Now</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onOpenTab('CATALOG')}
+            className="min-h-[38px] py-1.5 px-3 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center gap-1 transition cursor-pointer shrink-0"
+            title="Open Shop Section"
+          >
+            <span>More</span>
+            <ChevronRight className="w-3.5 h-3.5" />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => openShareModalForProduct(product)}
+            className="min-h-[38px] py-1.5 px-2.5 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 hover:text-slate-900 flex items-center justify-center gap-1 transition cursor-pointer shrink-0"
+            title="Share Product"
+          >
+            <Share2 className="w-4 h-4" />
+            <span className="hidden sm:inline">Share</span>
+          </button>
+        </div>
+      </article>
+    );
+  };
+
+  const renderCompactGameCard = (game: DailyGame, cardKey: string) => {
+    const thumb = game.thumbnail || game.image || '';
+    const title = game.title || game.name || 'KING Game';
+    const isApkOrInstall = Boolean(
+      (game as any).isApk ||
+      (game as any).needsInstall ||
+      (game as any).type === 'apk' ||
+      (game as any).gameType === 'apk' ||
+      (game.category && game.category.toLowerCase().includes('apk')) ||
+      (game.url && game.url.toLowerCase().includes('.apk')) ||
+      (game.link && game.link.toLowerCase().includes('.apk')) ||
+      (game as any).apkUrl ||
+      (game as any).downloadUrl
+    );
+    const installTargetUrl =
+      (game as any).apkUrl ||
+      (game as any).downloadUrl ||
+      game.url ||
+      game.link ||
+      '';
+
+    return (
+      <article
+        key={cardKey}
+        onClick={() => {
+          if (isApkOrInstall) {
+            if (installTargetUrl) {
+              window.open(installTargetUrl, '_blank', 'noopener,noreferrer');
+            } else {
+              showToast('Install link not available');
+            }
+          } else {
+            setActiveGamePlayer(game);
+          }
+        }}
+        className="bg-white border border-slate-200/90 hover:border-slate-300 rounded-2xl overflow-hidden shadow-sm cursor-pointer transition"
+      >
+        <div className="p-3.5 flex items-start justify-between gap-3">
+          {/* Left Side: Source, Game Title, Rating, Description */}
+          <div className="flex-1 min-w-0 space-y-1">
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="w-7 h-7 rounded-full bg-blue-50 text-[#1877F2] border border-blue-200 flex items-center justify-center shrink-0">
+                <Gamepad2 className="w-3.5 h-3.5" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-slate-900 truncate">KING Play Games</div>
+                <div className="text-[11px] text-slate-500 truncate">
+                  {game.category || 'Arcade'}
+                  {game.addedAt ? ` · ${formatRelativeTime(game.addedAt)}` : ''}
+                </div>
+              </div>
+            </div>
+
+            <h4 className="text-sm font-bold text-slate-900 line-clamp-1 pt-0.5">
+              {title}
+            </h4>
+
+            <div className="flex items-center gap-2 text-xs tabular-nums">
+              <span className="font-bold text-amber-600 flex items-center gap-0.5">
+                <Star className="w-3.5 h-3.5 fill-current" />
+                {game.rating || 4.9}
+              </span>
+              <span className="text-slate-400">·</span>
+              <span className="text-slate-500 font-medium">
+                {isApkOrInstall ? 'Android APK' : (game.source || 'Instant HTML5')}
+              </span>
+            </div>
+
+            <p className="text-xs text-slate-600 line-clamp-2">
+              {game.description || (isApkOrInstall ? 'Install and play on your device.' : 'Play instantly inside KING with no download required.')}
+            </p>
+          </div>
+
+          {/* Right Side: Compact Small Game Thumbnail */}
+          <div className="relative w-24 h-24 sm:w-28 sm:h-28 shrink-0 rounded-xl bg-slate-100 border border-slate-200 overflow-hidden flex items-center justify-center">
+            {thumb && !failedImages[cardKey] ? (
+              <img
+                src={thumb}
+                alt={title}
+                referrerPolicy="no-referrer"
+                onError={() =>
+                  setFailedImages((prev) => ({ ...prev, [cardKey]: true }))
+                }
+                className="w-full h-full object-cover"
+                loading="lazy"
+              />
+            ) : (
+              <Gamepad2 className="w-6 h-6 text-[#1877F2]" />
+            )}
+            <div className="absolute inset-0 bg-black/15 flex items-center justify-center">
+              <span className="w-8 h-8 rounded-full bg-white/95 text-[#1877F2] flex items-center justify-center shadow">
+                {isApkOrInstall ? (
+                  <Download className="w-4 h-4 text-[#1877F2]" />
+                ) : (
+                  <Play className="w-4 h-4 fill-current ml-0.5" />
+                )}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Bottom Compact Action Bar: BLUE Install or GREEN Play + small gray More to Game Section */}
+        <div
+          className="border-t border-slate-100 px-3 py-2 flex items-center gap-2 bg-white"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {isApkOrInstall ? (
+            <button
+              type="button"
+              onClick={() => {
+                if (installTargetUrl) {
+                  window.open(installTargetUrl, '_blank', 'noopener,noreferrer');
+                } else {
+                  showToast('Install link not available');
+                }
+              }}
+              className="flex-1 min-h-[38px] py-1.5 px-3 rounded-xl text-xs font-bold bg-[#1877F2] hover:bg-blue-600 text-white flex items-center justify-center gap-1.5 transition cursor-pointer shadow-sm active:scale-[0.98]"
+            >
+              <Download className="w-4 h-4" />
+              <span>Install</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setActiveGamePlayer(game)}
+              className="flex-1 min-h-[38px] py-1.5 px-3 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white flex items-center justify-center gap-1.5 transition cursor-pointer shadow-sm active:scale-[0.98]"
+            >
+              <Play className="w-4 h-4 fill-current" />
+              <span>Play</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={() => onOpenTab('games')}
+            className="min-h-[38px] py-1.5 px-3 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center gap-1 transition cursor-pointer shrink-0"
+            title="Open Game Section"
+          >
+            <span>More</span>
+            <ChevronRight className="w-3.5 h-3.5" />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => openShareModalForGame(game)}
+            className="min-h-[38px] py-1.5 px-2.5 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 hover:text-slate-900 flex items-center justify-center gap-1 transition cursor-pointer shrink-0"
+            title="Share Game"
+          >
+            <Share2 className="w-4 h-4" />
+            <span className="hidden sm:inline">Share</span>
+          </button>
+        </div>
+      </article>
+    );
   };
 
   return (
-    <div className="pb-24 space-y-6">
-      {/* KING Status Bar (Home Screen Only, Below TopHeader) */}
-      <StatusBar />
+    <div className="min-h-screen bg-[#F0F2F5] text-slate-900 pt-[60px] pb-24 space-y-4">
+      {toastMsg && (
+        <div className="fixed top-16 left-1/2 -translate-x-1/2 z-[160] bg-slate-900 text-white font-bold text-xs px-4 py-2 rounded-full shadow-lg animate-in fade-in">
+          {toastMsg}
+        </div>
+      )}
 
-      {/* 1. Daraz Affiliate Deals Auto-Sliding Carousel Section */}
-      <section className="px-4 pt-1">
-        <div className="flex items-center justify-between mb-3">
+      {/* 1. KING 24h Status Stories Bar (Top below Fixed Home Header) */}
+      <StatusBar lightMode={true} onOverlayChange={setStatusOverlayOpen} />
+
+      {/* 2. Unified "Latest on KING" Feed (Directly Below StatusBar) */}
+      <section id="latest-on-king-section" className="px-3.5 pt-1 space-y-3">
+        <div className="flex items-center justify-between px-0.5">
           <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-orange-600 to-amber-500 flex items-center justify-center text-white shadow-md shadow-orange-600/30">
-              <ShoppingBag className="w-4 h-4" />
+            <div className="w-8 h-8 rounded-xl bg-blue-100 text-[#1877F2] flex items-center justify-center">
+              <Clock className="w-4 h-4" />
             </div>
             <div>
-              <h2 className="text-base font-extrabold text-white flex items-center gap-1.5 leading-none">
-                <span>Daraz</span>
-                <span className="text-orange-400 italic">Affiliate Deals</span>
+              <h2 className="text-base font-extrabold text-slate-900 leading-none">
+                Latest on <span className="text-[#1877F2]">KING</span>
               </h2>
-              <p className="text-[10px] text-slate-400 font-semibold tracking-wider uppercase mt-0.5">
-                Exclusive Shopping Offers & Discounts
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                Newest on Top · Games · User Posts · KING SHOP
               </p>
             </div>
           </div>
-          <span className="text-[10px] text-emerald-400 font-bold bg-emerald-950/60 border border-emerald-500/30 px-2 py-0.5 rounded-full animate-pulse">
-            • Live 3s
+          <span className="text-[11px] font-semibold text-slate-500 tabular-nums">
+            {filteredLatestItems.length > 0 ? `${filteredLatestItems.length} live` : ''}
           </span>
         </div>
 
-        {/* Touch-Enabled Smooth Auto-Slider */}
-        <div 
-          onTouchStart={handleTouchStartSlide}
-          onTouchEnd={handleTouchEndSlide}
-          className="relative rounded-3xl overflow-hidden border border-amber-500/30 bg-[#0c1424] shadow-2xl shadow-orange-950/20 group select-none"
-        >
-          {/* Active Banner Slide */}
-          {affiliateBanners.map((banner, idx) => {
-            if (idx !== currentSlide) return null;
-            return (
-              <div 
-                key={banner.id || idx}
-                onClick={() => handleOpenAffiliateLink(banner.link)}
-                className="relative h-64 sm:h-72 w-full overflow-hidden cursor-pointer animate-in fade-in zoom-in-95 duration-500"
-              >
-                <img
-                  src={banner.image}
-                  alt={banner.title}
-                  className="w-full h-full object-cover brightness-75 group-hover:scale-105 transition duration-700"
-                />
-                <div className="absolute inset-0 bg-gradient-to-t from-[#060c17] via-[#060c17]/60 to-transparent" />
-
-                {/* Badge */}
-                <div className="absolute top-4 left-4 flex items-center gap-1.5 bg-gradient-to-r from-orange-600 to-amber-600 px-3 py-1 rounded-full text-white text-[11px] font-black uppercase tracking-wider shadow-lg shadow-orange-600/40">
-                  <Flame className="w-3.5 h-3.5 fill-current animate-bounce" />
-                  {banner.badge || 'Daraz Special 🛍️'}
-                </div>
-
-                {/* Card Overlay Content */}
-                <div className="absolute bottom-5 left-4 right-4 text-left space-y-2">
-                  <h3 className="text-xl sm:text-2xl font-black text-white leading-tight drop-shadow-lg line-clamp-2">
-                    {banner.title}
-                  </h3>
-
-                  {/* Timer & Shop Now Button Bar */}
-                  <div className="flex items-center justify-between gap-3 bg-black/70 backdrop-blur-md p-2 rounded-2xl border border-white/10">
-                    <div className="flex items-center gap-2 pl-2">
-                      <Clock className="w-4 h-4 text-amber-400 animate-spin" style={{ animationDuration: '6s' }} />
-                      <div>
-                        <div className="text-[9px] uppercase tracking-wider text-amber-400 font-bold">Limited Offer</div>
-                        <div className="text-xs font-mono font-black text-white">{formatTimer()}</div>
-                      </div>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleOpenAffiliateLink(banner.link);
-                      }}
-                      className="bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-400 hover:to-amber-400 text-white font-extrabold text-xs px-5 py-2.5 rounded-xl shadow-lg shadow-orange-600/40 transition active:scale-95 flex items-center gap-1 cursor-pointer"
-                    >
-                      <span>SHOP NOW</span>
-                      <ChevronRight className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-
-          {/* Carousel Dots Indicator */}
-          <div className="flex items-center justify-center gap-1.5 py-2.5 bg-[#080e1c]">
-            {affiliateBanners.map((_, idx) => (
-              <button
-                key={idx}
-                type="button"
-                onClick={() => setCurrentSlide(idx)}
-                className={`h-1.5 rounded-full transition-all duration-300 cursor-pointer ${
-                  currentSlide === idx ? 'w-6 bg-orange-400 shadow-[0_0_10px_#f97316]' : 'w-2 bg-slate-700'
-                }`}
-              />
-            ))}
-          </div>
-        </div>
-      </section>
-
-
-
-      {/* 3. DAILY AUTO GAMES SECTION (Every 24h 5 new games from GamePix on top) */}
-      <section className="px-4">
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-purple-600 to-indigo-600 border border-purple-400/40 flex items-center justify-center text-white shadow-md shadow-purple-600/30">
-              <Gamepad2 className="w-4 h-4" />
-            </div>
-            <div>
-              <div className="flex items-center gap-1.5 leading-none">
-                <h2 className="text-base font-extrabold text-white">
-                  DAILY GAMES
-                </h2>
-                <span className="text-[9px] bg-purple-500/25 text-purple-300 border border-purple-500/30 font-black px-1.5 py-0.5 rounded-full uppercase">
-                  5 NEW / 24H
-                </span>
-              </div>
-              <p className="text-[10px] text-slate-400 font-semibold tracking-wider uppercase mt-0.5">
-                Instant HTML5 • GamePix Property PN8G3
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            {/* Rule 3: Save last update time, show "Last Updated: Today" */}
-            <div className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-950/80 border border-emerald-500/40 text-emerald-300 text-[10px] font-black tracking-wide shadow-sm">
-              <Sparkles className="w-3 h-3 text-emerald-400 animate-pulse shrink-0" />
-              <span>Last Updated: {formatLastUpdated(lastUpdateTimestamp)}</span>
-            </div>
-
+        {/* Real-time Type Filter Chips */}
+        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-0.5">
+          {[
+            { id: 'all', label: 'All (Newest)' },
+            { id: 'posts', label: 'User Posts' },
+            { id: 'shop', label: 'KING SHOP' },
+            { id: 'games', label: 'Games' },
+          ].map((tab) => (
             <button
-              onClick={() => onOpenTab('games')}
-              className="text-[11px] font-bold text-slate-400 hover:text-purple-300 flex items-center gap-0.5 transition cursor-pointer"
+              key={tab.id}
+              type="button"
+              onClick={() => setLatestFilter(tab.id as any)}
+              className={`px-3 py-1.5 rounded-full text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
+                latestFilter === tab.id
+                  ? 'bg-[#1877F2] text-white shadow-sm'
+                  : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
+              }`}
             >
-              ALL
-              <ChevronRight className="w-3.5 h-3.5" />
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        {latestAnyError && (
+          <div className="p-3 rounded-2xl bg-rose-50 border border-rose-200 flex items-center justify-between gap-2 text-xs text-rose-700">
+            <div className="flex items-center gap-2 min-w-0">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span className="truncate">{latestAnyError}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setRetrySeed((s) => s + 1)}
+              className="min-h-[36px] px-3 py-1 rounded-xl bg-rose-600 text-white font-bold flex items-center gap-1 cursor-pointer shrink-0"
+            >
+              <RotateCcw className="w-3 h-3" />
+              Retry
             </button>
           </div>
-        </div>
+        )}
 
-        {/* Game Cards Grid (Rule 4: Don't delete old games, just add new on top) */}
-        <div className="grid grid-cols-2 gap-3">
-          {homeGames.slice(0, 10).map((g, index) => {
-            const isTopNew = index < 5 || g.isNewToday;
-            const title = g.title || g.name || 'KING Game';
-            const thumb = g.thumbnail || g.image;
+        {isLatestInitialLoading ? (
+          <div className="p-6 rounded-2xl bg-white border border-slate-200 flex items-center justify-center gap-2 text-xs text-slate-500 shadow-sm">
+            <Loader2 className="w-4 h-4 animate-spin text-[#1877F2]" />
+            <span>Loading latest KING updates...</span>
+          </div>
+        ) : visibleLatestItems.length === 0 ? (
+          <div className="p-5 rounded-2xl bg-white border border-dashed border-slate-300 text-center space-y-1.5 shadow-sm">
+            <p className="text-xs font-bold text-slate-800">No live posts published yet</p>
+            <p className="text-[11px] text-slate-500">
+              Tap the blue + icon in the top bar to share a photo or video.
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {visibleLatestItems.map((entry) => {
+              if ((entry.kind === 'photo' || entry.kind === 'video') && entry.postItem) {
+                return renderCompactSocialCard(
+                  entry.postItem,
+                  `latest-${entry.uniqueKey}`,
+                  false
+                );
+              }
+              if (entry.kind === 'product' && entry.productItem) {
+                return renderCompactProductCard(
+                  entry.productItem,
+                  `latest-${entry.uniqueKey}`
+                );
+              }
+              if (entry.kind === 'game' && entry.gameItem) {
+                return renderCompactGameCard(
+                  entry.gameItem,
+                  `latest-${entry.uniqueKey}`
+                );
+              }
+              return null;
+            })}
 
-            return (
-              <div 
-                key={g.id || index}
-                onClick={() => setActiveGamePlayer(g)}
-                className="group cursor-pointer rounded-2xl overflow-hidden border border-purple-500/30 hover:border-purple-400 bg-[#0c1322] hover:bg-[#0f172a] transition-all p-3 flex flex-col justify-between shadow-lg relative"
+            {hasMoreLatest && (
+              <button
+                type="button"
+                onClick={() => setLatestLimit((prev) => prev + 8)}
+                className="w-full min-h-[44px] py-2.5 rounded-2xl bg-white hover:bg-slate-50 border border-slate-200 text-xs font-bold text-[#1877F2] transition cursor-pointer shadow-sm"
               >
-                <div className="relative h-28 rounded-xl overflow-hidden mb-2 bg-slate-900 border border-slate-800">
-                  {thumb ? (
-                    <img
-                      src={thumb}
-                      alt={title}
-                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                      loading="lazy"
-                    />
-                  ) : (
-                    <div className="w-full h-full flex flex-col items-center justify-center text-slate-600 bg-slate-950">
-                      <Gamepad2 className="w-6 h-6 mb-1 text-purple-400" />
-                      <span className="text-[9px] font-bold text-slate-400">Play Now</span>
-                    </div>
-                  )}
-
-                  {/* Badge: New Today for top 5, or Popular */}
-                  {isTopNew ? (
-                    <span className="absolute top-2 right-2 text-[8px] bg-gradient-to-r from-amber-400 via-orange-500 to-red-500 text-slate-950 font-black px-2 py-0.5 rounded-full shadow-md flex items-center gap-0.5">
-                      🔥 NEW TODAY
-                    </span>
-                  ) : (
-                    <span className="absolute top-2 right-2 text-[8px] bg-purple-950/90 border border-purple-500/40 text-purple-200 font-bold px-1.5 py-0.5 rounded-full">
-                      POPULAR
-                    </span>
-                  )}
-
-                  {/* Play Button Overlay on Hover */}
-                  <div className="absolute inset-0 bg-black/30 group-hover:bg-black/15 transition-colors flex items-center justify-center opacity-0 group-hover:opacity-100">
-                    <div className="w-9 h-9 rounded-full bg-emerald-500 text-slate-950 flex items-center justify-center shadow-lg">
-                      <Play className="w-4 h-4 fill-current ml-0.5" />
-                    </div>
-                  </div>
-                </div>
-
-                <div>
-                  <h4 className="text-xs font-bold text-white group-hover:text-purple-300 truncate" title={title}>
-                    {title}
-                  </h4>
-                  <div className="flex items-center justify-between text-[10px] text-slate-400 mt-1">
-                    <span className="text-amber-400 font-bold flex items-center gap-0.5">
-                      <Star className="w-2.5 h-2.5 fill-current" /> {g.rating || 4.9}
-                    </span>
-                    <span className="text-purple-300 font-semibold truncate max-w-[80px]">
-                      {g.category || 'Arcade'}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
+                Load More Latest Content
+              </button>
+            )}
+          </div>
+        )}
       </section>
 
-      {/* 4. KINGTUBE Reels Section */}
-      <section className="px-4">
-        <div className="flex items-center justify-between mb-3">
+      {/* 3. KING SHOP Featured Products (Same Compact White Facebook Card Style) */}
+      <section className="px-3.5 space-y-3">
+        <div className="flex items-center justify-between px-0.5">
           <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-xl bg-cyan-600/20 border border-cyan-500/40 flex items-center justify-center text-cyan-400">
-              <Film className="w-4 h-4" />
+            <div className="w-8 h-8 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center">
+              <ShoppingBag className="w-4 h-4" />
             </div>
             <div>
-              <h2 className="text-base font-extrabold text-white flex items-center gap-1.5 leading-none">
-                <span>KINGTUBE</span>
-                <span className="text-cyan-400 italic">Reels</span>
+              <h2 className="text-base font-extrabold text-slate-900 flex items-center gap-1.5 leading-none">
+                <span>KING SHOP</span>
+                <span className="text-[#1877F2]">Catalog</span>
               </h2>
-              <p className="text-[10px] text-slate-400 font-semibold tracking-wider uppercase mt-0.5">
-                Original Uploads & KING AI Creations
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                Live Products · Direct WhatsApp Order
               </p>
             </div>
           </div>
 
           <button
-            onClick={() => onOpenTab('videos')}
-            className="text-[11px] font-bold text-slate-400 hover:text-cyan-300 flex items-center gap-1 transition"
+            type="button"
+            onClick={() => onOpenTab('CATALOG')}
+            className="text-xs font-bold text-[#1877F2] hover:text-blue-700 flex items-center gap-0.5 transition cursor-pointer"
           >
-            VIEW ALL
-            <ChevronRight className="w-3.5 h-3.5" />
+            OPEN SHOP
+            <ChevronRight className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Reels Video Cards */}
-        <div className="space-y-4">
-          {reels.length === 0 ? (
-            <div className="bg-[#0b1322] border border-dashed border-slate-800 rounded-3xl p-6 text-center space-y-2">
-              <Film className="w-8 h-8 text-cyan-400 mx-auto" />
-              <h4 className="text-xs font-bold text-white">No Videos Uploaded Yet</h4>
-              <p className="text-[10px] text-slate-400">
-                Upload your first video from My KING Channel to show it here!
+        {productsError && (
+          <div className="p-2.5 rounded-2xl bg-rose-50 border border-rose-200 text-xs text-rose-700 flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>{productsError}</span>
+          </div>
+        )}
+
+        {productsLoading ? (
+          <div className="p-6 rounded-2xl bg-white border border-slate-200 flex items-center justify-center gap-2 text-xs text-slate-500 shadow-sm">
+            <Loader2 className="w-4 h-4 animate-spin text-[#1877F2]" />
+            <span>Loading KING SHOP products...</span>
+          </div>
+        ) : products.length === 0 ? (
+          <div className="p-6 rounded-2xl bg-white border border-dashed border-slate-300 text-center text-xs text-slate-500 shadow-sm">
+            No active products in catalog yet.
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {products.slice(0, 6).map((product) =>
+              renderCompactProductCard(product, `shop-sec-${product.id}`)
+            )}
+          </div>
+        )}
+      </section>
+
+      {/* 4. Approved KING Play Games Section (Same Compact White Facebook Card Style) */}
+      <section className="px-3.5 space-y-3">
+        <div className="flex items-center justify-between px-0.5">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-xl bg-blue-100 text-[#1877F2] flex items-center justify-center">
+              <Gamepad2 className="w-4 h-4" />
+            </div>
+            <div>
+              <h2 className="text-base font-extrabold text-slate-900 leading-none">
+                KING PLAY GAMES
+              </h2>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                Instant HTML5 · {formatLastUpdated(lastUpdateTimestamp)}
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => onOpenTab('games')}
+            className="text-xs font-bold text-[#1877F2] hover:text-blue-700 flex items-center gap-0.5 transition cursor-pointer"
+          >
+            ALL GAMES
+            <ChevronRight className="w-4 h-4" />
+          </button>
+        </div>
+
+        {gamesError && (
+          <div className="p-2.5 rounded-2xl bg-rose-50 border border-rose-200 text-xs text-rose-700 flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>{gamesError}</span>
+          </div>
+        )}
+
+        {gamesLoading && homeGames.length === 0 ? (
+          <div className="p-6 rounded-2xl bg-white border border-slate-200 flex items-center justify-center gap-2 text-xs text-slate-500 shadow-sm">
+            <Loader2 className="w-4 h-4 animate-spin text-[#1877F2]" />
+            <span>Loading approved games...</span>
+          </div>
+        ) : homeGames.length === 0 ? (
+          <div className="p-6 rounded-2xl bg-white border border-dashed border-slate-300 text-center space-y-2 shadow-sm">
+            <p className="text-xs text-slate-600">No featured approved games in database yet.</p>
+            <button
+              type="button"
+              onClick={() => onOpenTab('games')}
+              className="text-xs font-bold text-[#1877F2] underline cursor-pointer"
+            >
+              Browse Full Games Arcade →
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {homeGames.slice(0, 6).map((g, index) =>
+              renderCompactGameCard(g, `games-sec-${g.id || index}`)
+            )}
+          </div>
+        )}
+      </section>
+
+      {/* 5. Centralized Community Social Feed (Same Compact White Card Style) */}
+      <section className="px-3.5 space-y-3">
+        <div className="flex items-center justify-between px-0.5">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-xl bg-blue-100 text-[#1877F2] flex items-center justify-center">
+              <Film className="w-4 h-4" />
+            </div>
+            <div>
+              <h2 className="text-base font-extrabold text-slate-900 leading-none">
+                KING <span className="text-[#1877F2]">Community Feed</span>
+              </h2>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                Photos &amp; Videos · Real-time
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => onOpenTab('videos')}
+            className="text-xs font-bold text-[#1877F2] hover:text-blue-700 flex items-center gap-0.5 transition cursor-pointer"
+          >
+            VIDEOS TAB
+            <ChevronRight className="w-4 h-4" />
+          </button>
+        </div>
+
+        {feedError && (
+          <div className="p-3 rounded-2xl bg-rose-50 border border-rose-200 flex items-center justify-between gap-2 text-xs text-rose-700">
+            <div className="flex items-center gap-2 min-w-0">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span className="truncate">{feedError}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setRetrySeed((s) => s + 1)}
+              className="px-2.5 py-1 rounded-lg bg-rose-600 text-white font-bold flex items-center gap-1 cursor-pointer shrink-0"
+            >
+              <RotateCcw className="w-3 h-3" />
+              Retry
+            </button>
+          </div>
+        )}
+
+        <div className="space-y-3">
+          {feedLoading && feedItems.length === 0 ? (
+            <div className="bg-white border border-slate-200 rounded-2xl p-8 flex flex-col items-center justify-center gap-2 text-xs text-slate-500 shadow-sm">
+              <Loader2 className="w-6 h-6 animate-spin text-[#1877F2]" />
+              <span>Loading KING Social Feed...</span>
+            </div>
+          ) : feedItems.length === 0 ? (
+            <div className="bg-white border border-dashed border-slate-300 rounded-2xl p-6 text-center space-y-2 shadow-sm">
+              <Film className="w-8 h-8 text-[#1877F2] mx-auto" />
+              <h4 className="text-xs font-bold text-slate-800">No Posts Published Yet</h4>
+              <p className="text-[11px] text-slate-500">
+                Tap the blue + icon in the top bar to upload a photo or video from your gallery!
               </p>
             </div>
           ) : (
-            reels.map((reel) => (
-              <div
-                key={reel.id}
-                className="bg-[#0b1322] border border-slate-800 rounded-3xl overflow-hidden p-3 shadow-xl"
-              >
-                {/* Thumbnail Container */}
-                <div className="relative aspect-video rounded-2xl overflow-hidden bg-slate-950 group cursor-pointer">
-                  <img
-                    src={reel.thumbnail}
-                    alt={reel.title}
-                    className="w-full h-full object-cover group-hover:scale-102 transition duration-300"
-                  />
-                  
-                  {/* HD Badge */}
-                  <span className="absolute top-3 left-3 bg-red-600 text-white font-black text-[9px] px-2 py-0.5 rounded-md uppercase">
-                    {reel.badge}
-                  </span>
+            feedItems.map((item) =>
+              renderCompactSocialCard(
+                item,
+                `community-${item.sourceCollection}:${item.id}`,
+                true
+              )
+            )
+          )}
 
-                  {/* Duration Badge */}
-                  <span className="absolute bottom-3 right-3 bg-black/80 text-white font-mono text-[10px] font-bold px-2 py-0.5 rounded-md backdrop-blur-sm">
-                    {reel.duration}
-                  </span>
-
-                  {/* Play Button Overlay */}
-                  <div className="absolute inset-0 bg-black/20 flex items-center justify-center opacity-0 group-hover:opacity-100 transition">
-                    <div className="w-12 h-12 rounded-full bg-cyan-500 text-black flex items-center justify-center shadow-lg shadow-cyan-500/50">
-                      <Play className="w-6 h-6 fill-current ml-0.5" />
-                    </div>
-                  </div>
-                </div>
-
-                {/* Title & Metadata */}
-                <div className="mt-3">
-                  <h4 className="text-sm font-bold text-white line-clamp-1">
-                    {reel.title}
-                  </h4>
-                  <p className="text-[11px] text-slate-400 mt-0.5">{reel.views}</p>
-                </div>
-
-                {/* Channel & Action Controls */}
-                <div className="mt-3 flex items-center justify-between border-t border-slate-800/80 pt-3">
-                  <div className="flex items-center gap-2">
-                    <CreatorAvatar
-                      uid={reel.userId || reel.uid}
-                      fallbackPhoto={reel.channelAvatar}
-                      fallbackName={reel.channel}
-                      className="w-8 h-8 rounded-full shrink-0 overflow-hidden shadow-md border border-slate-700/60"
-                    />
-                    <div>
-                      <div className="text-xs font-bold text-white flex items-center gap-1">
-                        <CreatorDisplayName uid={reel.userId || reel.uid} fallback={reel.channel} />
-                        <span className="text-[10px] text-cyan-400">✓</span>
-                      </div>
-                      <div className="text-[10px] text-slate-400">{reel.subscribers}</div>
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={() => toggleSub(reel.id)}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1 ${
-                      subscribed[reel.id]
-                        ? 'bg-slate-800 text-slate-300'
-                        : 'bg-red-600 hover:bg-red-500 text-white shadow-md shadow-red-600/30'
-                    }`}
-                  >
-                    <Bell className="w-3 h-3" />
-                    {subscribed[reel.id] ? 'Subscribed' : 'SUBSCRIBE'}
-                  </button>
-                </div>
-
-                {/* Like, Share, Download Buttons */}
-                <div className="mt-2.5 flex items-center gap-2">
-                  <button
-                    onClick={() => toggleLike(reel.id)}
-                    className={`flex-1 py-1.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition ${
-                      likedReels[reel.id]
-                        ? 'bg-sky-500/20 text-sky-400 border border-sky-500/40'
-                        : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-                    }`}
-                  >
-                    <Heart className={`w-3.5 h-3.5 ${likedReels[reel.id] ? 'fill-current text-sky-400' : ''}`} />
-                    {likedReels[reel.id] ? 'Liked' : 'Like'} ({reel.likes + (likedReels[reel.id] ? 1 : 0)})
-                  </button>
-
-                  <button
-                    onClick={() => alert(`Shared "${reel.title}" to clipboard!`)}
-                    className="flex-1 py-1.5 rounded-xl text-xs font-bold bg-slate-900 text-slate-400 hover:text-white border border-slate-800 flex items-center justify-center gap-1.5 transition"
-                  >
-                    <Share2 className="w-3.5 h-3.5" />
-                    Share
-                  </button>
-
-                  {(reel.url || reel.videoUrl) && (
-                    <button
-                      onClick={async () => {
-                        setDownloadingReelId(reel.id);
-                        try {
-                          await downloadVideoFile({
-                            id: reel.id,
-                            title: reel.title,
-                            videoUrl: reel.url || reel.videoUrl,
-                            thumbnailUrl: reel.thumbnail,
-                          });
-                          setDownloadedReelIds((prev) => ({ ...prev, [reel.id]: true }));
-                          setTimeout(() => {
-                            setDownloadedReelIds((prev) => ({ ...prev, [reel.id]: false }));
-                          }, 3000);
-                        } catch (err) {
-                          console.error("Download failed:", err);
-                        } finally {
-                          setDownloadingReelId(null);
-                        }
-                      }}
-                      disabled={downloadingReelId === reel.id}
-                      className="px-3 py-1.5 rounded-xl text-xs font-bold bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center justify-center gap-1.5 transition active:scale-95 disabled:opacity-50"
-                      title="Download video"
-                    >
-                      {downloadedReelIds[reel.id] ? (
-                        <>
-                          <Check className="w-3.5 h-3.5" />
-                          <span>Saved</span>
-                        </>
-                      ) : (
-                        <>
-                          <Download className={`w-3.5 h-3.5 ${downloadingReelId === reel.id ? 'animate-bounce' : ''}`} />
-                          <span>Save</span>
-                        </>
-                      )}
-                    </button>
-                  )}
-                </div>
-              </div>
-            ))
+          {feedItems.length >= feedLimit && (
+            <button
+              type="button"
+              onClick={() => setFeedLimit((prev) => prev + 12)}
+              className="w-full min-h-[44px] py-2.5 rounded-2xl bg-white hover:bg-slate-50 border border-slate-200 text-xs font-bold text-[#1877F2] transition cursor-pointer shadow-sm"
+            >
+              Load More Community Posts
+            </button>
           )}
         </div>
       </section>
 
-      {/* 5. KING Movies & Cartoons */}
-      <section className="px-4">
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-xl bg-pink-600/20 border border-pink-500/40 flex items-center justify-center text-pink-400">
-              <Film className="w-4 h-4" />
-            </div>
-            <div>
-              <h2 className="text-base font-extrabold text-white flex items-center gap-1.5 leading-none">
-                <span>KING</span>
-                <span className="text-pink-400 italic">Movies & Cartoons</span>
-              </h2>
-              <p className="text-[10px] text-slate-400 font-semibold tracking-wider uppercase mt-0.5">
-                Bollywood, Lollywood & Kids Stories
-              </p>
-            </div>
-          </div>
-
-          <button
-            onClick={() => onOpenTab('videos')}
-            className="text-[11px] font-bold text-slate-400 hover:text-pink-300 flex items-center gap-1 transition"
-          >
-            VIEW ALL
-            <ChevronRight className="w-3.5 h-3.5" />
-          </button>
-        </div>
-
-        {/* Movie Posters preview */}
-        <div className="grid grid-cols-2 gap-3">
-          <div className="relative rounded-2xl overflow-hidden border border-slate-800 bg-slate-900 aspect-video group">
-            <img
-              src="https://images.unsplash.com/photo-1517604931442-7e0c8ed2963c?w=400&auto=format&fit=crop&q=80"
-              alt="Central Cinema"
-              className="w-full h-full object-cover group-hover:scale-105 transition"
-            />
-            <span className="absolute top-2 left-2 bg-purple-600 text-white text-[9px] font-black px-1.5 py-0.5 rounded">NEW</span>
-            <span className="absolute top-2 right-2 bg-black/80 text-amber-400 text-[9px] font-bold px-1.5 py-0.5 rounded flex items-center gap-0.5">
-              <Star className="w-2.5 h-2.5 fill-current" /> 4.9
-            </span>
-          </div>
-
-          <div className="relative rounded-2xl overflow-hidden border border-slate-800 bg-slate-900 aspect-video group">
-            <img
-              src="https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=400&auto=format&fit=crop&q=80"
-              alt="Neon Dreams"
-              className="w-full h-full object-cover group-hover:scale-105 transition"
-            />
-            <span className="absolute top-2 left-2 bg-purple-600 text-white text-[9px] font-black px-1.5 py-0.5 rounded">NEW</span>
-            <span className="absolute top-2 right-2 bg-black/80 text-amber-400 text-[9px] font-bold px-1.5 py-0.5 rounded flex items-center gap-0.5">
-              <Star className="w-2.5 h-2.5 fill-current" /> 4.8
-            </span>
-          </div>
-        </div>
-      </section>
-
-      {/* 6. Google AdMob Test Banner Ad */}
-      <section className="px-4 pt-2">
+      {/* 6. AdMob Banner */}
+      <section className="px-3.5 pt-1">
         <AdMobBannerAd />
       </section>
 
-      {/* Inline Responsive Game Player Modal */}
+      {/* Inline Full-Screen Game Player */}
       {activeGamePlayer && (
         <GamePlayer
           gameUrl={activeGamePlayer.url || activeGamePlayer.link || ''}
@@ -748,6 +1435,150 @@ export default function HomeView({ onOpenQR, onOpenTab }: HomeViewProps) {
         />
       )}
 
+      {/* Light-Mode Photo Post Detail Modal */}
+      {liveActivePhotoModal && (
+        <div
+          className="fixed inset-0 z-[130] bg-black/75 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 animate-in fade-in duration-150"
+          onClick={() => setActivePhotoModal(null)}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Photo post details"
+        >
+          <div
+            className="w-full max-w-md bg-white border border-slate-200 rounded-3xl overflow-hidden shadow-2xl max-h-[92vh] overflow-y-auto text-slate-900"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-2 p-3.5 border-b border-slate-200">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <CreatorAvatar
+                  uid={liveActivePhotoModal.authorUid}
+                  fallbackPhoto={liveActivePhotoModal.authorPhoto}
+                  fallbackName={liveActivePhotoModal.authorName}
+                  className="w-9 h-9 rounded-full shrink-0 overflow-hidden border border-slate-200"
+                />
+                <div className="min-w-0">
+                  <div className="text-xs font-bold text-slate-900 truncate">
+                    <CreatorDisplayName
+                      uid={liveActivePhotoModal.authorUid}
+                      fallback={liveActivePhotoModal.authorName}
+                    />
+                  </div>
+                  <div className="text-[11px] text-slate-500">
+                    Photo · {formatRelativeTime(liveActivePhotoModal.createdAt)}
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActivePhotoModal(null)}
+                aria-label="Close photo"
+                className="min-h-[40px] min-w-[40px] rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {liveActivePhotoModal.caption && (
+              <p className="px-4 pt-3 text-xs sm:text-sm text-slate-800 break-words">
+                {liveActivePhotoModal.caption}
+              </p>
+            )}
+
+            <div className="p-3.5 space-y-3">
+              <div className="rounded-2xl overflow-hidden bg-slate-100 border border-slate-200 flex items-center justify-center max-h-[55vh]">
+                <img
+                  src={liveActivePhotoModal.mediaUrl}
+                  alt={liveActivePhotoModal.caption || 'KING Photo'}
+                  referrerPolicy="no-referrer"
+                  className="w-full max-h-[55vh] object-contain"
+                />
+              </div>
+
+              <div className="border-t border-slate-100 pt-2 flex items-center gap-1">
+                <FeedLikeButton item={liveActivePhotoModal} onToast={showToast} />
+                <button
+                  type="button"
+                  onClick={() => openShareModalForFeedItem(liveActivePhotoModal)}
+                  className="flex-1 min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 hover:text-slate-900 flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <Share2 className="w-4 h-4" />
+                  <span>Share</span>
+                </button>
+              </div>
+            </div>
+
+            <FeedCommentsDrawer item={liveActivePhotoModal} onToast={showToast} />
+          </div>
+        </div>
+      )}
+
+      {/* Full-Screen Share Modal Sheet */}
+      {activeShareModal && (
+        <div
+          className="fixed inset-0 z-[140] bg-black/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4 animate-in fade-in duration-150"
+          onClick={() => setActiveShareModal(null)}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Share content"
+        >
+          <div
+            className="w-full max-w-md bg-white rounded-t-3xl sm:rounded-3xl border border-slate-200 p-4 space-y-3 shadow-2xl text-slate-900"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+              <div className="min-w-0 pr-2">
+                <h3 className="text-sm font-extrabold text-slate-900 truncate">
+                  Share on KING
+                </h3>
+                <p className="text-xs text-slate-500 truncate mt-0.5">
+                  {activeShareModal.title}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveShareModal(null)}
+                aria-label="Close share dialog"
+                className="min-w-[40px] min-h-[40px] rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 gap-2">
+              <button
+                type="button"
+                onClick={() => void handleNativeShare()}
+                className="w-full min-h-[44px] px-4 py-2.5 rounded-2xl bg-[#1877F2] hover:bg-[#166FE5] text-white text-xs font-bold flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <Share2 className="w-4 h-4" />
+                <span>Share via Device Apps</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => void handleCopyShareLink()}
+                className="w-full min-h-[44px] px-4 py-2.5 rounded-2xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <Copy className="w-4 h-4" />
+                <span>Copy Link</span>
+              </button>
+
+              <a
+                href={`https://wa.me/?text=${encodeURIComponent(
+                  `${activeShareModal.text}\n${activeShareModal.url}`
+                )}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={() => setActiveShareModal(null)}
+                className="w-full min-h-[44px] px-4 py-2.5 rounded-2xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-700 text-xs font-bold flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <ExternalLink className="w-4 h-4" />
+                <span>Send via WhatsApp</span>
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

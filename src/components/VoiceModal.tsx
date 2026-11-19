@@ -20,7 +20,7 @@ export default function VoiceModal({ isOpen, onClose, onTranscript }: VoiceModal
     const timer = setTimeout(() => {
       const sampleQueries = [
         'Open KingTube Trending Reels',
-        'Show Daraz Mobile Flash Sale',
+        'Show KING Shop Flash Deals',
         'Check Jazz 4G packages',
       ];
       const randomQ = sampleQueries[Math.floor(Math.random() * sampleQueries.length)];

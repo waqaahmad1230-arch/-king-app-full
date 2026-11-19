@@ -18,12 +18,13 @@ import VoiceModal from './components/VoiceModal';
 import MyKINGChannel from './components/MyKINGChannel';
 import SecretAdminPanel from './components/SecretAdminPanel';
 import AuthModal from './components/AuthModal';
+import PostMediaPickerModal from './components/PostMediaPickerModal';
+import PostEditorModal from './components/PostEditorModal';
 
-import GamingBottomBar from './components/GamingBottomBar';
 import BottomNavigation from './components/BottomNavigation';
 
 export default function App() {
-  const { user, isAuthModalOpen, closeAuthModal } = useAuth();
+  const { user, isAuthModalOpen, openAuthModal, closeAuthModal } = useAuth();
 
   const extractWatchVideoId = (pathname: string, search: string): string | null => {
     const match = pathname.match(/^\/watch\/([^/?#]+)/i);
@@ -95,15 +96,54 @@ export default function App() {
   const [isQROpen, setIsQROpen] = useState(false);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [isVoiceOpen, setIsVoiceOpen] = useState(false);
+  const [watchReturnTab, setWatchReturnTab] = useState<'HOME' | 'VIDEOS'>('VIDEOS');
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [viewingProfileUserId, setViewingProfileUserId] = useState<string | null>(null);
   const [isVideoFullScreen, setIsVideoFullScreen] = useState(false);
+  const [isChildOverlayOpen, setIsChildOverlayOpen] = useState(false);
+  const [isPostPickerOpen, setIsPostPickerOpen] = useState(false);
+  const [isPostEditorOpen, setIsPostEditorOpen] = useState(false);
+  const [postEditorInitialFile, setPostEditorInitialFile] = useState<File | null>(null);
+  const [postSelectionKey, setPostSelectionKey] = useState(0);
+  const [postToastMsg, setPostToastMsg] = useState<string | null>(null);
+
+  const showPostToast = (msg: string) => {
+    setPostToastMsg(msg);
+    setTimeout(() => setPostToastMsg(null), 3500);
+  };
+
+  const handleOpenPostPicker = () => {
+    if (!user) {
+      openAuthModal('login');
+      return;
+    }
+    setIsPostPickerOpen(true);
+  };
+
+  const handlePostMediaSelected = (file: File) => {
+    setIsPostPickerOpen(false);
+    setPostEditorInitialFile(file);
+    setPostSelectionKey((k) => k + 1);
+    setIsPostEditorOpen(true);
+  };
+
+  const handleOpenWatchFromHome = (videoId: string) => {
+    if (!videoId) return;
+    setWatchReturnTab('HOME');
+    setWatchVideoId(videoId);
+    setActiveTab('WATCH');
+    window.history.pushState({}, '', `/watch/${encodeURIComponent(videoId)}`);
+  };
 
   useEffect(() => {
     if (activeTab.toUpperCase() !== 'VIDEOS' || isProfileOpen) {
       setIsVideoFullScreen(false);
     }
   }, [activeTab, isProfileOpen]);
+
+  useEffect(() => {
+    setIsChildOverlayOpen(false);
+  }, [activeTab]);
 
   const [isSecretCodeModalOpen, setIsSecretCodeModalOpen] = useState(false);
   const [isSecretAdminOpen, setIsSecretAdminOpen] = useState(false);
@@ -125,7 +165,19 @@ export default function App() {
   const renderContent = () => {
     switch (activeTab.toUpperCase()) {
       case 'HOME':
-        return <HomeView onOpenQR={() => setIsQROpen(true)} onOpenTab={(tab) => setActiveTab(tab)} />;
+        return (
+          <HomeView
+            onOpenQR={() => setIsQROpen(true)}
+            onOpenWatchVideo={handleOpenWatchFromHome}
+            onFullScreenOverlayChange={setIsChildOverlayOpen}
+            onOpenTab={(tab) => {
+              setActiveTab(tab);
+              if (tab.toUpperCase() === 'CATALOG' && window.location.pathname.toLowerCase() !== '/catalog') {
+                window.history.pushState({}, '', '/catalog');
+              }
+            }}
+          />
+        );
       case 'GAMEPIX':
         return (
           <GamePixZoneView
@@ -142,6 +194,7 @@ export default function App() {
           <GamesView
             gamingTab={gamingTab}
             onSelectGamingTab={(tab) => setGamingTab(tab)}
+            onOverlayChange={setIsChildOverlayOpen}
             onOpenGamePix={() => {
               setActiveTab('GAMEPIX');
               window.history.pushState({}, '', '/gamepix');
@@ -154,7 +207,8 @@ export default function App() {
             videoId={watchVideoId || ''}
             onBackToFeed={() => {
               setWatchVideoId(null);
-              setActiveTab('VIDEOS');
+              setActiveTab(watchReturnTab);
+              setWatchReturnTab('VIDEOS');
               if (
                 window.location.pathname.toLowerCase().startsWith('/watch') ||
                 window.location.search.includes('video=')
@@ -182,7 +236,7 @@ export default function App() {
         );
       case 'MOBILE':
       case 'LIBRARY':
-        return <LibraryView />;
+        return <LibraryView onOverlayChange={setIsChildOverlayOpen} />;
       case 'CATALOG':
       case 'SHOP':
         return (
@@ -199,7 +253,19 @@ export default function App() {
       case 'PRIVACY_POLICY':
         return <PrivacyPolicy />;
       default:
-        return <HomeView onOpenQR={() => setIsQROpen(true)} onOpenTab={(tab) => setActiveTab(tab)} />;
+        return (
+          <HomeView
+            onOpenQR={() => setIsQROpen(true)}
+            onOpenWatchVideo={handleOpenWatchFromHome}
+            onFullScreenOverlayChange={setIsChildOverlayOpen}
+            onOpenTab={(tab) => {
+              setActiveTab(tab);
+              if (tab.toUpperCase() === 'CATALOG' && window.location.pathname.toLowerCase() !== '/catalog') {
+                window.history.pushState({}, '', '/catalog');
+              }
+            }}
+          />
+        );
     }
   };
 
@@ -219,114 +285,60 @@ export default function App() {
     );
   }
 
-  const isCatalogPage =
-    activeTab.toUpperCase() === 'CATALOG' || activeTab.toUpperCase() === 'SHOP';
+  const normalizedTab = activeTab.toUpperCase();
+  const isCatalogPage = normalizedTab === 'CATALOG' || normalizedTab === 'SHOP';
+  const isHomeTab =
+    normalizedTab === 'HOME' ||
+    ![
+      'GAMEPIX',
+      'GAMES',
+      'WATCH',
+      'VIDEOS',
+      'MOBILE',
+      'LIBRARY',
+      'CATALOG',
+      'SHOP',
+      'PRIVACY_POLICY',
+    ].includes(normalizedTab);
+  const isHeaderAllowedTab =
+    isHomeTab ||
+    normalizedTab === 'GAMES' ||
+    normalizedTab === 'VIDEOS' ||
+    normalizedTab === 'LIBRARY' ||
+    normalizedTab === 'MOBILE';
+  const hasAnyOverlay =
+    isQROpen ||
+    isSearchOpen ||
+    isVoiceOpen ||
+    isPostPickerOpen ||
+    isPostEditorOpen ||
+    isProfileOpen ||
+    isAuthModalOpen ||
+    isSecretCodeModalOpen ||
+    isSecretAdminOpen ||
+    isVideoFullScreen ||
+    isChildOverlayOpen;
   const hideHeaderForFullScreenVideo =
-    activeTab.toUpperCase() === 'WATCH' ||
-    (activeTab.toUpperCase() === 'VIDEOS' && isVideoFullScreen);
+    normalizedTab === 'WATCH' || (normalizedTab === 'VIDEOS' && isVideoFullScreen);
 
   return (
-    <div className={`app-container min-h-screen m-0 p-0 ${isCatalogPage ? 'bg-[#0A0A0A]' : 'bg-[#040812]'} text-white flex flex-col font-sans selection:bg-cyan-500/30`}>
-      
-      {activeTab.toUpperCase() === 'GAMEPIX' || isCatalogPage || hideHeaderForFullScreenVideo ? null : activeTab.toUpperCase() === 'GAMES' ? (
-        <div className="bg-black border-b-2 border-green-500 p-3 max-w-md mx-auto w-full sticky top-0 z-30">
-          {gamingTab === 'PLAYZONE' ? (
-            <div className="flex items-center justify-between gap-2.5">
-              <button
-                type="button"
-                onClick={() => setGamingTab('LOBBY')}
-                className="text-xs text-slate-300 hover:text-white flex items-center gap-1 font-bold bg-zinc-900/90 px-3 py-2 rounded-xl border border-zinc-800 cursor-pointer active:scale-95 transition flex-shrink-0 shadow"
-              >
-                ← Back
-              </button>
-
-              <div className="flex items-center gap-2 bg-emerald-500/15 border-2 border-emerald-400 px-3.5 py-1.5 rounded-xl shadow-[0_0_15px_rgba(0,255,136,0.35)]">
-                <span className="text-base leading-none">🎮</span>
-                <div className="text-left">
-                  <span className="text-xs sm:text-sm font-black tracking-wider text-green-400 uppercase leading-none block">
-                    PLAY GAMES
-                  </span>
-                  <span className="text-[9px] text-emerald-300 font-bold block mt-0.5">
-                    No Install • Only Play
-                  </span>
-                </div>
-              </div>
-
-              <div 
-                onClick={() => {
-                  setViewingProfileUserId(null);
-                  setIsProfileOpen(true);
-                }}
-                className="relative cursor-pointer group select-none flex-shrink-0"
-              >
-                <div className="w-10 h-10 rounded-xl overflow-hidden border border-green-500/60 bg-gradient-to-tr from-green-500/30 via-slate-800 to-emerald-500/30 p-[1px] shadow-md shadow-black/40 group-hover:scale-105 transition-transform">
-                  <div className="w-full h-full rounded-[10px] overflow-hidden bg-slate-900 flex items-center justify-center">
-                    {user?.photoURL ? (
-                      <img
-                        src={user.photoURL}
-                        alt={user.displayName || 'User'}
-                        className="w-full h-full object-cover"
-                      />
-                    ) : (
-                      <div className="w-full h-full flex items-center justify-center text-green-400 font-bold text-sm bg-gradient-to-br from-green-950 to-slate-900">
-                        👑
-                      </div>
-                    )}
-                  </div>
-                </div>
-                {user && (
-                  <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 bg-emerald-500 border-2 border-black rounded-full shadow-sm shadow-emerald-500/60 ring-1 ring-emerald-400/30" />
-                )}
-              </div>
-            </div>
-          ) : (
-            <div className="flex items-center justify-between gap-2.5">
-              <button
-                type="button"
-                onClick={() => setActiveTab('HOME')}
-                className="text-xs text-slate-300 hover:text-white flex items-center gap-1 font-bold bg-zinc-900/90 px-3 py-2 rounded-xl border border-zinc-800 cursor-pointer active:scale-95 transition flex-shrink-0 shadow"
-              >
-                ← Back
-              </button>
-
-              <div className="text-xs font-black text-green-400 tracking-wider uppercase">
-                KING Games Lobby
-              </div>
-              
-              <div 
-                onClick={() => {
-                  setViewingProfileUserId(null);
-                  setIsProfileOpen(true);
-                }}
-                className="relative cursor-pointer group select-none flex-shrink-0"
-              >
-                <div className="w-10 h-10 rounded-xl overflow-hidden border border-green-500/60 bg-gradient-to-tr from-green-500/30 via-slate-800 to-emerald-500/30 p-[1px] shadow-md shadow-black/40 group-hover:scale-105 transition-transform">
-                  <div className="w-full h-full rounded-[10px] overflow-hidden bg-slate-900 flex items-center justify-center">
-                    {user?.photoURL ? (
-                      <img
-                        src={user.photoURL}
-                        alt={user.displayName || 'User'}
-                        className="w-full h-full object-cover"
-                      />
-                    ) : (
-                      <div className="w-full h-full flex items-center justify-center text-green-400 font-bold text-sm bg-gradient-to-br from-green-950 to-slate-900">
-                        👑
-                      </div>
-                    )}
-                  </div>
-                </div>
-                {user && (
-                  <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 bg-emerald-500 border-2 border-black rounded-full shadow-sm shadow-emerald-500/60 ring-1 ring-emerald-400/30" />
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-      ) : (
+    <div
+      className={`app-container min-h-screen m-0 p-0 ${
+        isHomeTab
+          ? 'bg-[#F0F2F5] text-slate-900'
+          : isCatalogPage
+          ? 'bg-[#0A0A0A] text-white'
+          : 'bg-[#040812] text-white'
+      } flex flex-col font-sans selection:bg-blue-500/20`}
+    >
+      {isHeaderAllowedTab && !hasAnyOverlay && (
         <TopHeader
           user={user}
+          fixed={isHomeTab}
+          lightMode={isHomeTab}
           onOpenQR={() => setIsQROpen(true)}
           onOpenSearch={() => setIsSearchOpen(true)}
+          onOpenPost={handleOpenPostPicker}
           onOpenVoice={() => setIsVoiceOpen(true)}
           onOpenCatalog={() => {
             setActiveTab('CATALOG');
@@ -346,24 +358,13 @@ export default function App() {
         {renderContent()}
       </main>
 
-      {hideHeaderForFullScreenVideo ? null : activeTab.toUpperCase() === 'GAMES' ? (
-        <GamingBottomBar
-          active={gamingTab}
-          setActive={(tab: string) => {
-            setGamingTab(tab);
-            if (tab === 'WALLET') {
-              setActiveTab('LIBRARY');
-            } else if (tab === 'PLAYZONE') {
-              const el = document.getElementById('play-games-section');
-              if (el) el.scrollIntoView({ behavior: 'smooth' });
-            }
-          }}
-        />
-      ) : (
+      {hideHeaderForFullScreenVideo || isCatalogPage ? null : (
         <BottomNavigation
-          activeTab={activeTab === 'GAMEPIX' ? 'GAMES' : activeTab}
+          activeTab={normalizedTab === 'GAMEPIX' ? 'GAMES' : activeTab}
+          lightMode={isHomeTab}
           setActiveTab={(tab) => {
             setIsVideoFullScreen(false);
+            setIsChildOverlayOpen(false);
             setActiveTab(tab);
             const currentPath = window.location.pathname.toLowerCase();
             if (currentPath === '/gamepix' || currentPath === '/catalog' || currentPath === '/shop') {
@@ -466,6 +467,44 @@ export default function App() {
         isOpen={isSecretAdminOpen}
         onClose={() => setIsSecretAdminOpen(false)}
       />
+
+      <PostMediaPickerModal
+        isOpen={isPostPickerOpen}
+        onClose={() => setIsPostPickerOpen(false)}
+        onMediaSelected={handlePostMediaSelected}
+      />
+
+      <PostEditorModal
+        isOpen={isPostEditorOpen}
+        initialFile={postEditorInitialFile}
+        selectionKey={postSelectionKey}
+        onClose={() => {
+          setIsPostEditorOpen(false);
+          setPostEditorInitialFile(null);
+        }}
+        onRetake={() => {
+          setIsPostPickerOpen(true);
+        }}
+        onPublished={(info) => {
+          if (info.contentType === 'video') {
+            showPostToast('Video published to Home Feed & Video Section!');
+            if (activeTab.toUpperCase() !== 'HOME' && activeTab.toUpperCase() !== 'VIDEOS') {
+              setActiveTab('HOME');
+            }
+          } else {
+            showPostToast('Photo published to Home Feed!');
+            if (activeTab.toUpperCase() !== 'HOME') {
+              setActiveTab('HOME');
+            }
+          }
+        }}
+      />
+
+      {postToastMsg && (
+        <div className="fixed top-16 left-1/2 -translate-x-1/2 z-[190] bg-slate-900 border border-blue-500/40 text-white font-bold text-xs px-4 py-2 rounded-full shadow-2xl animate-in fade-in">
+          {postToastMsg}
+        </div>
+      )}
       
     </div>
   );
