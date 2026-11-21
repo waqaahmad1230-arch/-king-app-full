@@ -1,12 +1,13 @@
 // server/aiBackend.ts
 import { GoogleGenAI } from "@google/genai";
-import { v2 as cloudinary2 } from "cloudinary";
+import cloudinaryPkg2 from "cloudinary";
 
 // api/_lib/statusBackend.ts
-import { v2 as cloudinary } from "cloudinary";
+import cloudinaryPkg from "cloudinary";
 import { cert, getApps, initializeApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { FieldValue, getFirestore, Timestamp } from "firebase-admin/firestore";
+var cloudinary = cloudinaryPkg.v2;
 var FIREBASE_PROJECT_ID = "king-5f52e";
 var FIRESTORE_DATABASE_ID = "ai-studio-king-4e115b8f-6ca5-4501-8ff0-73c2c7c21a47";
 var SUPER_ADMIN_EMAIL = "waqaahmad1230@gmail.com";
@@ -629,6 +630,7 @@ async function handleRunExpiredStatusCleanup(options) {
 // server/aiVault.ts
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 var VERIFIED_GEMINI_MODELS = [
   {
@@ -756,7 +758,9 @@ var VERIFIED_GEMINI_MODELS = [
     apiVersion: "v1beta"
   }
 ];
-var VAULT_BASE_DIR = path.resolve(process.env.AI_VAULT_DIR?.trim() || process.cwd());
+var VAULT_BASE_DIR = path.resolve(
+  process.env.AI_VAULT_DIR?.trim() || (process.env.VERCEL ? os.tmpdir() : process.cwd())
+);
 var VAULT_FILE_PATH = path.join(VAULT_BASE_DIR, ".king-ai-vault.enc.json");
 var VAULT_KEY_PATH = path.join(VAULT_BASE_DIR, ".king-ai-vault.key");
 var CURRENT_MODEL_CONFIG_VERSION = 3;
@@ -1503,6 +1507,7 @@ function recordKeyHealthResult(keyId, result) {
 }
 
 // server/aiBackend.ts
+var cloudinary2 = cloudinaryPkg2.v2;
 var ALLOWED_IMAGE_MIMES = /* @__PURE__ */ new Set(["image/jpeg", "image/png", "image/webp"]);
 var ALLOWED_VIDEO_MIMES = /* @__PURE__ */ new Set(["video/mp4", "video/webm", "video/quicktime"]);
 var MAX_PROMPT_LENGTH = 2e3;
