@@ -100,9 +100,14 @@ export interface AdminAiManagerState {
   projects?: ProjectHealthRecord[];
 }
 
+export type AiBackendHealthState = 'healthy' | 'zero_keys' | 'server_error' | 'unavailable';
+
 export interface PostAiCapabilityResponse {
   ok: boolean;
   configured: boolean;
+  healthState?: AiBackendHealthState;
+  httpStatus?: number;
+  backendError?: string;
   provider: string;
   backendHost?: string;
   autoRoutingEnabled?: boolean;
@@ -257,27 +262,89 @@ async function getAuthHeaders(): Promise<Record<string, string>> {
   };
 }
 
+function buildHealthFallbackResponse(params: {
+  healthState: 'server_error' | 'unavailable';
+  httpStatus?: number;
+  backendError: string;
+}): PostAiCapabilityResponse {
+  return {
+    ok: false,
+    configured: false,
+    healthState: params.healthState,
+    httpStatus: params.httpStatus,
+    backendError: params.backendError,
+    provider: 'google-gemini',
+    photoSupported: false,
+    photoModel: 'gemini-3.1-flash-lite-image',
+    textModel: 'gemini-3.1-pro-preview',
+    videoModel: 'gemini-omni-1.2-flash',
+    videoSupported: false,
+    videoReason: params.backendError,
+  };
+}
+
 export async function checkPostAiAvailability(): Promise<PostAiCapabilityResponse> {
-  const res = await fetch('/api/ai/status', {
-    method: 'GET',
-    headers: { Accept: 'application/json' },
-  });
-  const text = await res.text();
+  let res: Response;
   try {
-    return JSON.parse(text) as PostAiCapabilityResponse;
-  } catch {
-    return {
-      ok: false,
-      configured: false,
-      provider: 'google-gemini',
-      photoSupported: false,
-      photoModel: 'gemini-3.1-flash-lite-image',
-      textModel: 'gemini-3.1-pro-preview',
-      videoModel: 'gemini-omni-1.2-flash',
-      videoSupported: false,
-      videoReason: 'AI backend endpoint did not return JSON.',
-    };
+    res = await fetch('/api/ai/status', {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+    });
+  } catch (err: any) {
+    return buildHealthFallbackResponse({
+      healthState: 'unavailable',
+      backendError: err?.message || 'Unable to reach AI backend endpoint (/api/ai/status).',
+    });
   }
+
+  const text = await res.text();
+  let parsed: any = null;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = null;
+  }
+
+  if (!res.ok) {
+    const trimmed = text.trim();
+    const detail =
+      parsed?.error?.message ||
+      parsed?.error ||
+      (trimmed.includes('FUNCTION_INVOCATION_FAILED')
+        ? `Backend serverless function crashed (HTTP ${res.status}: FUNCTION_INVOCATION_FAILED).`
+        : trimmed
+        ? `Backend returned HTTP ${res.status}: ${trimmed.slice(0, 140)}`
+        : `Backend returned HTTP ${res.status}.`);
+    return buildHealthFallbackResponse({
+      healthState: 'server_error',
+      httpStatus: res.status,
+      backendError: detail,
+    });
+  }
+
+  if (!parsed || typeof parsed !== 'object') {
+    return buildHealthFallbackResponse({
+      healthState: 'unavailable',
+      httpStatus: res.status,
+      backendError: 'AI backend route (/api/ai/status) returned a non-JSON response.',
+    });
+  }
+
+  if (parsed.ok === false) {
+    return buildHealthFallbackResponse({
+      healthState: 'server_error',
+      httpStatus: res.status,
+      backendError: parsed?.error?.message || parsed?.error || 'AI backend reported an internal error.',
+    });
+  }
+
+  const cap = parsed as PostAiCapabilityResponse;
+  const activeCount = cap.activeKeyCount ?? (cap.keyStatuses?.filter((k) => k.configured && k.enabled !== false).length || 0);
+  return {
+    ...cap,
+    httpStatus: res.status,
+    healthState: cap.configured || activeCount > 0 ? 'healthy' : 'zero_keys',
+  };
 }
 
 export async function requestAiPhotoEdit(params: {
