@@ -1,4 +1,5 @@
-import { v2 as cloudinary } from 'cloudinary';
+import cloudinaryPkg from 'cloudinary';
+const cloudinary = cloudinaryPkg.v2;
 import { cert, getApps, initializeApp, type App } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { FieldValue, getFirestore, type QueryDocumentSnapshot, Timestamp } from 'firebase-admin/firestore';
