@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 export type GeminiModelCapability = 'image' | 'text' | 'omni';
@@ -263,7 +264,9 @@ export interface ResolvedExecutableKey {
   projectCooldownUntil?: number;
 }
 
-const VAULT_BASE_DIR = path.resolve(process.env.AI_VAULT_DIR?.trim() || process.cwd());
+const VAULT_BASE_DIR = path.resolve(
+  process.env.AI_VAULT_DIR?.trim() || (process.env.VERCEL ? os.tmpdir() : process.cwd())
+);
 const VAULT_FILE_PATH = path.join(VAULT_BASE_DIR, '.king-ai-vault.enc.json');
 const VAULT_KEY_PATH = path.join(VAULT_BASE_DIR, '.king-ai-vault.key');
 
