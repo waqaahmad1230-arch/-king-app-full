@@ -207,9 +207,13 @@ export default function PostAiWorkspaceModal({
           setCapability({
             ok: false,
             configured: false,
+            healthState: 'unavailable',
+            backendError: 'Could not reach AI capability endpoint.',
             provider: 'google-gemini',
             photoSupported: false,
             photoModel: 'gemini-3.1-flash-lite-image',
+            textModel: 'gemini-3.1-pro-preview',
+            videoModel: 'gemini-omni-1.2-flash',
             videoSupported: false,
             videoReason: 'Could not reach AI capability endpoint.',
           });
@@ -344,6 +348,9 @@ export default function PostAiWorkspaceModal({
   };
 
   const isBackendConnected = Boolean(capability?.configured);
+  const isBackendServerError = capability?.healthState === 'server_error';
+  const isBackendUnavailable = capability?.healthState === 'unavailable';
+  const isBackendFault = isBackendServerError || isBackendUnavailable;
 
   const markup = (
     <div
@@ -506,8 +513,22 @@ export default function PostAiWorkspaceModal({
         {/* PHOTO MODE WORKSPACE */}
         {mediaType === 'photo' ? (
           <>
-            {/* Honest Backend Configuration Notice when no active keys are connected */}
-            {!checkingCapability && !isBackendConnected && (
+            {/* Honest Backend Configuration / Error Notice */}
+            {!checkingCapability && isBackendFault ? (
+              <div className="rounded-2xl bg-rose-950/60 border border-rose-500/40 p-3 flex items-start gap-2.5">
+                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                <div className="space-y-1 text-[11px] leading-relaxed">
+                  <div className="font-bold text-rose-200">
+                    {isBackendServerError
+                      ? `AI Backend Error${capability?.httpStatus ? ` (HTTP ${capability.httpStatus})` : ''}`
+                      : 'AI Backend Unavailable'}
+                  </div>
+                  <p className="text-rose-100/90">
+                    {capability?.backendError || 'Could not retrieve AI backend health status.'}
+                  </p>
+                </div>
+              </div>
+            ) : !checkingCapability && !isBackendConnected && (
               <div className="rounded-2xl bg-[#111522] border border-amber-500/40 p-3 flex items-start gap-2.5">
                 <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                 <div className="space-y-1 text-[11px] leading-relaxed">
@@ -559,7 +580,11 @@ export default function PostAiWorkspaceModal({
                     </span>
                   </div>
                   <div className="text-[10px] text-slate-400">
-                    {capability?.healthyKeyCount ?? 0}/{capability?.activeKeyCount ?? 0} Healthy Keys • Node.js Server Vault
+                    {isBackendServerError
+                      ? `Backend Error (HTTP ${capability?.httpStatus || 500})`
+                      : isBackendUnavailable
+                      ? 'Backend Unavailable'
+                      : `${capability?.healthyKeyCount ?? 0}/${capability?.activeKeyCount ?? 0} Healthy Keys • Node.js Server Vault`}
                   </div>
                 </div>
               </div>
@@ -667,7 +692,11 @@ export default function PostAiWorkspaceModal({
                   <>
                     <Sparkles className="w-4 h-4" />
                     <span>
-                      {!isBackendConnected
+                      {isBackendServerError
+                        ? `Generate (Backend HTTP ${capability?.httpStatus || 500})`
+                        : isBackendUnavailable
+                        ? 'Generate (Backend Unavailable)'
+                        : !isBackendConnected
                         ? 'Generate (Requires Active Server Key)'
                         : activeSourceFile
                         ? 'Generate AI Edit'
