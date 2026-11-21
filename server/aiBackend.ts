@@ -1,5 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
-import { v2 as cloudinary } from 'cloudinary';
+import cloudinaryPkg from 'cloudinary';
+const cloudinary = cloudinaryPkg.v2;
 import {
   getCloudinaryCredentials,
   SUPER_ADMIN_EMAIL,
