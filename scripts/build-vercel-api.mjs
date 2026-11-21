@@ -11,7 +11,7 @@ await esbuild.build({
   outfile: path.join(rootDir, 'api/_lib/vercelCore.mjs'),
   bundle: true,
   platform: 'node',
-  target: 'node22',
+  target: 'node20',
   format: 'esm',
   packages: 'external',
   sourcemap: false,
