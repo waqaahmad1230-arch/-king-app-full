@@ -80,6 +80,9 @@ export default function GeminiManagerModal({
     }
   };
 
+  const healthState = capability?.healthState;
+  const isServerError = healthState === 'server_error' || (capability?.httpStatus !== undefined && capability.httpStatus >= 500);
+  const isBackendUnavailable = healthState === 'unavailable';
   const activeCount = capability?.activeKeyCount ?? keyStatuses.filter((k) => k.configured && k.enabled !== false).length;
   const healthyCount = capability?.healthyKeyCount ?? keyStatuses.filter((k) => k.status === 'Ready').length;
   const enabledModels = (capability?.verifiedModels || []).filter((m) => m.enabled);
@@ -148,11 +151,37 @@ export default function GeminiManagerModal({
           <div className="flex items-center justify-between px-1">
             <span className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
               <Server className="w-3.5 h-3.5 text-blue-400" />
-              Backend Key Pool ({healthyCount}/{activeCount} Healthy)
+              {isServerError
+                ? `Backend Key Pool (Server Error${capability?.httpStatus ? ` • HTTP ${capability.httpStatus}` : ''})`
+                : isBackendUnavailable
+                ? 'Backend Key Pool (Backend Unavailable)'
+                : `Backend Key Pool (${healthyCount}/${activeCount} Healthy)`}
             </span>
           </div>
 
-          {keyStatuses.length === 0 ? (
+          {isServerError ? (
+            <div className="p-4 rounded-2xl bg-rose-950/70 border border-rose-500/40 text-xs text-rose-200 leading-relaxed flex items-start gap-2.5">
+              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+              <div>
+                <div className="font-bold text-rose-100">
+                  AI Backend Error{capability?.httpStatus ? ` (HTTP ${capability.httpStatus})` : ''}
+                </div>
+                <p className="mt-0.5">
+                  {capability?.backendError || 'The AI status endpoint failed on the server. Vault keys could not be queried.'}
+                </p>
+              </div>
+            </div>
+          ) : isBackendUnavailable ? (
+            <div className="p-4 rounded-2xl bg-rose-950/70 border border-rose-500/40 text-xs text-rose-200 leading-relaxed flex items-start gap-2.5">
+              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+              <div>
+                <div className="font-bold text-rose-100">AI Backend Unavailable</div>
+                <p className="mt-0.5">
+                  {capability?.backendError || 'Could not reach the KING AI backend service (/api/ai/status).'}
+                </p>
+              </div>
+            </div>
+          ) : keyStatuses.length === 0 ? (
             <div className="p-4 rounded-2xl bg-[#070b14] border border-amber-500/30 text-xs text-amber-200 leading-relaxed">
               No active Gemini API keys are configured in the server vault yet. Sign in as Super Admin and open <strong>Admin Panel → AI Model Manager</strong> to add an encrypted API key.
             </div>
