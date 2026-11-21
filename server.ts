@@ -1,5 +1,4 @@
 import express from 'express';
-import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
@@ -12,9 +11,55 @@ import {
   handleRunExpiredStatusCleanup,
   verifyFirebaseBearerToken,
 } from './api/_lib/statusBackend.ts';
-import { getPostAiCapabilityStatus, handlePostAiPhotoEdit } from './api/_lib/postAiBackend.ts';
+import {
+  fetchLiveModelsFromGoogleApi,
+  getAdminAiStateAsync,
+  getPublicAiCapabilityStatusAsync,
+  handleAdminAddKey,
+  handleAdminDeleteKey,
+  handleAdminUpdateKey,
+  handleAdminUpdateModels,
+  handleAutoRoutedAiRequest,
+  handlePostAiPhotoEdit,
+  handlePostAiTextGenerate,
+  testSpecificKeyLive,
+  testSpecificModelLive,
+} from './server/aiBackend.ts';
+import { scrubSecretText } from './server/aiVault.ts';
 
 const app = express();
+app.set('trust proxy', 1);
+
+const EXTRA_CORS_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((s) => s.trim().replace(/\/+$/, ''))
+  .filter(Boolean);
+
+const TRUSTED_CORS_ORIGINS = new Set(
+  [
+    (process.env.APP_URL || '').trim().replace(/\/+$/, ''),
+    'https://king-5f52e.web.app',
+    'https://king-5f52e.firebaseapp.com',
+    'https://king-app-full.vercel.app',
+    'http://localhost:3000',
+    ...EXTRA_CORS_ORIGINS,
+  ].filter(Boolean)
+);
+
+app.use('/api', (req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && TRUSTED_CORS_ORIGINS.has(origin.replace(/\/+$/, ''))) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,x-filename');
+    res.setHeader('Access-Control-Max-Age', '86400');
+  }
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
+});
 
 // --- FIREBASE ADMIN SDK INITIALIZATION (SINGLETON) ---
 const FIREBASE_PROJECT_ID = 'king-5f52e';
@@ -114,6 +159,7 @@ const generalApiRateLimiter = createRateLimiter({
 interface VerifiedFirebaseUser {
   uid: string;
   email?: string;
+  emailVerified?: boolean;
   name?: string;
 }
 
@@ -127,6 +173,7 @@ async function verifyFirebaseToken(idToken: string): Promise<VerifiedFirebaseUse
       return {
         uid: decoded.uid,
         email: decoded.email,
+        emailVerified: Boolean(decoded.email_verified),
         name: (decoded as any).name,
       };
     }
@@ -153,6 +200,7 @@ async function verifyFirebaseToken(idToken: string): Promise<VerifiedFirebaseUse
     return {
       uid: data.sub || data.user_id,
       email: data.email,
+      emailVerified: data.email_verified === true || data.email_verified === 'true',
       name: data.name,
     };
   } catch (err) {
@@ -179,11 +227,11 @@ const authenticateFirebaseToken = async (req: express.Request, res: express.Resp
   next();
 };
 
-// Super Admin Authorization Middleware: rejects non-admins with HTTP 403
+// Super Admin Authorization Middleware: rejects non-admins or unverified emails with HTTP 403
 const requireSuperAdmin = (req: express.Request, res: express.Response, next: express.NextFunction) => {
   const user = (req as any).user as VerifiedFirebaseUser | undefined;
-  if (!user || user.email !== SUPER_ADMIN_EMAIL) {
-    return res.status(403).json({ error: { message: 'Access denied. Super Admin privileges required.' } });
+  if (!user || user.email !== SUPER_ADMIN_EMAIL || user.emailVerified !== true) {
+    return res.status(403).json({ error: { message: 'Access denied. Verified Super Admin privileges required.' } });
   }
   next();
 };
@@ -402,9 +450,21 @@ app.all('/api/status/cleanup', generalApiRateLimiter, express.json({ limit: '16k
   }
 });
 
-// --- POST EDITOR AI STUDIO ENDPOINT (Mirrors Vercel /api/post-editor/ai-edit) ---
-app.get('/api/post-editor/ai-edit', generalApiRateLimiter, (_req, res) => {
-  return res.status(200).json(getPostAiCapabilityStatus());
+// --- KING AI BACKEND ENDPOINTS (Native Node.js / Express) ---
+app.get('/api/ai/status', generalApiRateLimiter, async (_req, res) => {
+  try {
+    return res.status(200).json(await getPublicAiCapabilityStatusAsync());
+  } catch (err: any) {
+    return res.status(500).json({ ok: false, error: scrubSecretText(err?.message || 'Status error') });
+  }
+});
+
+app.get('/api/post-editor/ai-edit', generalApiRateLimiter, async (_req, res) => {
+  try {
+    return res.status(200).json(await getPublicAiCapabilityStatusAsync());
+  } catch (err: any) {
+    return res.status(500).json({ ok: false, error: scrubSecretText(err?.message || 'Status error') });
+  }
 });
 
 app.post(
@@ -419,12 +479,212 @@ app.post(
       });
       return res.status(result.status).json(result.payload);
     } catch (err: any) {
-      console.error('[server.ts /api/post-editor/ai-edit] Error:', err);
+      const safeErr = scrubSecretText(err?.message || 'Unexpected AI editor server error.');
+      console.error('[server.ts /api/post-editor/ai-edit] Error:', safeErr);
       return res.status(500).json({
         ok: false,
         code: 'POST_AI_INTERNAL_ERROR',
-        error: err?.message || 'Unexpected AI editor server error.',
+        error: safeErr,
       });
+    }
+  }
+);
+
+app.post(
+  '/api/ai/text-generate',
+  generalApiRateLimiter,
+  express.json({ limit: '1mb' }),
+  async (req, res) => {
+    try {
+      const result = await handlePostAiTextGenerate({
+        authHeader: req.headers.authorization,
+        body: req.body,
+      });
+      return res.status(result.status).json(result.payload);
+    } catch (err: any) {
+      const safeErr = scrubSecretText(err?.message || 'Unexpected AI text generation error.');
+      console.error('[server.ts /api/ai/text-generate] Error:', safeErr);
+      return res.status(500).json({
+        ok: false,
+        code: 'TEXT_AI_INTERNAL_ERROR',
+        error: safeErr,
+      });
+    }
+  }
+);
+
+app.get('/api/ai/route', generalApiRateLimiter, async (_req, res) => {
+  try {
+    return res.status(200).json(await getPublicAiCapabilityStatusAsync());
+  } catch (err: any) {
+    return res.status(500).json({ ok: false, error: scrubSecretText(err?.message || 'Status error') });
+  }
+});
+
+app.post(
+  '/api/ai/route',
+  generalApiRateLimiter,
+  express.json({ limit: '15mb' }),
+  async (req, res) => {
+    try {
+      const result = await handleAutoRoutedAiRequest({
+        authHeader: req.headers.authorization,
+        body: req.body,
+      });
+      return res.status(result.status).json(result.payload);
+    } catch (err: any) {
+      const safeErr = scrubSecretText(err?.message || 'Unexpected AI routing server error.');
+      console.error('[server.ts /api/ai/route] Error:', safeErr);
+      return res.status(500).json({
+        ok: false,
+        code: 'AI_ROUTE_INTERNAL_ERROR',
+        error: safeErr,
+      });
+    }
+  }
+);
+
+// --- ADMIN AI MODEL MANAGER & ENCRYPTED KEY VAULT ENDPOINTS (Super Admin Only) ---
+app.get(
+  '/api/admin/ai/state',
+  generalApiRateLimiter,
+  authenticateFirebaseToken,
+  requireSuperAdmin,
+  async (_req, res) => {
+    try {
+      return res.status(200).json(await getAdminAiStateAsync());
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, error: scrubSecretText(err?.message || 'Failed to load AI state') });
+    }
+  }
+);
+
+app.post(
+  '/api/admin/ai/models',
+  generalApiRateLimiter,
+  express.json({ limit: '64kb' }),
+  authenticateFirebaseToken,
+  requireSuperAdmin,
+  async (req, res) => {
+    try {
+      const result = await handleAdminUpdateModels(req.body || {});
+      return res.status(200).json(result);
+    } catch (err: any) {
+      return res.status(400).json({ ok: false, error: scrubSecretText(err?.message || 'Invalid model configuration') });
+    }
+  }
+);
+
+app.post(
+  '/api/admin/ai/keys',
+  generalApiRateLimiter,
+  express.json({ limit: '64kb' }),
+  authenticateFirebaseToken,
+  requireSuperAdmin,
+  async (req, res) => {
+    try {
+      const result = await handleAdminAddKey({
+        label: String(req.body?.label || ''),
+        apiKey: String(req.body?.apiKey || ''),
+        priority: req.body?.priority !== undefined ? Number(req.body.priority) : undefined,
+        projectId: typeof req.body?.projectId === 'string' ? req.body.projectId : undefined,
+      });
+      return res.status(201).json(result);
+    } catch (err: any) {
+      return res.status(400).json({ ok: false, error: scrubSecretText(err?.message || 'Could not save API key.') });
+    }
+  }
+);
+
+app.patch(
+  '/api/admin/ai/keys/:id',
+  generalApiRateLimiter,
+  express.json({ limit: '64kb' }),
+  authenticateFirebaseToken,
+  requireSuperAdmin,
+  async (req, res) => {
+    try {
+      const result = await handleAdminUpdateKey(String(req.params.id || ''), req.body || {});
+      if (!result) {
+        return res.status(404).json({ ok: false, error: 'Key slot not found.' });
+      }
+      return res.status(200).json(result);
+    } catch (err: any) {
+      return res.status(400).json({ ok: false, error: scrubSecretText(err?.message || 'Could not update API key.') });
+    }
+  }
+);
+
+app.delete(
+  '/api/admin/ai/keys/:id',
+  generalApiRateLimiter,
+  authenticateFirebaseToken,
+  requireSuperAdmin,
+  async (req, res) => {
+    try {
+      const result = await handleAdminDeleteKey(String(req.params.id || ''));
+      if (!result) {
+        return res.status(404).json({ ok: false, error: 'Key slot not found.' });
+      }
+      return res.status(200).json(result);
+    } catch (err: any) {
+      return res.status(400).json({ ok: false, error: scrubSecretText(err?.message || 'Could not delete API key.') });
+    }
+  }
+);
+
+app.post(
+  '/api/admin/ai/test-key',
+  generalApiRateLimiter,
+  express.json({ limit: '16kb' }),
+  authenticateFirebaseToken,
+  requireSuperAdmin,
+  async (req, res) => {
+    try {
+      const keyId = String(req.body?.keyId || '').trim();
+      if (!keyId) {
+        return res.status(400).json({ ok: false, error: 'keyId is required.' });
+      }
+      const result = await testSpecificKeyLive(keyId);
+      return res.status(result.status).json({ ...result.payload, state: await getAdminAiStateAsync() });
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, error: scrubSecretText(err?.message || 'Key test failed.') });
+    }
+  }
+);
+
+app.post(
+  '/api/admin/ai/test-model',
+  generalApiRateLimiter,
+  express.json({ limit: '16kb' }),
+  authenticateFirebaseToken,
+  requireSuperAdmin,
+  async (req, res) => {
+    try {
+      const modelId = String(req.body?.modelId || '').trim();
+      const keyId = typeof req.body?.keyId === 'string' ? req.body.keyId.trim() : undefined;
+      if (!modelId) {
+        return res.status(400).json({ ok: false, error: 'modelId is required.' });
+      }
+      const result = await testSpecificModelLive({ modelId, keyId });
+      return res.status(result.status).json(result.payload);
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, error: scrubSecretText(err?.message || 'Model test failed.') });
+    }
+  }
+);
+
+app.get(
+  '/api/admin/ai/live-models',
+  generalApiRateLimiter,
+  authenticateFirebaseToken,
+  requireSuperAdmin,
+  async (_req, res) => {
+    try {
+      const catalog = await fetchLiveModelsFromGoogleApi();
+      return res.status(catalog.httpStatus).json(catalog);
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, error: scrubSecretText(err?.message || 'Failed to list live models.') });
     }
   }
 );
@@ -435,14 +695,19 @@ app.get('/ads.txt', (_req, res) => {
   if (fs.existsSync(adsPath)) {
     return res.type('text/plain').sendFile(adsPath);
   }
-  return res.type('text/plain').sendFile(path.join(__dirname, 'public/ads.txt'));
+  const distAdsPath = path.resolve(process.cwd(), 'dist/ads.txt');
+  if (fs.existsSync(distAdsPath)) {
+    return res.type('text/plain').sendFile(distAdsPath);
+  }
+  return res.status(404).type('text/plain').send('ads.txt not found');
 });
 
 // Explicitly serve public assets
 app.use('/public', express.static(path.resolve(process.cwd(), 'public')));
 
 const FIRESTORE_DATABASE_ID = 'ai-studio-king-4e115b8f-6ca5-4501-8ff0-73c2c7c21a47';
-const CANONICAL_APP_ORIGIN = 'https://king-app-full.vercel.app';
+const CANONICAL_APP_ORIGIN =
+  (process.env.APP_URL || '').trim().replace(/\/+$/, '') || 'https://king-app-full.vercel.app';
 
 function escapeOgHtml(str: string): string {
   return String(str)
@@ -803,7 +1068,8 @@ async function startServer() {
       res.sendFile(prodIndexPath);
     });
   } else {
-    // In development, mount Vite middleware mode with unrestricted hosts
+    // In development, dynamically load Vite middleware mode so production --omit=dev never requires vite
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
@@ -831,15 +1097,28 @@ async function startServer() {
     app.use(vite.middlewares);
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  let dailySyncTimer: ReturnType<typeof setInterval> | null = null;
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT} (mode: ${isProduction ? 'production' : 'development'})`);
     // Defer background external GamePix sync until after the port is open and pre-warming passes
     setTimeout(() => {
       syncGamePixDaily();
       // Recurring 24-hour auto update (Rule 1: Every 24 hours fetch 5 new games)
-      setInterval(syncGamePixDaily, 24 * 60 * 60 * 1000);
+      dailySyncTimer = setInterval(syncGamePixDaily, 24 * 60 * 60 * 1000);
     }, 2000);
   });
+
+  const shutdown = () => {
+    if (dailySyncTimer) {
+      clearInterval(dailySyncTimer);
+      dailySyncTimer = null;
+    }
+    server.close(() => {
+      process.exit(0);
+    });
+  };
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', shutdown);
 }
 
 startServer();

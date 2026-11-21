@@ -1,5 +1,22 @@
 {
+  "functions": {
+    "api/**/*.ts": {
+      "maxDuration": 60
+    }
+  },
   "rewrites": [
+    {
+      "source": "/api/admin/ai/:path*",
+      "destination": "/api/admin/ai?path=:path*"
+    },
+    {
+      "source": "/api/games/:path*",
+      "destination": "/api/games?path=:path*"
+    },
+    {
+      "source": "/api/meta/:path*",
+      "destination": "/api/meta?path=:path*"
+    },
     {
       "source": "/watch/:id",
       "has": [

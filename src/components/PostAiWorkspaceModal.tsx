@@ -22,8 +22,10 @@ import {
   checkPostAiAvailability,
   PostAiCapabilityResponse,
   requestAiPhotoEdit,
+  requestAiTextGenerate,
 } from '../services/postAiService';
 import { normalizeSelectedMediaFile } from '../services/centralContentService';
+import GeminiManagerModal from './GeminiManagerModal';
 
 interface AiPhotoSnapshot {
   id: string;
@@ -160,6 +162,9 @@ export default function PostAiWorkspaceModal({
 
   const [pickedLocalFile, setPickedLocalFile] = useState<File | null>(null);
   const [pickedLocalUrl, setPickedLocalUrl] = useState<string>('');
+  const [selectedModelId, setSelectedModelId] = useState<string>('');
+  const [isEnhancingPrompt, setIsEnhancingPrompt] = useState<boolean>(false);
+  const [isGeminiManagerOpen, setIsGeminiManagerOpen] = useState<boolean>(false);
   const createdUrlsRef = useRef<string[]>([]);
   const aiPhotoPickInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -250,30 +255,49 @@ export default function PostAiWorkspaceModal({
 
   if (!isOpen) return null;
 
+  const handleEnhancePrompt = async () => {
+    const clean = prompt.trim();
+    if (!clean || isEnhancingPrompt || isProcessing) return;
+    setIsEnhancingPrompt(true);
+    setErrorMsg(null);
+    try {
+      const res = await requestAiTextGenerate({
+        prompt: `Rewrite and enrich this image prompt into a clear, vivid, detailed visual instruction (1-2 sentences, no preamble): "${clean}"`,
+        systemInstruction: 'You are a concise photography and visual art prompt assistant. Output only the improved prompt.',
+      });
+      if (res.text) {
+        setPrompt(res.text);
+        setAiNote(`Prompt refined with ${res.model}`);
+      }
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Could not enhance prompt with Gemini Text AI.');
+    } finally {
+      setIsEnhancingPrompt(false);
+    }
+  };
+
   const handleGenerateEdit = async () => {
     if (isProcessing || mediaType !== 'photo') return;
-    if (!activeSourceFile) {
-      setErrorMsg('No photo is currently loaded.');
-      return;
-    }
     const cleanPrompt = prompt.trim();
     if (!cleanPrompt) {
-      setErrorMsg('Please describe what you want to change or tap a quick AI tool.');
+      setErrorMsg('Please describe what you want to generate or edit, or tap a quick AI tool.');
       return;
     }
 
     const activeTool = PHOTO_QUICK_TOOLS.find((t) => t.id === selectedToolId);
+    const chosenModel = selectedModelId || undefined;
     setIsProcessing(true);
     setErrorMsg(null);
     setAiNote(null);
     setProgressPct(10);
-    setProgressLabel('Starting KING AI...');
+    setProgressLabel(activeSourceFile ? 'Starting KING AI edit...' : 'Generating image with KING AI...');
 
     try {
       const result = await requestAiPhotoEdit({
         file: activeSourceFile,
         prompt: cleanPrompt,
         presetAction: activeTool?.label,
+        model: chosenModel,
         onProgress: (pct, text) => {
           setProgressPct(pct);
           setProgressLabel(text);
@@ -291,7 +315,7 @@ export default function PostAiWorkspaceModal({
         },
       ]);
       setCompareMode('after');
-      if (result.note) setAiNote(result.note);
+      setAiNote(result.note || `Generated via ${result.model}`);
     } catch (err: any) {
       setErrorMsg(err?.message || 'AI editing failed.');
     } finally {
@@ -482,16 +506,16 @@ export default function PostAiWorkspaceModal({
         {/* PHOTO MODE WORKSPACE */}
         {mediaType === 'photo' ? (
           <>
-            {/* Honest Backend Configuration Notice when GEMINI_API_KEY is not set */}
+            {/* Honest Backend Configuration Notice when no active keys are connected */}
             {!checkingCapability && !isBackendConnected && (
               <div className="rounded-2xl bg-[#111522] border border-amber-500/40 p-3 flex items-start gap-2.5">
                 <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                 <div className="space-y-1 text-[11px] leading-relaxed">
                   <div className="font-bold text-amber-300">
-                    AI Backend Not Yet Connected
+                    AI Backend Needs Active Key
                   </div>
                   <p className="text-slate-300">
-                    Server environment key <span className="font-mono text-white">GEMINI_API_KEY</span> is not configured yet, so live Gemini photo generation cannot run until the administrator connects it. No fake edits will be generated.
+                    No active Gemini API key is configured in the server vault yet. Add a key in <strong>Admin Panel → AI Model Manager</strong> to enable live generation.
                   </p>
                 </div>
               </div>
@@ -517,17 +541,85 @@ export default function PostAiWorkspaceModal({
               </div>
             )}
 
+            {/* GEMINI MANAGER BUTTON */}
+            <button
+              type="button"
+              onClick={() => setIsGeminiManagerOpen(true)}
+              className="w-full py-2.5 px-3.5 rounded-2xl bg-gradient-to-r from-blue-950/80 via-[#0c1424] to-indigo-950/80 hover:from-blue-900/80 hover:to-indigo-900/80 border border-blue-500/40 text-xs font-bold text-white flex items-center justify-between shadow-[0_0_20px_rgba(37,99,235,0.25)] cursor-pointer transition active:scale-[0.99]"
+            >
+              <div className="flex items-center gap-2.5">
+                <div className="w-7 h-7 rounded-xl bg-blue-600/30 border border-blue-400/50 flex items-center justify-center text-blue-300 shadow-[0_0_12px_rgba(37,99,235,0.5)]">
+                  <Sparkles className="w-4 h-4 text-blue-400 animate-pulse" />
+                </div>
+                <div className="text-left">
+                  <div className="text-xs font-black text-white flex items-center gap-1.5">
+                    <span>Gemini Manager</span>
+                    <span className="text-[9px] px-1.5 py-0.2 rounded bg-blue-500/20 text-blue-300 border border-blue-500/30 font-mono">
+                      {capability?.supportedModels?.length || 3} Models
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-slate-400">
+                    {capability?.healthyKeyCount ?? 0}/{capability?.activeKeyCount ?? 0} Healthy Keys • Node.js Server Vault
+                  </div>
+                </div>
+              </div>
+              <div className="px-3 py-1 rounded-xl bg-blue-600/30 hover:bg-blue-600/50 border border-blue-400/40 text-blue-200 text-[11px] font-bold">
+                Status →
+              </div>
+            </button>
+
             {/* Prompt Area */}
             <div className="rounded-2xl bg-[#0c101b] border border-white/10 p-3 space-y-2.5">
-              <label
-                htmlFor="king-ai-prompt-input"
-                className="text-xs font-bold text-white flex items-center justify-between"
-              >
-                <span>Describe your AI edit</span>
-                <span className="text-[10px] font-medium text-blue-400">
-                  Photo AI ({capability?.photoModel || 'gemini-3.1-flash-lite-image'})
-                </span>
-              </label>
+              <div className="flex items-center justify-between gap-2">
+                <label
+                  htmlFor="king-ai-prompt-input"
+                  className="text-xs font-bold text-white"
+                >
+                  {activeSourceFile ? 'Describe your AI edit' : 'Generate Image from Text'}
+                </label>
+                {capability?.textSupported !== false && (
+                  <button
+                    type="button"
+                    disabled={!prompt.trim() || isEnhancingPrompt || isProcessing}
+                    onClick={handleEnhancePrompt}
+                    className="px-2 py-1 rounded-lg bg-[#162038] hover:bg-[#1f2c4d] border border-blue-500/30 text-[10px] font-semibold text-blue-300 flex items-center gap-1 cursor-pointer disabled:opacity-40 transition"
+                    title="Refine prompt using Gemini Text AI"
+                  >
+                    {isEnhancingPrompt ? (
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                    ) : (
+                      <Wand2 className="w-3 h-3" />
+                    )}
+                    <span>Refine Prompt</span>
+                  </button>
+                )}
+              </div>
+
+              {/* Verified Image Model Selector */}
+              {capability?.verifiedModels && capability.verifiedModels.some((m) => m.capability === 'image' && m.enabled) && (
+                <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 [&::-webkit-scrollbar]:hidden">
+                  {capability.verifiedModels
+                    .filter((m) => m.capability === 'image' && m.enabled)
+                    .map((m) => {
+                      const activeModel = selectedModelId || capability.photoModel;
+                      const isSel = activeModel === m.id;
+                      return (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => setSelectedModelId(m.id)}
+                          className={`px-2.5 py-1 rounded-lg text-[10px] font-bold whitespace-nowrap cursor-pointer transition border ${
+                            isSel
+                              ? 'bg-blue-600/30 border-blue-400 text-white shadow-[0_0_10px_rgba(37,99,235,0.3)]'
+                              : 'bg-[#121726] border-white/10 text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          {m.displayName}
+                        </button>
+                      );
+                    })}
+                </div>
+              )}
 
               <textarea
                 id="king-ai-prompt-input"
@@ -535,7 +627,11 @@ export default function PostAiWorkspaceModal({
                 maxLength={600}
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
-                placeholder="Describe what you want to change..."
+                placeholder={
+                  activeSourceFile
+                    ? 'Describe what you want to change...'
+                    : 'Describe an image to generate from scratch...'
+                }
                 className="w-full rounded-xl bg-[#05070e] border border-white/12 focus:border-blue-500 px-3 py-2 text-xs text-white placeholder:text-slate-500 focus:outline-none resize-none"
               />
 
@@ -565,12 +661,18 @@ export default function PostAiWorkspaceModal({
                 {isProcessing ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin" />
-                    <span>Processing Photo...</span>
+                    <span>{activeSourceFile ? 'Processing Photo...' : 'Generating Image...'}</span>
                   </>
                 ) : (
                   <>
                     <Sparkles className="w-4 h-4" />
-                    <span>{isBackendConnected ? 'Generate AI Edit' : 'Generate AI Edit (Requires Server Key)'}</span>
+                    <span>
+                      {!isBackendConnected
+                        ? 'Generate (Requires Active Server Key)'
+                        : activeSourceFile
+                        ? 'Generate AI Edit'
+                        : 'Generate Image'}
+                    </span>
                   </>
                 )}
               </button>
@@ -757,6 +859,17 @@ export default function PostAiWorkspaceModal({
           </button>
         )}
       </footer>
+      <GeminiManagerModal
+        isOpen={isGeminiManagerOpen}
+        onClose={() => setIsGeminiManagerOpen(false)}
+        keyStatuses={capability?.keyStatuses}
+        capability={capability}
+        onRefreshStatus={() => {
+          checkPostAiAvailability()
+            .then(setCapability)
+            .catch(() => {});
+        }}
+      />
     </div>
   );
 

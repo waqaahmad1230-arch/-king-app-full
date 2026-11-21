@@ -11,6 +11,27 @@
     ],
     "rewrites": [
       {
+        "source": "/api/**",
+        "run": {
+          "serviceId": "king-app-server",
+          "region": "asia-east1"
+        }
+      },
+      {
+        "source": "/watch/**",
+        "run": {
+          "serviceId": "king-app-server",
+          "region": "asia-east1"
+        }
+      },
+      {
+        "source": "/ads.txt",
+        "run": {
+          "serviceId": "king-app-server",
+          "region": "asia-east1"
+        }
+      },
+      {
         "source": "**",
         "destination": "/index.html"
       }

@@ -12,6 +12,7 @@ export const STATUS_CLOUDINARY_FOLDER = 'king_status';
 export interface VerifiedCaller {
   uid: string;
   email?: string;
+  emailVerified?: boolean;
   name?: string;
 }
 
@@ -52,6 +53,7 @@ export async function verifyFirebaseBearerToken(authHeader?: string | string[]):
       return {
         uid: decoded.uid,
         email: decoded.email,
+        emailVerified: Boolean(decoded.email_verified),
         name: (decoded as any).name,
       };
     }
@@ -77,6 +79,7 @@ export async function verifyFirebaseBearerToken(authHeader?: string | string[]):
     return {
       uid,
       email: data.email,
+      emailVerified: data.email_verified === true || data.email_verified === 'true',
       name: data.name,
     };
   } catch {
@@ -84,7 +87,7 @@ export async function verifyFirebaseBearerToken(authHeader?: string | string[]):
   }
 }
 
-function getCloudinaryCredentials() {
+export function getCloudinaryCredentials() {
   let cloudName = (process.env.CLOUDINARY_CLOUD_NAME || CLOUDINARY_CLOUD_NAME).trim() || CLOUDINARY_CLOUD_NAME;
   let apiKey = (process.env.CLOUDINARY_API_KEY || '').trim();
   let apiSecret = (process.env.CLOUDINARY_API_SECRET || '').trim();

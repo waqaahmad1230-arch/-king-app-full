@@ -47,6 +47,7 @@ import {
   subscribeAllVideosForAdmin,
 } from '../services/centralContentService';
 import { UserPost } from '../types/content';
+import { AdminAiModelManagerSection } from './AdminAiModelManagerSection';
 
 interface SecretAdminPanelProps {
   isOpen: boolean;
@@ -99,28 +100,37 @@ export default function SecretAdminPanel({
   const [isSavingGame, setIsSavingGame] = useState(false);
 
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [adminMainTab, setAdminMainTab] = useState<'games' | 'content' | 'aimodels'>('games');
 
   const showToast = (msg: string) => {
     setToastMsg(msg);
     setTimeout(() => setToastMsg(null), 3000);
   };
 
+  // Fetch registered users for Super Admin inspection
   useEffect(() => {
     if (!isOpen || !isSuperAdminAuthed) {
       setUsers([]);
       return;
     }
-    const fetchUsers = async () => {
-      try {
-        const snap = await getDocs(collection(db, 'users'));
-        const usersList: any[] = [];
-        snap.forEach((docSnap) => usersList.push({ id: docSnap.id, ...docSnap.data() }));
-        setUsers(usersList);
-      } catch (err) {
-        console.warn('Admin users fetch notice:', err);
-      }
+
+    let cancelled = false;
+    getDocs(collection(db, 'users'))
+      .then((snap) => {
+        if (cancelled) return;
+        const list: any[] = [];
+        snap.forEach((docSnap) => {
+          list.push({ id: docSnap.id, ...docSnap.data() });
+        });
+        setUsers(list);
+      })
+      .catch((err) => {
+        console.error('Error loading users:', err);
+      });
+
+    return () => {
+      cancelled = true;
     };
-    void fetchUsers();
   }, [isOpen, isSuperAdminAuthed]);
 
   // Real-time listener for ALL games in Firestore `king_games` collection
@@ -467,10 +477,45 @@ export default function SecretAdminPanel({
               <span>Authenticated Super Admin: {auth.currentUser?.email}</span>
             </div>
           )}
+
+          {/* ADMIN MAIN NAVIGATION TABS */}
+          {isSuperAdminAuthed && (
+            <div className="flex items-center gap-2 pt-3 pb-1 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setAdminMainTab('games')}
+                className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold transition cursor-pointer flex items-center justify-center gap-1.5 ${
+                  adminMainTab === 'games'
+                    ? 'bg-cyan-500 text-black shadow-lg shadow-cyan-500/30'
+                    : 'bg-[#131b2e] text-slate-300 hover:bg-[#1a243f]'
+                }`}
+              >
+                <Gamepad2 className="w-3.5 h-3.5" />
+                <span>Games &amp; Catalog</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setAdminMainTab('aimodels')}
+                className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold transition cursor-pointer flex items-center justify-center gap-1.5 ${
+                  adminMainTab === 'aimodels'
+                    ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/30'
+                    : 'bg-[#131b2e] text-slate-300 hover:bg-[#1a243f]'
+                }`}
+              >
+                <Sparkles className="w-3.5 h-3.5 text-blue-400" />
+                <span>AI Model Manager</span>
+              </button>
+            </div>
+          )}
         </div>
 
         <div className="space-y-5 pt-4">
-          {/* SECTION A: THEME SECTION */}
+          {adminMainTab === 'aimodels' && isSuperAdminAuthed && (
+            <AdminAiModelManagerSection showToast={showToast} />
+          )}
+
+          {adminMainTab === 'games' && (
+            <>
           <div className="p-4 bg-[#070c17] border border-slate-800 rounded-2xl space-y-3">
             <div className="flex items-center gap-2 text-xs font-black text-cyan-400 uppercase tracking-wider">
               <Palette className="w-4 h-4 text-cyan-400" />
@@ -1019,6 +1064,8 @@ export default function SecretAdminPanel({
                 )}
               </div>
             </div>
+          )}
+            </>
           )}
         </div>
       </div>

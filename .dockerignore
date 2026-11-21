@@ -1,0 +1,12 @@
+node_modules
+dist
+.git
+.aistudio
+.env
+.env.*
+!.env.example
+.king-ai-vault.enc.json
+.king-ai-vault.key
+sample_test.mp4
+scripts
+*.log

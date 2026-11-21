@@ -1,8 +1,16 @@
-import { getPostAiCapabilityStatus, handlePostAiPhotoEdit } from '../_lib/postAiBackend.ts';
+import {
+  getPublicAiCapabilityStatusAsync,
+  handlePostAiPhotoEdit,
+  scrubSecretText,
+} from '../_lib/vercelCore.mjs';
 
 export default async function handler(req: any, res: any) {
   if (req.method === 'GET') {
-    return res.status(200).json(getPostAiCapabilityStatus());
+    try {
+      return res.status(200).json(await getPublicAiCapabilityStatusAsync());
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, error: scrubSecretText(err?.message || 'Status error') });
+    }
   }
 
   if (req.method !== 'POST') {
@@ -17,11 +25,12 @@ export default async function handler(req: any, res: any) {
     });
     return res.status(result.status).json(result.payload);
   } catch (err: any) {
-    console.error('[/api/post-editor/ai-edit] Error:', err);
+    const safeErr = scrubSecretText(err?.message || 'Unexpected AI editor server error.');
+    console.error('[/api/post-editor/ai-edit] Error:', safeErr);
     return res.status(500).json({
       ok: false,
       code: 'POST_AI_INTERNAL_ERROR',
-      error: err?.message || 'Unexpected AI editor server error.',
+      error: safeErr,
     });
   }
 }

@@ -6,3 +6,5 @@ coverage/
 *.log
 .env*
 !.env.example
+.king-ai-vault.enc.json
+.king-ai-vault.key

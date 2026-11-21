@@ -798,53 +798,18 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
         }
 
         if (payloadBlob) {
-          let data: any = null;
+          setUploadProgress(40);
+          const formData = new FormData();
+          formData.append("file", payloadBlob, filename);
+          formData.append("upload_preset", "kingtube");
 
-          // Attempt 1: Try backend upload proxy route /api/upload-video with Firebase ID Token
-          try {
-            setUploadProgress(30);
-            const idToken = auth.currentUser ? await auth.currentUser.getIdToken() : '';
-            const headers: Record<string, string> = {
-              'Content-Type': mimeType,
-              'x-filename': encodeURIComponent(filename),
-            };
-            if (idToken) {
-              headers['Authorization'] = `Bearer ${idToken}`;
-            }
+          const res = await fetch("https://api.cloudinary.com/v1_1/xb0o3xwi/video/upload", {
+            method: "POST",
+            body: formData,
+          });
 
-            const proxyRes = await fetch('/api/upload-video', {
-              method: 'POST',
-              headers,
-              body: payloadBlob,
-            });
-
-            if (proxyRes.ok) {
-              data = await proxyRes.json();
-              console.log("PROXY UPLOAD SUCCESS:", data);
-            } else {
-              console.warn("Proxy returned status:", proxyRes.status);
-            }
-          } catch (proxyErr) {
-            console.warn("Proxy upload failed, trying direct Cloudinary upload:", proxyErr);
-          }
-
-          // Attempt 2: Direct Cloudinary fetch fallback if proxy failed or didn't return secure_url
-          if (!data || !data.secure_url) {
-            setUploadProgress(50);
-            const formData = new FormData();
-            formData.append("file", payloadBlob, filename);
-            formData.append("upload_preset", "kingtube");
-
-            const res = await fetch("https://api.cloudinary.com/v1_1/xb0o3xwi/video/upload", { 
-              method: "POST", 
-              body: formData 
-            });
-
-            data = await res.json();
-            console.log("DIRECT CLOUDINARY RESPONSE:", data);
-          }
-
-          if (!data?.secure_url) {
+          const data = await res.json();
+          if (!res.ok || !data?.secure_url) {
             throw new Error(data?.error?.message || "Failed to upload video to cloud storage");
           }
 

@@ -2,7 +2,7 @@ import {
   handleDeleteSingleStatusServer,
   handleRunExpiredStatusCleanup,
   verifyFirebaseBearerToken,
-} from '../_lib/statusBackend.ts';
+} from '../_lib/vercelCore.mjs';
 
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST' && req.method !== 'GET' && req.method !== 'DELETE') {

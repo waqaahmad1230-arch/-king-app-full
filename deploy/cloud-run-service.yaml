@@ -1,0 +1,71 @@
+# Declarative Google Cloud Run service template for KING APP (Project: king-5f52e)
+# Deploy ONLY after user approval — do not apply automatically.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: king-app-server
+  labels:
+    cloud.googleapis.com/location: asia-east1
+  annotations:
+    run.googleapis.com/ingress: all
+spec:
+  template:
+    metadata:
+      annotations:
+        # Lowest cost: scale to 0 when idle; Gen2 execution required for Cloud Storage FUSE mount
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "3"
+        run.googleapis.com/execution-environment: gen2
+        run.googleapis.com/cpu-throttling: "true"
+    spec:
+      serviceAccountName: king-app-backend-sa@king-5f52e.iam.gserviceaccount.com
+      containerConcurrency: 80
+      timeoutSeconds: 300
+      volumes:
+        - name: ai-vault-storage
+          csi:
+            driver: gcsfuse.run.googleapis.com
+            readOnly: false
+            volumeAttributes:
+              bucketName: king-5f52e-ai-vault
+      containers:
+        - image: asia-east1-docker.pkg.dev/king-5f52e/king-app/king-app-server:latest
+          ports:
+            - name: http1
+              containerPort: 8080
+          resources:
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: APP_URL
+              value: "https://king-5f52e.web.app"
+            - name: AI_VAULT_DIR
+              value: "/mnt/ai-vault"
+            - name: AI_VAULT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: king-ai-vault-secret
+                  key: latest
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: king-gemini-api-key
+                  key: latest
+          volumeMounts:
+            - name: ai-vault-storage
+              mountPath: /mnt/ai-vault
+          startupProbe:
+            httpGet:
+              path: /_healthz
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /_healthz
+              port: 8080
+            periodSeconds: 30
