@@ -52,11 +52,13 @@ var import_cloudinary = __toESM(require("cloudinary"), 1);
 var import_firestore = require("firebase-admin/firestore");
 
 // api/_lib/authBackend.ts
+var import_node_crypto = require("node:crypto");
 var import_app = require("firebase-admin/app");
-var import_auth = require("firebase-admin/auth");
 var FIREBASE_PROJECT_ID = "king-5f52e";
 var FIRESTORE_DATABASE_ID = "ai-studio-king-4e115b8f-6ca5-4501-8ff0-73c2c7c21a47";
 var SUPER_ADMIN_EMAIL = "waqaahmad1230@gmail.com";
+var FIREBASE_PUBLIC_CERTS_URL = "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com";
+var cachedFirebaseCerts = null;
 function getFirebaseAdminApp() {
   const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT_KEY?.trim();
   if ((0, import_app.getApps)().length > 0) {
@@ -80,6 +82,83 @@ function getFirebaseAdminApp() {
   const app = (0, import_app.initializeApp)({ projectId: FIREBASE_PROJECT_ID });
   return { app, hasExplicitCredentials: false };
 }
+function decodeBase64UrlJson(segment) {
+  try {
+    const normalized = segment.replace(/-/g, "+").replace(/_/g, "/");
+    const padLength = (4 - normalized.length % 4) % 4;
+    const padded = normalized + "=".repeat(padLength);
+    const json = Buffer.from(padded, "base64").toString("utf8");
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+async function fetchFirebasePublicCerts(forceRefresh = false) {
+  if (!forceRefresh && cachedFirebaseCerts && Date.now() < cachedFirebaseCerts.expiresAtMs) {
+    return cachedFirebaseCerts.certs;
+  }
+  try {
+    const resp = await fetch(FIREBASE_PUBLIC_CERTS_URL);
+    if (!resp.ok) return null;
+    const certs = await resp.json();
+    if (!certs || typeof certs !== "object") return null;
+    const cacheControl = resp.headers.get("cache-control") || "";
+    const maxAgeMatch = cacheControl.match(/max-age=(\d+)/i);
+    const ttlMs = maxAgeMatch ? Math.max(6e4, Number(maxAgeMatch[1]) * 1e3) : 36e5;
+    cachedFirebaseCerts = {
+      certs,
+      expiresAtMs: Date.now() + ttlMs
+    };
+    return certs;
+  } catch {
+    return null;
+  }
+}
+async function verifyFirebaseJwtWithGoogleCerts(idToken) {
+  const parts = idToken.split(".");
+  if (parts.length !== 3) return null;
+  const [encodedHeader, encodedPayload, encodedSignature] = parts;
+  if (!encodedHeader || !encodedPayload || !encodedSignature) return null;
+  const header = decodeBase64UrlJson(encodedHeader);
+  const payload = decodeBase64UrlJson(encodedPayload);
+  if (!header || !payload) return null;
+  if (header.alg !== "RS256" || typeof header.kid !== "string" || !header.kid) return null;
+  let certs = await fetchFirebasePublicCerts(false);
+  let pemCert = certs && Object.prototype.hasOwnProperty.call(certs, header.kid) ? certs[header.kid] : void 0;
+  if (!pemCert) {
+    certs = await fetchFirebasePublicCerts(true);
+    pemCert = certs && Object.prototype.hasOwnProperty.call(certs, header.kid) ? certs[header.kid] : void 0;
+  }
+  if (!pemCert || typeof pemCert !== "string") return null;
+  try {
+    const verifier = (0, import_node_crypto.createVerify)("RSA-SHA256");
+    verifier.update(`${encodedHeader}.${encodedPayload}`);
+    verifier.end();
+    const sigBase64 = encodedSignature.replace(/-/g, "+").replace(/_/g, "/");
+    const sigPadded = sigBase64 + "=".repeat((4 - sigBase64.length % 4) % 4);
+    const signatureValid = verifier.verify(pemCert, Buffer.from(sigPadded, "base64"));
+    if (!signatureValid) return null;
+  } catch {
+    return null;
+  }
+  const nowSec = Math.floor(Date.now() / 1e3);
+  const exp = Number(payload.exp);
+  const iat = Number(payload.iat);
+  const authTime = payload.auth_time !== void 0 ? Number(payload.auth_time) : 0;
+  if (!Number.isFinite(exp) || exp <= nowSec) return null;
+  if (!Number.isFinite(iat) || iat > nowSec + 300) return null;
+  if (payload.auth_time !== void 0 && (!Number.isFinite(authTime) || authTime > nowSec + 300)) return null;
+  if (payload.aud !== FIREBASE_PROJECT_ID) return null;
+  if (payload.iss !== `https://securetoken.google.com/${FIREBASE_PROJECT_ID}`) return null;
+  const uid = payload.sub;
+  if (typeof uid !== "string" || !uid || uid.length > 128) return null;
+  return {
+    uid,
+    email: typeof payload.email === "string" ? payload.email : void 0,
+    emailVerified: Boolean(payload.email_verified),
+    name: typeof payload.name === "string" ? payload.name : void 0
+  };
+}
 async function verifyFirebaseBearerToken(authHeader) {
   const rawHeader = Array.isArray(authHeader) ? authHeader[0] : authHeader;
   if (!rawHeader || !rawHeader.startsWith("Bearer ")) return null;
@@ -87,7 +166,8 @@ async function verifyFirebaseBearerToken(authHeader) {
   if (!idToken) return null;
   const { app } = getFirebaseAdminApp();
   try {
-    const decoded = await (0, import_auth.getAuth)(app).verifyIdToken(idToken);
+    const { getAuth } = await import("firebase-admin/auth");
+    const decoded = await getAuth(app).verifyIdToken(idToken);
     if (decoded?.uid) {
       return {
         uid: decoded.uid,
@@ -96,7 +176,14 @@ async function verifyFirebaseBearerToken(authHeader) {
         name: decoded.name
       };
     }
-  } catch {
+  } catch (err) {
+    if (err?.code === "auth/id-token-revoked") {
+      return null;
+    }
+  }
+  const certVerified = await verifyFirebaseJwtWithGoogleCerts(idToken);
+  if (certVerified) {
+    return certVerified;
   }
   try {
     const resp = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`);
@@ -123,10 +210,8 @@ function isVerifiedSuperAdmin(caller) {
   return Boolean(caller && caller.email === SUPER_ADMIN_EMAIL && caller.emailVerified === true);
 }
 
-// api/_lib/statusBackend.ts
-var cloudinary = import_cloudinary.default.v2;
+// api/_lib/cloudinaryConfig.ts
 var CLOUDINARY_CLOUD_NAME = "xb0o3xwi";
-var STATUS_CLOUDINARY_FOLDER = "king_status";
 function getCloudinaryCredentials() {
   let cloudName = (process.env.CLOUDINARY_CLOUD_NAME || CLOUDINARY_CLOUD_NAME).trim() || CLOUDINARY_CLOUD_NAME;
   let apiKey = (process.env.CLOUDINARY_API_KEY || "").trim();
@@ -151,6 +236,10 @@ function getCloudinaryCredentials() {
     configured: Boolean(cloudName && apiKey && apiSecret)
   };
 }
+
+// api/_lib/statusBackend.ts
+var cloudinary = import_cloudinary.default.v2;
+var STATUS_CLOUDINARY_FOLDER = "king_status";
 function buildSignedStatusUploadPayload(params) {
   const { cloudName, apiKey, apiSecret, configured } = getCloudinaryCredentials();
   const resourceType = params.resourceType === "video" || params.resourceType === "raw" ? params.resourceType : "image";

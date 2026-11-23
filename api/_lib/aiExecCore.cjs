@@ -58,7 +58,7 @@ module.exports = __toCommonJS(aiExecEntry_exports);
 
 // server/aiBackend.ts
 var import_genai = require("@google/genai");
-var import_cloudinary2 = __toESM(require("cloudinary"), 1);
+var import_cloudinary = __toESM(require("cloudinary"), 1);
 
 // server/aiVault.ts
 var import_node_crypto = __toESM(require("node:crypto"), 1);
@@ -1018,10 +1018,12 @@ async function getPublicAiCapabilityStatusAsync() {
 }
 
 // api/_lib/authBackend.ts
+var import_node_crypto2 = require("node:crypto");
 var import_app = require("firebase-admin/app");
-var import_auth = require("firebase-admin/auth");
 var FIREBASE_PROJECT_ID = "king-5f52e";
 var SUPER_ADMIN_EMAIL = "waqaahmad1230@gmail.com";
+var FIREBASE_PUBLIC_CERTS_URL = "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com";
+var cachedFirebaseCerts = null;
 function getFirebaseAdminApp() {
   const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT_KEY?.trim();
   if ((0, import_app.getApps)().length > 0) {
@@ -1045,6 +1047,83 @@ function getFirebaseAdminApp() {
   const app = (0, import_app.initializeApp)({ projectId: FIREBASE_PROJECT_ID });
   return { app, hasExplicitCredentials: false };
 }
+function decodeBase64UrlJson(segment) {
+  try {
+    const normalized = segment.replace(/-/g, "+").replace(/_/g, "/");
+    const padLength = (4 - normalized.length % 4) % 4;
+    const padded = normalized + "=".repeat(padLength);
+    const json = Buffer.from(padded, "base64").toString("utf8");
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+async function fetchFirebasePublicCerts(forceRefresh = false) {
+  if (!forceRefresh && cachedFirebaseCerts && Date.now() < cachedFirebaseCerts.expiresAtMs) {
+    return cachedFirebaseCerts.certs;
+  }
+  try {
+    const resp = await fetch(FIREBASE_PUBLIC_CERTS_URL);
+    if (!resp.ok) return null;
+    const certs = await resp.json();
+    if (!certs || typeof certs !== "object") return null;
+    const cacheControl = resp.headers.get("cache-control") || "";
+    const maxAgeMatch = cacheControl.match(/max-age=(\d+)/i);
+    const ttlMs = maxAgeMatch ? Math.max(6e4, Number(maxAgeMatch[1]) * 1e3) : 36e5;
+    cachedFirebaseCerts = {
+      certs,
+      expiresAtMs: Date.now() + ttlMs
+    };
+    return certs;
+  } catch {
+    return null;
+  }
+}
+async function verifyFirebaseJwtWithGoogleCerts(idToken) {
+  const parts = idToken.split(".");
+  if (parts.length !== 3) return null;
+  const [encodedHeader, encodedPayload, encodedSignature] = parts;
+  if (!encodedHeader || !encodedPayload || !encodedSignature) return null;
+  const header = decodeBase64UrlJson(encodedHeader);
+  const payload = decodeBase64UrlJson(encodedPayload);
+  if (!header || !payload) return null;
+  if (header.alg !== "RS256" || typeof header.kid !== "string" || !header.kid) return null;
+  let certs = await fetchFirebasePublicCerts(false);
+  let pemCert = certs && Object.prototype.hasOwnProperty.call(certs, header.kid) ? certs[header.kid] : void 0;
+  if (!pemCert) {
+    certs = await fetchFirebasePublicCerts(true);
+    pemCert = certs && Object.prototype.hasOwnProperty.call(certs, header.kid) ? certs[header.kid] : void 0;
+  }
+  if (!pemCert || typeof pemCert !== "string") return null;
+  try {
+    const verifier = (0, import_node_crypto2.createVerify)("RSA-SHA256");
+    verifier.update(`${encodedHeader}.${encodedPayload}`);
+    verifier.end();
+    const sigBase64 = encodedSignature.replace(/-/g, "+").replace(/_/g, "/");
+    const sigPadded = sigBase64 + "=".repeat((4 - sigBase64.length % 4) % 4);
+    const signatureValid = verifier.verify(pemCert, Buffer.from(sigPadded, "base64"));
+    if (!signatureValid) return null;
+  } catch {
+    return null;
+  }
+  const nowSec = Math.floor(Date.now() / 1e3);
+  const exp = Number(payload.exp);
+  const iat = Number(payload.iat);
+  const authTime = payload.auth_time !== void 0 ? Number(payload.auth_time) : 0;
+  if (!Number.isFinite(exp) || exp <= nowSec) return null;
+  if (!Number.isFinite(iat) || iat > nowSec + 300) return null;
+  if (payload.auth_time !== void 0 && (!Number.isFinite(authTime) || authTime > nowSec + 300)) return null;
+  if (payload.aud !== FIREBASE_PROJECT_ID) return null;
+  if (payload.iss !== `https://securetoken.google.com/${FIREBASE_PROJECT_ID}`) return null;
+  const uid = payload.sub;
+  if (typeof uid !== "string" || !uid || uid.length > 128) return null;
+  return {
+    uid,
+    email: typeof payload.email === "string" ? payload.email : void 0,
+    emailVerified: Boolean(payload.email_verified),
+    name: typeof payload.name === "string" ? payload.name : void 0
+  };
+}
 async function verifyFirebaseBearerToken(authHeader) {
   const rawHeader = Array.isArray(authHeader) ? authHeader[0] : authHeader;
   if (!rawHeader || !rawHeader.startsWith("Bearer ")) return null;
@@ -1052,7 +1131,8 @@ async function verifyFirebaseBearerToken(authHeader) {
   if (!idToken) return null;
   const { app } = getFirebaseAdminApp();
   try {
-    const decoded = await (0, import_auth.getAuth)(app).verifyIdToken(idToken);
+    const { getAuth } = await import("firebase-admin/auth");
+    const decoded = await getAuth(app).verifyIdToken(idToken);
     if (decoded?.uid) {
       return {
         uid: decoded.uid,
@@ -1061,7 +1141,14 @@ async function verifyFirebaseBearerToken(authHeader) {
         name: decoded.name
       };
     }
-  } catch {
+  } catch (err) {
+    if (err?.code === "auth/id-token-revoked") {
+      return null;
+    }
+  }
+  const certVerified = await verifyFirebaseJwtWithGoogleCerts(idToken);
+  if (certVerified) {
+    return certVerified;
   }
   try {
     const resp = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`);
@@ -1088,10 +1175,7 @@ function isVerifiedSuperAdmin(caller) {
   return Boolean(caller && caller.email === SUPER_ADMIN_EMAIL && caller.emailVerified === true);
 }
 
-// api/_lib/statusBackend.ts
-var import_cloudinary = __toESM(require("cloudinary"), 1);
-var import_firestore = require("firebase-admin/firestore");
-var cloudinary = import_cloudinary.default.v2;
+// api/_lib/cloudinaryConfig.ts
 var CLOUDINARY_CLOUD_NAME = "xb0o3xwi";
 function getCloudinaryCredentials() {
   let cloudName = (process.env.CLOUDINARY_CLOUD_NAME || CLOUDINARY_CLOUD_NAME).trim() || CLOUDINARY_CLOUD_NAME;
@@ -1119,7 +1203,7 @@ function getCloudinaryCredentials() {
 }
 
 // server/aiBackend.ts
-var cloudinary2 = import_cloudinary2.default.v2;
+var cloudinary = import_cloudinary.default.v2;
 var ALLOWED_IMAGE_MIMES = /* @__PURE__ */ new Set(["image/jpeg", "image/png", "image/webp"]);
 var ALLOWED_VIDEO_MIMES = /* @__PURE__ */ new Set(["video/mp4", "video/webm", "video/quicktime"]);
 var MAX_PROMPT_LENGTH = 2e3;
@@ -1919,13 +2003,13 @@ async function executeImageAiWithFallback(params) {
             const cldCreds = getCloudinaryCredentials();
             if (cldCreds.configured) {
               try {
-                cloudinary2.config({
+                cloudinary.config({
                   cloud_name: cldCreds.cloudName,
                   api_key: cldCreds.apiKey,
                   api_secret: cldCreds.apiSecret,
                   secure: true
                 });
-                const uploaded = await cloudinary2.uploader.upload(
+                const uploaded = await cloudinary.uploader.upload(
                   `data:${outputMime};base64,${outputBase64}`,
                   {
                     folder: "king_ai_generated",
@@ -2330,13 +2414,13 @@ async function executeVideoAiWithFallback(params) {
             const cldCreds = getCloudinaryCredentials();
             if (cldCreds.configured) {
               try {
-                cloudinary2.config({
+                cloudinary.config({
                   cloud_name: cldCreds.cloudName,
                   api_key: cldCreds.apiKey,
                   api_secret: cldCreds.apiSecret,
                   secure: true
                 });
-                const uploaded = await cloudinary2.uploader.upload(
+                const uploaded = await cloudinary.uploader.upload(
                   `data:${outMime};base64,${outBase64}`,
                   {
                     folder: "king_ai_video_generated",

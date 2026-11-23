@@ -16,7 +16,7 @@ import {
 } from '../api/_lib/authBackend.ts';
 import {
   getCloudinaryCredentials,
-} from '../api/_lib/statusBackend.ts';
+} from '../api/_lib/cloudinaryConfig.ts';
 import {
   addVaultApiKey,
   deleteVaultApiKey,
