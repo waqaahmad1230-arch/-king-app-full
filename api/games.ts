@@ -1,8 +1,6 @@
-import {
-  isVerifiedSuperAdmin,
-  scrubSecretText,
-  verifyFirebaseBearerToken,
-} from './_lib/vercelCore.mjs';
+function scrubBasicSecretText(text: string): string {
+  return String(text || '').replace(/AIza[0-9A-Za-z_-]{20,}/g, '[REDACTED_API_KEY]');
+}
 
 function parseGamesSubPath(req: any): string {
   const queryPath = req?.query?.path;
@@ -56,6 +54,7 @@ export default async function handler(req: any, res: any) {
     if (subPath === 'sync-now') {
       if (method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
+      const { isVerifiedSuperAdmin, verifyFirebaseBearerToken } = await import('./_lib/authCore.cjs');
       const caller = await verifyFirebaseBearerToken(req.headers?.authorization);
       if (!caller) {
         return res.status(401).json({
@@ -103,7 +102,7 @@ export default async function handler(req: any, res: any) {
 
     return res.status(404).json({ error: `Unknown games route: ${subPath}` });
   } catch (err: any) {
-    console.error('[/api/games] Error:', scrubSecretText(err?.message || 'Games endpoint error'));
-    return res.status(500).json({ error: scrubSecretText(err?.message || 'Failed to query games feed') });
+    console.error('[/api/games] Error:', scrubBasicSecretText(err?.message || 'Games endpoint error'));
+    return res.status(500).json({ error: scrubBasicSecretText(err?.message || 'Failed to query games feed') });
   }
 }

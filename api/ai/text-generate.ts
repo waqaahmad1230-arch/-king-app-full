@@ -1,7 +1,7 @@
 import {
   handlePostAiTextGenerate,
   scrubSecretText,
-} from '../_lib/vercelCore.mjs';
+} from '../_lib/aiExecCore.cjs';
 
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') {

@@ -1,4 +1,4 @@
-import { buildSignedStatusUploadPayload, verifyFirebaseBearerToken } from '../_lib/vercelCore.mjs';
+import { buildSignedStatusUploadPayload, verifyFirebaseBearerToken } from '../_lib/statusCore.cjs';
 
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') {

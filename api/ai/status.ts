@@ -1,7 +1,7 @@
 import {
   getPublicAiCapabilityStatusAsync,
   scrubSecretText,
-} from '../_lib/vercelCore.mjs';
+} from '../_lib/aiStatusCore.cjs';
 
 export default async function handler(req: any, res: any) {
   if (req.method !== 'GET') {

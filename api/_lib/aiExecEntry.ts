@@ -20,13 +20,7 @@ export {
 } from '../../server/aiBackend.ts';
 
 export {
-  buildSignedStatusUploadPayload,
-  FIRESTORE_DATABASE_ID,
-  getFirebaseAdminApp,
-  handleDeleteSingleStatusServer,
-  handleFetchAuthorizedStatusFeed,
-  handleRunExpiredStatusCleanup,
   SUPER_ADMIN_EMAIL,
   verifyFirebaseBearerToken,
   type VerifiedCaller,
-} from './statusBackend.ts';
+} from './authBackend.ts';

@@ -2,9 +2,9 @@ import { getFirestore } from 'firebase-admin/firestore';
 import {
   FIRESTORE_DATABASE_ID,
   getFirebaseAdminApp,
-  scrubSecretText,
+  scrubBasicSecretText,
   verifyFirebaseBearerToken,
-} from './_lib/vercelCore.mjs';
+} from './_lib/authCore.cjs';
 
 const META_APP_ID = process.env.META_APP_ID || '1801486577814226';
 const META_APP_SECRET = process.env.META_APP_SECRET || '';
@@ -285,7 +285,7 @@ export default async function handler(req: any, res: any) {
 
     return res.status(404).json({ error: { message: `Unknown Meta route: ${subPath}` } });
   } catch (err: any) {
-    const safeErr = scrubSecretText(err?.message || 'Meta integration endpoint error.');
+    const safeErr = scrubBasicSecretText(err?.message || 'Meta integration endpoint error.');
     console.error('[/api/meta] Error:', safeErr);
     if (subPath === 'callback') {
       res.setHeader('Content-Type', 'text/html; charset=utf-8');

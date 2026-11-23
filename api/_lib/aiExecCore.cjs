@@ -1,637 +1,66 @@
-// server/aiBackend.ts
-import { GoogleGenAI } from "@google/genai";
-import cloudinaryPkg2 from "cloudinary";
+var __create = Object.create;
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
+var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// api/_lib/statusBackend.ts
-import cloudinaryPkg from "cloudinary";
-import { cert, getApps, initializeApp } from "firebase-admin/app";
-import { getAuth } from "firebase-admin/auth";
-import { FieldValue, getFirestore, Timestamp } from "firebase-admin/firestore";
-var cloudinary = cloudinaryPkg.v2;
-var FIREBASE_PROJECT_ID = "king-5f52e";
-var FIRESTORE_DATABASE_ID = "ai-studio-king-4e115b8f-6ca5-4501-8ff0-73c2c7c21a47";
-var SUPER_ADMIN_EMAIL = "waqaahmad1230@gmail.com";
-var CLOUDINARY_CLOUD_NAME = "xb0o3xwi";
-var STATUS_CLOUDINARY_FOLDER = "king_status";
-function getFirebaseAdminApp() {
-  const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT_KEY?.trim();
-  if (getApps().length > 0) {
-    return {
-      app: getApps()[0],
-      hasExplicitCredentials: Boolean(serviceAccountRaw)
-    };
-  }
-  if (serviceAccountRaw) {
-    try {
-      const parsed = JSON.parse(serviceAccountRaw);
-      const app2 = initializeApp({
-        credential: cert(parsed),
-        projectId: FIREBASE_PROJECT_ID
-      });
-      return { app: app2, hasExplicitCredentials: true };
-    } catch (err) {
-      console.warn("[statusBackend] Failed to parse FIREBASE_SERVICE_ACCOUNT_KEY:", err);
-    }
-  }
-  const app = initializeApp({ projectId: FIREBASE_PROJECT_ID });
-  return { app, hasExplicitCredentials: false };
-}
-async function verifyFirebaseBearerToken(authHeader) {
-  const rawHeader = Array.isArray(authHeader) ? authHeader[0] : authHeader;
-  if (!rawHeader || !rawHeader.startsWith("Bearer ")) return null;
-  const idToken = rawHeader.slice(7).trim();
-  if (!idToken) return null;
-  const { app } = getFirebaseAdminApp();
-  try {
-    const decoded = await getAuth(app).verifyIdToken(idToken);
-    if (decoded?.uid) {
-      return {
-        uid: decoded.uid,
-        email: decoded.email,
-        emailVerified: Boolean(decoded.email_verified),
-        name: decoded.name
-      };
-    }
-  } catch {
-  }
-  try {
-    const resp = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`);
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    if (data.error || data.aud !== FIREBASE_PROJECT_ID || data.iss !== `https://securetoken.google.com/${FIREBASE_PROJECT_ID}`) {
-      return null;
-    }
-    const exp = Number(data.exp);
-    if (!exp || exp < Math.floor(Date.now() / 1e3)) return null;
-    const uid = data.sub || data.user_id;
-    if (!uid || typeof uid !== "string") return null;
-    return {
-      uid,
-      email: data.email,
-      emailVerified: data.email_verified === true || data.email_verified === "true",
-      name: data.name
-    };
-  } catch {
-    return null;
-  }
-}
-function getCloudinaryCredentials() {
-  let cloudName = (process.env.CLOUDINARY_CLOUD_NAME || CLOUDINARY_CLOUD_NAME).trim() || CLOUDINARY_CLOUD_NAME;
-  let apiKey = (process.env.CLOUDINARY_API_KEY || "").trim();
-  let apiSecret = (process.env.CLOUDINARY_API_SECRET || "").trim();
-  if ((!apiKey || !apiSecret) && process.env.CLOUDINARY_URL) {
-    try {
-      const parsedUrl = new URL(process.env.CLOUDINARY_URL.trim());
-      if (parsedUrl.protocol === "cloudinary:") {
-        if (!apiKey && parsedUrl.username) apiKey = decodeURIComponent(parsedUrl.username);
-        if (!apiSecret && parsedUrl.password) apiSecret = decodeURIComponent(parsedUrl.password);
-        if (parsedUrl.hostname && !process.env.CLOUDINARY_CLOUD_NAME) {
-          cloudName = parsedUrl.hostname;
-        }
-      }
-    } catch {
-    }
-  }
-  return {
-    cloudName,
-    apiKey,
-    apiSecret,
-    configured: Boolean(cloudName && apiKey && apiSecret)
-  };
-}
-function buildSignedStatusUploadPayload(params) {
-  const { cloudName, apiKey, apiSecret, configured } = getCloudinaryCredentials();
-  const resourceType = params.resourceType === "video" || params.resourceType === "raw" ? params.resourceType : "image";
-  const isPublic = params.privacyMode === "public";
-  const deliveryType = isPublic ? "upload" : "authenticated";
-  if (!configured) {
-    const missingEnv = [];
-    if (!cloudName) missingEnv.push("CLOUDINARY_CLOUD_NAME");
-    if (!apiKey) missingEnv.push("CLOUDINARY_API_KEY");
-    if (!apiSecret) missingEnv.push("CLOUDINARY_API_SECRET");
-    return {
-      ok: false,
-      status: 503,
-      signed: false,
-      code: "CLOUDINARY_UNCONFIGURED",
-      cloudName,
-      folder: STATUS_CLOUDINARY_FOLDER,
-      resourceType,
-      deliveryType,
-      missingEnv,
-      message: "Signed Status upload credentials (CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET) are not configured on the server."
-    };
-  }
-  const timestamp = Math.floor(Date.now() / 1e3);
-  const toSign = {
-    folder: STATUS_CLOUDINARY_FOLDER,
-    timestamp,
-    type: deliveryType
-  };
-  const signature = cloudinary.utils.api_sign_request(toSign, apiSecret);
-  return {
-    ok: true,
-    status: 200,
-    signed: true,
-    mode: "signed",
-    cloudName,
-    apiKey,
-    timestamp,
-    signature,
-    folder: STATUS_CLOUDINARY_FOLDER,
-    resourceType,
-    deliveryType
-  };
-}
-function signAuthenticatedCloudinaryUrl(publicId, resourceType, deliveryType) {
-  if (!publicId || deliveryType !== "authenticated") return null;
-  const { cloudName, apiKey, apiSecret, configured } = getCloudinaryCredentials();
-  if (!configured) return null;
-  cloudinary.config({
-    cloud_name: cloudName,
-    api_key: apiKey,
-    api_secret: apiSecret,
-    secure: true
-  });
-  return cloudinary.url(publicId, {
-    resource_type: resourceType,
-    type: "authenticated",
-    sign_url: true,
-    secure: true
-  });
-}
-function signAuthenticatedVideoThumbnailUrl(publicId, startOffsetSec = 0) {
-  if (!publicId) return null;
-  const { cloudName, apiKey, apiSecret, configured } = getCloudinaryCredentials();
-  if (!configured) return null;
-  cloudinary.config({
-    cloud_name: cloudName,
-    api_key: apiKey,
-    api_secret: apiSecret,
-    secure: true
-  });
-  const safeOffset = String(Math.max(0, Math.floor(Number(startOffsetSec) || 0)));
-  return cloudinary.url(publicId, {
-    resource_type: "video",
-    type: "authenticated",
-    format: "jpg",
-    transformation: [{ start_offset: safeOffset, width: 480, height: 800, crop: "fill" }],
-    sign_url: true,
-    secure: true
-  });
-}
-async function destroyCloudinaryAssetWithRetry(publicId, resourceType, deliveryType, maxAttempts = 2) {
-  if (!publicId) return { status: "deleted" };
-  const { cloudName, apiKey, apiSecret, configured } = getCloudinaryCredentials();
-  if (!configured) {
-    return {
-      status: "skipped_missing_secret",
-      error: "Missing CLOUDINARY_API_KEY or CLOUDINARY_API_SECRET on server."
-    };
-  }
-  cloudinary.config({
-    cloud_name: cloudName,
-    api_key: apiKey,
-    api_secret: apiSecret,
-    secure: true
-  });
-  const resType = resourceType === "video" || resourceType === "raw" ? resourceType : "image";
-  const type = deliveryType === "authenticated" ? "authenticated" : "upload";
-  let lastError = "Unknown Cloudinary error";
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const resp = await cloudinary.uploader.destroy(publicId, {
-        resource_type: resType,
-        type,
-        invalidate: true
-      });
-      if (resp?.result === "ok" || resp?.result === "not found") {
-        return { status: "deleted" };
-      }
-      lastError = `Unexpected Cloudinary destroy result: ${String(resp?.result || "empty")}`;
-    } catch (err) {
-      lastError = err?.message || String(err);
-    }
-    if (attempt < maxAttempts) {
-      await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
-    }
-  }
-  console.error("[statusBackend] Cloudinary asset deletion failed:", {
-    publicId,
-    resourceType: resType,
-    deliveryType: type,
-    attempts: maxAttempts,
-    error: lastError
-  });
-  return { status: "failed", error: lastError };
-}
-function isAdminCredentialError(err) {
-  const msg = String(err?.message || err || "");
-  return msg.includes("Could not load the default credentials") || msg.includes("UNAUTHENTICATED") || msg.includes("Missing or insufficient permissions") || msg.includes("Unable to detect a Project Id") || msg.includes("metadata server");
-}
-function evaluateStatusVisibilityForViewer(status, viewerUid, relations, nowMs = Date.now()) {
-  if (!status || !viewerUid) return false;
-  if (status.authorUid === viewerUid) return true;
-  if (!status.expiresAtMs || status.expiresAtMs <= nowMs) return false;
-  if (relations.blockedByMe.has(status.authorUid) || relations.blockedMe.has(status.authorUid)) {
-    return false;
-  }
-  switch (status.privacyMode) {
-    case "only_me":
-      return false;
-    case "public":
-      return true;
-    case "friends":
-      return relations.friendUids.has(status.authorUid);
-    case "followers":
-      return relations.followingUids.has(status.authorUid);
-    case "selected":
-      return Array.isArray(status.allowedUids) && status.allowedUids.includes(viewerUid);
-    case "except": {
-      const inAudience = relations.friendUids.has(status.authorUid) || relations.followingUids.has(status.authorUid);
-      return inAudience && (!Array.isArray(status.excludedUids) || !status.excludedUids.includes(viewerUid));
-    }
-    default:
-      return false;
-  }
-}
-function toMillis(val) {
-  if (!val) return 0;
-  if (typeof val.toMillis === "function") return val.toMillis();
-  if (typeof val === "number") return val;
-  if (typeof val === "string") {
-    const parsed = Date.parse(val);
-    return Number.isNaN(parsed) ? 0 : parsed;
-  }
-  return 0;
-}
-async function handleFetchAuthorizedStatusFeed(callerUid) {
-  const { app } = getFirebaseAdminApp();
-  const db = getFirestore(app, FIRESTORE_DATABASE_ID);
-  try {
-    const now = Timestamp.now();
-    const nowMs = now.toMillis();
-    const [statusSnap, friendSnap, followSnap, blockedByMeSnap, blockedMeSnap] = await Promise.all([
-      db.collection("statuses").where("expiresAt", ">", now).limit(200).get(),
-      db.collection("friendships").where("users", "array-contains", callerUid).get(),
-      db.collection("follows").where("followerUid", "==", callerUid).get(),
-      db.collection("blocks").where("blockerUid", "==", callerUid).get(),
-      db.collection("blocks").where("blockedUid", "==", callerUid).get()
-    ]);
-    const friendUids = /* @__PURE__ */ new Set();
-    friendSnap.forEach((d) => {
-      const data = d.data();
-      if (data.status === "accepted" && Array.isArray(data.users)) {
-        for (const u of data.users) {
-          if (typeof u === "string" && u !== callerUid) friendUids.add(u);
-        }
-      }
-    });
-    const followingUids = /* @__PURE__ */ new Set();
-    followSnap.forEach((d) => {
-      const t = d.data()?.targetUid;
-      if (typeof t === "string") followingUids.add(t);
-    });
-    const blockedByMe = /* @__PURE__ */ new Set();
-    blockedByMeSnap.forEach((d) => {
-      const b = d.data()?.blockedUid;
-      if (typeof b === "string") blockedByMe.add(b);
-    });
-    const blockedMe = /* @__PURE__ */ new Set();
-    blockedMeSnap.forEach((d) => {
-      const b = d.data()?.blockerUid;
-      if (typeof b === "string") blockedMe.add(b);
-    });
-    const visibleDocs = [];
-    statusSnap.forEach((docSnap) => {
-      const data = docSnap.data();
-      const normalized = {
-        id: docSnap.id,
-        authorUid: String(data.authorUid || ""),
-        authorName: String(data.authorName || "KING Creator"),
-        authorPhoto: String(data.authorPhoto || ""),
-        type: data.type === "video" || data.type === "text" ? data.type : "image",
-        mediaUrl: String(data.mediaUrl || ""),
-        thumbnailUrl: String(data.thumbnailUrl || ""),
-        cloudinaryPublicId: String(data.cloudinaryPublicId || ""),
-        cloudinaryResourceType: data.cloudinaryResourceType || "",
-        cloudinaryDeliveryType: data.cloudinaryDeliveryType || "none",
-        caption: String(data.caption || ""),
-        textContent: String(data.textContent || ""),
-        bgGradient: String(data.bgGradient || ""),
-        textStyle: data.textStyle || "classic",
-        durationSec: Number(data.durationSec) || 0,
-        audioTrack: data.audioTrack || { mode: "original", label: "Original Sound" },
-        ...data.whatsappCta?.enabled && data.whatsappCta?.url ? {
-          whatsappCta: {
-            enabled: true,
-            url: String(data.whatsappCta.url).slice(0, 300),
-            label: String(data.whatsappCta.label || "Chat on WhatsApp").slice(0, 40)
-          }
-        } : {},
-        ...data.videoEdits ? { videoEdits: data.videoEdits } : {},
-        privacyMode: data.privacyMode || "friends",
-        allowedUids: Array.isArray(data.allowedUids) ? data.allowedUids : [],
-        excludedUids: Array.isArray(data.excludedUids) ? data.excludedUids : [],
-        viewsCount: Number(data.viewsCount) || 0,
-        likesCount: Number(data.likesCount) || 0,
-        createdAtMs: toMillis(data.createdAt),
-        expiresAtMs: toMillis(data.expiresAt)
-      };
-      if (evaluateStatusVisibilityForViewer(
-        normalized,
-        callerUid,
-        { friendUids, followingUids, blockedByMe, blockedMe },
-        nowMs
-      )) {
-        if (normalized.cloudinaryDeliveryType === "authenticated") {
-          if (normalized.cloudinaryPublicId) {
-            const resType = normalized.cloudinaryResourceType === "video" || normalized.cloudinaryResourceType === "raw" ? normalized.cloudinaryResourceType : "image";
-            const signedMedia = signAuthenticatedCloudinaryUrl(
-              normalized.cloudinaryPublicId,
-              resType,
-              "authenticated"
-            );
-            if (signedMedia) normalized.mediaUrl = signedMedia;
-            if (resType === "image" && signedMedia) {
-              normalized.thumbnailUrl = signedMedia;
-            } else if (resType === "video") {
-              const signedThumb = signAuthenticatedVideoThumbnailUrl(
-                normalized.cloudinaryPublicId,
-                normalized.videoEdits?.trimStartSec || 0
-              );
-              if (signedThumb) normalized.thumbnailUrl = signedThumb;
-            }
-          }
-          if (normalized.audioTrack?.cloudinaryPublicId) {
-            const signedAudio = signAuthenticatedCloudinaryUrl(
-              normalized.audioTrack.cloudinaryPublicId,
-              "video",
-              "authenticated"
-            );
-            if (signedAudio) {
-              normalized.audioTrack = {
-                ...normalized.audioTrack,
-                audioUrl: signedAudio
-              };
-            }
-          }
-        }
-        visibleDocs.push(normalized);
-      }
-    });
-    const viewRefs = visibleDocs.map((s) => db.collection("status_views").doc(`${s.id}_${callerUid}`));
-    const likeRefs = visibleDocs.map((s) => db.collection("status_likes").doc(`${s.id}_${callerUid}`));
-    const [viewSnaps, likeSnaps] = visibleDocs.length ? await Promise.all([db.getAll(...viewRefs), db.getAll(...likeRefs)]) : [[], []];
-    const sanitizedItems = visibleDocs.map((s, idx) => {
-      const isOwner = s.authorUid === callerUid;
-      const likeSnap = likeSnaps[idx];
-      const viewSnap = viewSnaps[idx];
-      return {
-        ...s,
-        // Never leak private selected/except recipient lists to other viewers
-        allowedUids: isOwner ? s.allowedUids : void 0,
-        excludedUids: isOwner ? s.excludedUids : void 0,
-        viewedByMe: isOwner ? true : Boolean(viewSnap?.exists),
-        myReaction: likeSnap?.exists ? likeSnap.data()?.emoji || null : null
-      };
-    });
-    sanitizedItems.sort((a, b) => a.createdAtMs - b.createdAtMs);
-    return {
-      ok: true,
-      status: 200,
-      statuses: sanitizedItems,
-      cloudinarySignedDelivery: getCloudinaryCredentials().configured
-    };
-  } catch (err) {
-    if (isAdminCredentialError(err)) {
-      return {
-        ok: false,
-        status: 503,
-        code: "BACKEND_ADMIN_UNCONFIGURED",
-        missingEnv: ["FIREBASE_SERVICE_ACCOUNT_KEY"],
-        message: "Server-side Firebase Admin credentials (FIREBASE_SERVICE_ACCOUNT_KEY) are not configured. Multi-user backend privacy filtering requires Admin SDK access."
-      };
-    }
-    throw err;
-  }
-}
-async function deleteCollectionDocsByStatusId(db, collectionName, statusId) {
-  let totalDeleted = 0;
-  while (true) {
-    const snap = await db.collection(collectionName).where("statusId", "==", statusId).limit(400).get();
-    if (snap.empty) break;
-    const batch = db.batch();
-    snap.docs.forEach((docSnap) => batch.delete(docSnap.ref));
-    await batch.commit();
-    totalDeleted += snap.size;
-    if (snap.size < 400) break;
-  }
-  return totalDeleted;
-}
-async function handleDeleteSingleStatusServer(statusId, caller) {
-  const { app } = getFirebaseAdminApp();
-  const db = getFirestore(app, FIRESTORE_DATABASE_ID);
-  try {
-    const statusRef = db.collection("statuses").doc(statusId);
-    const snap = await statusRef.get();
-    if (!snap.exists) {
-      return { ok: true, status: 200, deleted: false, cloudinaryResult: "deleted" };
-    }
-    const data = snap.data() || {};
-    const isSuperAdmin = caller.email === SUPER_ADMIN_EMAIL;
-    if (data.authorUid !== caller.uid && !isSuperAdmin) {
-      return { ok: false, status: 403, code: "FORBIDDEN", message: "Not status owner." };
-    }
-    const mediaDestroy = await destroyCloudinaryAssetWithRetry(
-      String(data.cloudinaryPublicId || ""),
-      data.cloudinaryResourceType || "",
-      String(data.cloudinaryDeliveryType || "upload")
-    );
-    const audioDestroy = data.audioTrack?.cloudinaryPublicId ? await destroyCloudinaryAssetWithRetry(
-      String(data.audioTrack.cloudinaryPublicId),
-      "video",
-      String(data.cloudinaryDeliveryType || "upload")
-    ) : { status: "deleted" };
-    const [deletedViews, deletedLikes, deletedReplies, deletedNotifications] = await Promise.all([
-      deleteCollectionDocsByStatusId(db, "status_views", statusId),
-      deleteCollectionDocsByStatusId(db, "status_likes", statusId),
-      deleteCollectionDocsByStatusId(db, "status_replies", statusId),
-      deleteCollectionDocsByStatusId(db, "notifications", statusId)
-    ]);
-    const cloudinaryFailed = mediaDestroy.status !== "deleted" || audioDestroy.status !== "deleted";
-    if (cloudinaryFailed) {
-      const errDetail = mediaDestroy.error || audioDestroy.error || "Cloudinary delete pending retry";
-      await statusRef.update({
-        expiresAt: Timestamp.fromMillis(Date.now() - 1e3),
-        cleanupPending: true,
-        cleanupAttempts: FieldValue.increment(1),
-        lastCleanupError: errDetail.slice(0, 300),
-        lastCleanupAttemptAt: FieldValue.serverTimestamp()
-      });
-      return {
-        ok: true,
-        status: 200,
-        deleted: true,
-        queuedForAssetRetry: true,
-        cloudinaryResult: mediaDestroy.status,
-        deletedViews,
-        deletedLikes,
-        deletedReplies,
-        deletedNotifications
-      };
-    }
-    await statusRef.delete();
-    return {
-      ok: true,
-      status: 200,
-      deleted: true,
-      queuedForAssetRetry: false,
-      cloudinaryResult: mediaDestroy.status,
-      deletedViews,
-      deletedLikes,
-      deletedReplies,
-      deletedNotifications
-    };
-  } catch (err) {
-    if (isAdminCredentialError(err)) {
-      return {
-        ok: false,
-        status: 503,
-        code: "BACKEND_ADMIN_UNCONFIGURED",
-        missingEnv: ["FIREBASE_SERVICE_ACCOUNT_KEY"],
-        message: "Server-side Admin credentials are required for server cascade & Cloudinary deletion."
-      };
-    }
-    throw err;
-  }
-}
-async function handleRunExpiredStatusCleanup(options) {
-  const rawAuth = Array.isArray(options.authHeader) ? options.authHeader[0] : options.authHeader || "";
-  const cronSecret = (process.env.CRON_SECRET || "").trim();
-  const hasCronAuth = Boolean(cronSecret && rawAuth === `Bearer ${cronSecret}`);
-  const isSuperAdmin = options.caller?.email === SUPER_ADMIN_EMAIL;
-  if (!hasCronAuth && !isSuperAdmin) {
-    return {
-      ok: false,
-      status: 403,
-      code: "FORBIDDEN",
-      message: "Cleanup requires CRON_SECRET Bearer auth or Super Admin credentials."
-    };
-  }
-  const { app } = getFirebaseAdminApp();
-  const db = getFirestore(app, FIRESTORE_DATABASE_ID);
-  try {
-    const now = Timestamp.now();
-    const BATCH_SIZE = 50;
-    const MAX_BATCHES = 10;
-    let deletedStatuses = 0;
-    let deletedViews = 0;
-    let deletedLikes = 0;
-    let deletedReplies = 0;
-    let deletedNotifications = 0;
-    let deletedCloudinaryAssets = 0;
-    let failedCloudinaryAssets = 0;
-    let failedStatuses = 0;
-    let hasMore = false;
-    let lastDoc = null;
-    for (let batchNum = 0; batchNum < MAX_BATCHES; batchNum++) {
-      let q = db.collection("statuses").where("expiresAt", "<=", now).orderBy("expiresAt", "asc").limit(BATCH_SIZE);
-      if (lastDoc) {
-        q = q.startAfter(lastDoc);
-      }
-      const expiredSnap = await q.get();
-      if (expiredSnap.empty) {
-        hasMore = false;
-        break;
-      }
-      lastDoc = expiredSnap.docs[expiredSnap.docs.length - 1];
-      for (const statusDoc of expiredSnap.docs) {
-        const data = statusDoc.data();
-        const statusId = statusDoc.id;
-        const mediaRes = data.cloudinaryPublicId ? await destroyCloudinaryAssetWithRetry(
-          String(data.cloudinaryPublicId),
-          data.cloudinaryResourceType || "",
-          String(data.cloudinaryDeliveryType || "upload")
-        ) : { status: "deleted" };
-        if (data.cloudinaryPublicId) {
-          if (mediaRes.status === "deleted") deletedCloudinaryAssets++;
-          else failedCloudinaryAssets++;
-        }
-        const audioRes = data.audioTrack?.cloudinaryPublicId ? await destroyCloudinaryAssetWithRetry(
-          String(data.audioTrack.cloudinaryPublicId),
-          "video",
-          String(data.cloudinaryDeliveryType || "upload")
-        ) : { status: "deleted" };
-        if (data.audioTrack?.cloudinaryPublicId) {
-          if (audioRes.status === "deleted") deletedCloudinaryAssets++;
-          else failedCloudinaryAssets++;
-        }
-        const [v, l, r, n] = await Promise.all([
-          deleteCollectionDocsByStatusId(db, "status_views", statusId),
-          deleteCollectionDocsByStatusId(db, "status_likes", statusId),
-          deleteCollectionDocsByStatusId(db, "status_replies", statusId),
-          deleteCollectionDocsByStatusId(db, "notifications", statusId)
-        ]);
-        deletedViews += v;
-        deletedLikes += l;
-        deletedReplies += r;
-        deletedNotifications += n;
-        if (mediaRes.status !== "deleted" || audioRes.status !== "deleted") {
-          failedStatuses++;
-          const errDetail = mediaRes.error || audioRes.error || "Cloudinary deletion incomplete";
-          await statusDoc.ref.update({
-            cleanupPending: true,
-            cleanupAttempts: FieldValue.increment(1),
-            lastCleanupError: errDetail.slice(0, 300),
-            lastCleanupAttemptAt: FieldValue.serverTimestamp()
-          });
-          continue;
-        }
-        await statusDoc.ref.delete();
-        deletedStatuses++;
-      }
-      if (expiredSnap.size < BATCH_SIZE) {
-        hasMore = false;
-        break;
-      }
-      if (batchNum === MAX_BATCHES - 1) {
-        hasMore = true;
-      }
-    }
-    return {
-      ok: true,
-      status: 200,
-      deletedStatuses,
-      deletedViews,
-      deletedLikes,
-      deletedReplies,
-      deletedNotifications,
-      deletedCloudinaryAssets,
-      failedCloudinaryAssets,
-      failedStatuses,
-      hasMore,
-      cloudinaryConfigured: getCloudinaryCredentials().configured
-    };
-  } catch (err) {
-    if (isAdminCredentialError(err)) {
-      return {
-        ok: false,
-        status: 503,
-        code: "BACKEND_ADMIN_UNCONFIGURED",
-        missingEnv: ["FIREBASE_SERVICE_ACCOUNT_KEY"],
-        message: "Server-side FIREBASE_SERVICE_ACCOUNT_KEY is required to run scheduled 24h expiry cleanup."
-      };
-    }
-    throw err;
-  }
-}
+// api/_lib/aiExecEntry.ts
+var aiExecEntry_exports = {};
+__export(aiExecEntry_exports, {
+  SUPER_ADMIN_EMAIL: () => SUPER_ADMIN_EMAIL,
+  classifyAiTaskIntent: () => classifyAiTaskIntent,
+  fetchLiveModelsFromGoogleApi: () => fetchLiveModelsFromGoogleApi,
+  getAdminAiStateAsync: () => getAdminAiStateAsync,
+  getEligibleModelsForDomain: () => getEligibleModelsForDomain,
+  getPublicAiCapabilityStatus: () => getPublicAiCapabilityStatus,
+  getPublicAiCapabilityStatusAsync: () => getPublicAiCapabilityStatusAsync,
+  handleAdminAddKey: () => handleAdminAddKey,
+  handleAdminDeleteKey: () => handleAdminDeleteKey,
+  handleAdminUpdateKey: () => handleAdminUpdateKey,
+  handleAdminUpdateModels: () => handleAdminUpdateModels,
+  handleAutoRoutedAiRequest: () => handleAutoRoutedAiRequest,
+  handlePostAiPhotoEdit: () => handlePostAiPhotoEdit,
+  handlePostAiTextGenerate: () => handlePostAiTextGenerate,
+  isVerifiedSuperAdmin: () => isVerifiedSuperAdmin,
+  scrubSecretText: () => scrubSecretText,
+  selectAutoImageModelOrder: () => selectAutoImageModelOrder,
+  testSpecificKeyLive: () => testSpecificKeyLive,
+  testSpecificModelLive: () => testSpecificModelLive,
+  verifyFirebaseBearerToken: () => verifyFirebaseBearerToken
+});
+module.exports = __toCommonJS(aiExecEntry_exports);
+
+// server/aiBackend.ts
+var import_genai = require("@google/genai");
+var import_cloudinary2 = __toESM(require("cloudinary"), 1);
 
 // server/aiVault.ts
-import crypto from "node:crypto";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
+var import_node_crypto = __toESM(require("node:crypto"), 1);
+var import_node_fs = __toESM(require("node:fs"), 1);
+var import_node_os = __toESM(require("node:os"), 1);
+var import_node_path = __toESM(require("node:path"), 1);
 var VERIFIED_GEMINI_MODELS = [
   {
     id: "gemini-3.1-flash-lite-image",
@@ -758,11 +187,11 @@ var VERIFIED_GEMINI_MODELS = [
     apiVersion: "v1beta"
   }
 ];
-var VAULT_BASE_DIR = path.resolve(
-  process.env.AI_VAULT_DIR?.trim() || (process.env.VERCEL ? os.tmpdir() : process.cwd())
+var VAULT_BASE_DIR = import_node_path.default.resolve(
+  process.env.AI_VAULT_DIR?.trim() || (process.env.VERCEL ? import_node_os.default.tmpdir() : process.cwd())
 );
-var VAULT_FILE_PATH = path.join(VAULT_BASE_DIR, ".king-ai-vault.enc.json");
-var VAULT_KEY_PATH = path.join(VAULT_BASE_DIR, ".king-ai-vault.key");
+var VAULT_FILE_PATH = import_node_path.default.join(VAULT_BASE_DIR, ".king-ai-vault.enc.json");
+var VAULT_KEY_PATH = import_node_path.default.join(VAULT_BASE_DIR, ".king-ai-vault.key");
 var CURRENT_MODEL_CONFIG_VERSION = 3;
 var DEFAULT_MODEL_CONFIG = {
   configVersion: CURRENT_MODEL_CONFIG_VERSION,
@@ -824,30 +253,30 @@ var memoryKeyBuffer = null;
 function getVaultEncryptionKey() {
   const envSecret = (process.env.AI_VAULT_SECRET || process.env.SESSION_SECRET || "").trim();
   if (envSecret) {
-    return crypto.createHash("sha256").update(`king-ai-vault:${envSecret}`).digest();
+    return import_node_crypto.default.createHash("sha256").update(`king-ai-vault:${envSecret}`).digest();
   }
   try {
-    if (fs.existsSync(VAULT_KEY_PATH)) {
-      const hex = fs.readFileSync(VAULT_KEY_PATH, "utf8").trim();
+    if (import_node_fs.default.existsSync(VAULT_KEY_PATH)) {
+      const hex = import_node_fs.default.readFileSync(VAULT_KEY_PATH, "utf8").trim();
       if (/^[0-9a-f]{64}$/i.test(hex)) {
         return Buffer.from(hex, "hex");
       }
     }
-    fs.mkdirSync(VAULT_BASE_DIR, { recursive: true });
-    const generated = crypto.randomBytes(32);
-    fs.writeFileSync(VAULT_KEY_PATH, generated.toString("hex"), { mode: 384 });
+    import_node_fs.default.mkdirSync(VAULT_BASE_DIR, { recursive: true });
+    const generated = import_node_crypto.default.randomBytes(32);
+    import_node_fs.default.writeFileSync(VAULT_KEY_PATH, generated.toString("hex"), { mode: 384 });
     return generated;
   } catch {
     if (!memoryKeyBuffer) {
-      memoryKeyBuffer = crypto.randomBytes(32);
+      memoryKeyBuffer = import_node_crypto.default.randomBytes(32);
     }
     return memoryKeyBuffer;
   }
 }
 function encryptText(plainText) {
   const key = getVaultEncryptionKey();
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const iv = import_node_crypto.default.randomBytes(12);
+  const cipher = import_node_crypto.default.createCipheriv("aes-256-gcm", key, iv);
   const encrypted = Buffer.concat([cipher.update(plainText, "utf8"), cipher.final()]);
   const tag = cipher.getAuthTag();
   return JSON.stringify({
@@ -860,7 +289,7 @@ function encryptText(plainText) {
 function decryptText(serialized) {
   const parsed = JSON.parse(serialized);
   const key = getVaultEncryptionKey();
-  const decipher = crypto.createDecipheriv(
+  const decipher = import_node_crypto.default.createDecipheriv(
     "aes-256-gcm",
     key,
     Buffer.from(parsed.iv, "base64")
@@ -939,7 +368,7 @@ function normalizePlainVaultData(parsed) {
 }
 function decryptVaultWrapper(wrapper) {
   const key = getVaultEncryptionKey();
-  const decipher = crypto.createDecipheriv(
+  const decipher = import_node_crypto.default.createDecipheriv(
     "aes-256-gcm",
     key,
     Buffer.from(wrapper.iv, "base64")
@@ -953,8 +382,8 @@ function decryptVaultWrapper(wrapper) {
 }
 function encryptVaultWrapper(data) {
   const key = getVaultEncryptionKey();
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const iv = import_node_crypto.default.randomBytes(12);
+  const cipher = import_node_crypto.default.createCipheriv("aes-256-gcm", key, iv);
   const plain = JSON.stringify(data);
   const ciphertext = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
   const tag = cipher.getAuthTag();
@@ -1019,10 +448,10 @@ function readVaultData() {
     return inMemoryFallbackVault;
   }
   try {
-    if (!fs.existsSync(VAULT_FILE_PATH)) {
+    if (!import_node_fs.default.existsSync(VAULT_FILE_PATH)) {
       return inMemoryFallbackVault || createDefaultVaultData();
     }
-    const rawFile = fs.readFileSync(VAULT_FILE_PATH, "utf8");
+    const rawFile = import_node_fs.default.readFileSync(VAULT_FILE_PATH, "utf8");
     const wrapper = JSON.parse(rawFile);
     const normalized = decryptVaultWrapper(wrapper);
     inMemoryFallbackVault = normalized;
@@ -1041,8 +470,8 @@ function writeVaultData(data, options) {
   const payload = encryptVaultWrapper(data);
   const serialized = JSON.stringify(payload);
   try {
-    fs.mkdirSync(VAULT_BASE_DIR, { recursive: true });
-    fs.writeFileSync(VAULT_FILE_PATH, serialized, { mode: 384 });
+    import_node_fs.default.mkdirSync(VAULT_BASE_DIR, { recursive: true });
+    import_node_fs.default.writeFileSync(VAULT_FILE_PATH, serialized, { mode: 384 });
   } catch {
   }
   if (upstash.configured && hasEnvSecret) {
@@ -1340,7 +769,7 @@ function addVaultApiKey(params) {
   }
   const cleanLabel = (params.label || "").trim() || `Admin Key ${Date.now().toString().slice(-4)}`;
   const vault = readVaultData();
-  const id = `vk_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+  const id = `vk_${import_node_crypto.default.randomUUID().replace(/-/g, "").slice(0, 12)}`;
   const nowIso = (/* @__PURE__ */ new Date()).toISOString();
   const nextPriority = typeof params.priority === "number" && Number.isFinite(params.priority) ? Math.max(1, Math.min(999, Math.round(params.priority))) : vault.keys.length + 1;
   vault.keys.push({
@@ -1506,8 +935,187 @@ function recordKeyHealthResult(keyId, result) {
   writeVaultData(vault);
 }
 
+// server/aiStatus.ts
+function getBackendHost() {
+  return process.env.VERCEL ? "vercel-serverless" : "nodejs-express";
+}
+function mapStatusLabel(s) {
+  if (s === "ready") return "Ready";
+  if (s === "disabled") return "Disabled";
+  if (s === "quota_exhausted") return "Quota Exhausted";
+  if (s === "invalid") return "Invalid Key";
+  return "Error";
+}
+function getPublicAiCapabilityStatus() {
+  const keys = listResolvedKeys();
+  const modelConfig = getModelConfig();
+  const activeKeys = keys.filter((k) => k.enabled && k.status !== "invalid");
+  const healthyKeys = activeKeys.filter(
+    (k) => k.status === "ready" && (!k.cooldownUntil || k.cooldownUntil <= Date.now())
+  );
+  const verifiedModels = VERIFIED_GEMINI_MODELS.map((spec) => ({
+    ...spec,
+    enabled: Boolean(modelConfig.enabledModels[spec.id]),
+    isPrimary: spec.id === modelConfig.primaryImageModel || spec.id === modelConfig.primaryTextModel || spec.id === modelConfig.primaryVideoModel
+  }));
+  const enabledImageModels = verifiedModels.filter((m) => m.capability === "image" && m.enabled);
+  const enabledTextModels = verifiedModels.filter((m) => m.capability === "text" && m.enabled);
+  const enabledVideoModels = verifiedModels.filter((m) => m.capability === "omni" && m.enabled);
+  const primaryImageModel = enabledImageModels.find((m) => m.id === modelConfig.primaryImageModel)?.id || enabledImageModels[0]?.id || "gemini-3.1-flash-lite-image";
+  const primaryTextModel = enabledTextModels.find((m) => m.id === modelConfig.primaryTextModel)?.id || enabledTextModels[0]?.id || "gemini-3.1-pro-preview";
+  const primaryVideoModel = enabledVideoModels.find((m) => m.id === modelConfig.primaryVideoModel)?.id || enabledVideoModels[0]?.id || "gemini-omni-1.2-flash";
+  const configured = activeKeys.length > 0;
+  const videoSupported = configured && enabledVideoModels.length > 0;
+  return {
+    ok: true,
+    configured,
+    provider: "google-gemini",
+    backendHost: getBackendHost(),
+    autoRoutingEnabled: modelConfig.enableAutoRouting,
+    imageSelectionPolicy: modelConfig.imageSelectionPolicy,
+    photoSupported: configured && enabledImageModels.length > 0,
+    textSupported: configured && enabledTextModels.length > 0,
+    photoModel: primaryImageModel,
+    textModel: primaryTextModel,
+    videoModel: primaryVideoModel,
+    supportedModels: enabledImageModels.map((m) => m.id),
+    verifiedModels,
+    routingArchitecture: {
+      assistantPreferred: primaryTextModel,
+      photoTiers: {
+        lite: enabledImageModels.find((m) => m.qualityTier === "lite")?.id || null,
+        standard: enabledImageModels.find((m) => m.qualityTier === "standard")?.id || null,
+        pro: enabledImageModels.find((m) => m.qualityTier === "pro")?.id || null
+      },
+      videoExclusive: enabledVideoModels[0]?.id || null
+    },
+    videoSupported,
+    videoReason: videoSupported ? `Gemini Omni (${primaryVideoModel}) is configured for video routing via /api/ai/route. Interactive timeline editing tools (Trim, Filters, Music, Text) are available in Post Editor.` : "Video AI requires an active paid-tier Gemini API key and an enabled Gemini Omni model in Admin Panel \u2192 AI Model Manager.",
+    missingEnv: configured ? [] : ["ADMIN_VAULT_OR_SERVER_KEY"],
+    activeKeyCount: activeKeys.length,
+    healthyKeyCount: healthyKeys.length,
+    keyStatuses: keys.map((k, idx) => ({
+      keyIndex: idx + 1,
+      id: k.id,
+      label: k.source === "admin_vault" ? `Key Slot ${idx + 1}` : `Server Key ${idx + 1}`,
+      projectId: k.projectId,
+      configured: true,
+      enabled: k.enabled,
+      source: k.source,
+      status: mapStatusLabel(k.status),
+      quotaScope: k.quotaScope
+    })),
+    projects: listProjectHealthSummaries()
+  };
+}
+async function getPublicAiCapabilityStatusAsync() {
+  await syncVaultFromRemote();
+  return getPublicAiCapabilityStatus();
+}
+
+// api/_lib/authBackend.ts
+var import_app = require("firebase-admin/app");
+var import_auth = require("firebase-admin/auth");
+var FIREBASE_PROJECT_ID = "king-5f52e";
+var SUPER_ADMIN_EMAIL = "waqaahmad1230@gmail.com";
+function getFirebaseAdminApp() {
+  const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT_KEY?.trim();
+  if ((0, import_app.getApps)().length > 0) {
+    return {
+      app: (0, import_app.getApps)()[0],
+      hasExplicitCredentials: Boolean(serviceAccountRaw)
+    };
+  }
+  if (serviceAccountRaw) {
+    try {
+      const parsed = JSON.parse(serviceAccountRaw);
+      const app2 = (0, import_app.initializeApp)({
+        credential: (0, import_app.cert)(parsed),
+        projectId: FIREBASE_PROJECT_ID
+      });
+      return { app: app2, hasExplicitCredentials: true };
+    } catch (err) {
+      console.warn("[authBackend] Failed to parse FIREBASE_SERVICE_ACCOUNT_KEY:", err);
+    }
+  }
+  const app = (0, import_app.initializeApp)({ projectId: FIREBASE_PROJECT_ID });
+  return { app, hasExplicitCredentials: false };
+}
+async function verifyFirebaseBearerToken(authHeader) {
+  const rawHeader = Array.isArray(authHeader) ? authHeader[0] : authHeader;
+  if (!rawHeader || !rawHeader.startsWith("Bearer ")) return null;
+  const idToken = rawHeader.slice(7).trim();
+  if (!idToken) return null;
+  const { app } = getFirebaseAdminApp();
+  try {
+    const decoded = await (0, import_auth.getAuth)(app).verifyIdToken(idToken);
+    if (decoded?.uid) {
+      return {
+        uid: decoded.uid,
+        email: decoded.email,
+        emailVerified: Boolean(decoded.email_verified),
+        name: decoded.name
+      };
+    }
+  } catch {
+  }
+  try {
+    const resp = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`);
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    if (data.error || data.aud !== FIREBASE_PROJECT_ID || data.iss !== `https://securetoken.google.com/${FIREBASE_PROJECT_ID}`) {
+      return null;
+    }
+    const exp = Number(data.exp);
+    if (!exp || exp < Math.floor(Date.now() / 1e3)) return null;
+    const uid = data.sub || data.user_id;
+    if (!uid || typeof uid !== "string") return null;
+    return {
+      uid,
+      email: data.email,
+      emailVerified: data.email_verified === true || data.email_verified === "true",
+      name: data.name
+    };
+  } catch {
+    return null;
+  }
+}
+function isVerifiedSuperAdmin(caller) {
+  return Boolean(caller && caller.email === SUPER_ADMIN_EMAIL && caller.emailVerified === true);
+}
+
+// api/_lib/statusBackend.ts
+var import_cloudinary = __toESM(require("cloudinary"), 1);
+var import_firestore = require("firebase-admin/firestore");
+var cloudinary = import_cloudinary.default.v2;
+var CLOUDINARY_CLOUD_NAME = "xb0o3xwi";
+function getCloudinaryCredentials() {
+  let cloudName = (process.env.CLOUDINARY_CLOUD_NAME || CLOUDINARY_CLOUD_NAME).trim() || CLOUDINARY_CLOUD_NAME;
+  let apiKey = (process.env.CLOUDINARY_API_KEY || "").trim();
+  let apiSecret = (process.env.CLOUDINARY_API_SECRET || "").trim();
+  if ((!apiKey || !apiSecret) && process.env.CLOUDINARY_URL) {
+    try {
+      const parsedUrl = new URL(process.env.CLOUDINARY_URL.trim());
+      if (parsedUrl.protocol === "cloudinary:") {
+        if (!apiKey && parsedUrl.username) apiKey = decodeURIComponent(parsedUrl.username);
+        if (!apiSecret && parsedUrl.password) apiSecret = decodeURIComponent(parsedUrl.password);
+        if (parsedUrl.hostname && !process.env.CLOUDINARY_CLOUD_NAME) {
+          cloudName = parsedUrl.hostname;
+        }
+      }
+    } catch {
+    }
+  }
+  return {
+    cloudName,
+    apiKey,
+    apiSecret,
+    configured: Boolean(cloudName && apiKey && apiSecret)
+  };
+}
+
 // server/aiBackend.ts
-var cloudinary2 = cloudinaryPkg2.v2;
+var cloudinary2 = import_cloudinary2.default.v2;
 var ALLOWED_IMAGE_MIMES = /* @__PURE__ */ new Set(["image/jpeg", "image/png", "image/webp"]);
 var ALLOWED_VIDEO_MIMES = /* @__PURE__ */ new Set(["video/mp4", "video/webm", "video/quicktime"]);
 var MAX_PROMPT_LENGTH = 2e3;
@@ -1540,11 +1148,8 @@ function getMsUntilDailyQuotaReset(nowMs = Date.now()) {
     return DAILY_RPD_FALLBACK_COOLDOWN_MS;
   }
 }
-function getBackendHost() {
-  return process.env.VERCEL ? "vercel-serverless" : "nodejs-express";
-}
 function defaultClientFactory(apiKey, apiVersion) {
-  const ai = new GoogleGenAI({
+  const ai = new import_genai.GoogleGenAI({
     apiKey,
     ...apiVersion ? { apiVersion } : {},
     httpOptions: {
@@ -1646,82 +1251,6 @@ function classifyGeminiError(err, modelId) {
     code: "GEMINI_UPSTREAM_ERROR",
     message: rawMessage || "Temporary upstream Gemini error."
   };
-}
-function mapStatusLabel(s) {
-  if (s === "ready") return "Ready";
-  if (s === "disabled") return "Disabled";
-  if (s === "quota_exhausted") return "Quota Exhausted";
-  if (s === "invalid") return "Invalid Key";
-  return "Error";
-}
-function isVerifiedSuperAdmin(caller) {
-  return Boolean(caller && caller.email === SUPER_ADMIN_EMAIL && caller.emailVerified === true);
-}
-function getPublicAiCapabilityStatus() {
-  const keys = listResolvedKeys();
-  const modelConfig = getModelConfig();
-  const activeKeys = keys.filter((k) => k.enabled && k.status !== "invalid");
-  const healthyKeys = activeKeys.filter(
-    (k) => k.status === "ready" && (!k.cooldownUntil || k.cooldownUntil <= Date.now())
-  );
-  const verifiedModels = VERIFIED_GEMINI_MODELS.map((spec) => ({
-    ...spec,
-    enabled: Boolean(modelConfig.enabledModels[spec.id]),
-    isPrimary: spec.id === modelConfig.primaryImageModel || spec.id === modelConfig.primaryTextModel || spec.id === modelConfig.primaryVideoModel
-  }));
-  const enabledImageModels = verifiedModels.filter((m) => m.capability === "image" && m.enabled);
-  const enabledTextModels = verifiedModels.filter((m) => m.capability === "text" && m.enabled);
-  const enabledVideoModels = verifiedModels.filter((m) => m.capability === "omni" && m.enabled);
-  const primaryImageModel = enabledImageModels.find((m) => m.id === modelConfig.primaryImageModel)?.id || enabledImageModels[0]?.id || "gemini-3.1-flash-lite-image";
-  const primaryTextModel = enabledTextModels.find((m) => m.id === modelConfig.primaryTextModel)?.id || enabledTextModels[0]?.id || "gemini-3.1-pro-preview";
-  const primaryVideoModel = enabledVideoModels.find((m) => m.id === modelConfig.primaryVideoModel)?.id || enabledVideoModels[0]?.id || "gemini-omni-1.2-flash";
-  const configured = activeKeys.length > 0;
-  const videoSupported = configured && enabledVideoModels.length > 0;
-  return {
-    ok: true,
-    configured,
-    provider: "google-gemini",
-    backendHost: getBackendHost(),
-    autoRoutingEnabled: modelConfig.enableAutoRouting,
-    imageSelectionPolicy: modelConfig.imageSelectionPolicy,
-    photoSupported: configured && enabledImageModels.length > 0,
-    textSupported: configured && enabledTextModels.length > 0,
-    photoModel: primaryImageModel,
-    textModel: primaryTextModel,
-    videoModel: primaryVideoModel,
-    supportedModels: enabledImageModels.map((m) => m.id),
-    verifiedModels,
-    routingArchitecture: {
-      assistantPreferred: primaryTextModel,
-      photoTiers: {
-        lite: enabledImageModels.find((m) => m.qualityTier === "lite")?.id || null,
-        standard: enabledImageModels.find((m) => m.qualityTier === "standard")?.id || null,
-        pro: enabledImageModels.find((m) => m.qualityTier === "pro")?.id || null
-      },
-      videoExclusive: enabledVideoModels[0]?.id || null
-    },
-    videoSupported,
-    videoReason: videoSupported ? `Gemini Omni (${primaryVideoModel}) is configured for video routing via /api/ai/route. Interactive timeline editing tools (Trim, Filters, Music, Text) are available in Post Editor.` : "Video AI requires an active paid-tier Gemini API key and an enabled Gemini Omni model in Admin Panel \u2192 AI Model Manager.",
-    missingEnv: configured ? [] : ["ADMIN_VAULT_OR_SERVER_KEY"],
-    activeKeyCount: activeKeys.length,
-    healthyKeyCount: healthyKeys.length,
-    keyStatuses: keys.map((k, idx) => ({
-      keyIndex: idx + 1,
-      id: k.id,
-      label: k.source === "admin_vault" ? `Key Slot ${idx + 1}` : `Server Key ${idx + 1}`,
-      projectId: k.projectId,
-      configured: true,
-      enabled: k.enabled,
-      source: k.source,
-      status: mapStatusLabel(k.status),
-      quotaScope: k.quotaScope
-    })),
-    projects: listProjectHealthSummaries()
-  };
-}
-async function getPublicAiCapabilityStatusAsync() {
-  await syncVaultFromRemote();
-  return getPublicAiCapabilityStatus();
 }
 function getAdminAiState() {
   const modelConfig = getModelConfig();
@@ -3137,7 +2666,7 @@ async function testSpecificModelLive(params) {
   const start = Date.now();
   try {
     if (spec.capability === "omni") {
-      const betaAi = new GoogleGenAI({
+      const betaAi = new import_genai.GoogleGenAI({
         apiKey: keyItem.rawKey,
         apiVersion: "v1beta",
         httpOptions: { headers: { "User-Agent": "aistudio-build" } }
@@ -3285,15 +2814,13 @@ async function fetchLiveModelsFromGoogleApi(overrideApiKey) {
     };
   }
 }
-export {
-  FIRESTORE_DATABASE_ID,
+// Annotate the CommonJS export names for ESM import in node:
+0 && (module.exports = {
   SUPER_ADMIN_EMAIL,
-  buildSignedStatusUploadPayload,
   classifyAiTaskIntent,
   fetchLiveModelsFromGoogleApi,
   getAdminAiStateAsync,
   getEligibleModelsForDomain,
-  getFirebaseAdminApp,
   getPublicAiCapabilityStatus,
   getPublicAiCapabilityStatusAsync,
   handleAdminAddKey,
@@ -3301,15 +2828,12 @@ export {
   handleAdminUpdateKey,
   handleAdminUpdateModels,
   handleAutoRoutedAiRequest,
-  handleDeleteSingleStatusServer,
-  handleFetchAuthorizedStatusFeed,
   handlePostAiPhotoEdit,
   handlePostAiTextGenerate,
-  handleRunExpiredStatusCleanup,
   isVerifiedSuperAdmin,
   scrubSecretText,
   selectAutoImageModelOrder,
   testSpecificKeyLive,
   testSpecificModelLive,
   verifyFirebaseBearerToken
-};
+});

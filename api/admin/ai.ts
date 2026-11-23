@@ -10,7 +10,7 @@ import {
   testSpecificKeyLive,
   testSpecificModelLive,
   verifyFirebaseBearerToken,
-} from '../_lib/vercelCore.mjs';
+} from '../_lib/aiExecCore.cjs';
 
 function parseAdminSubPath(req: any): string {
   const queryPath = req?.query?.path;
