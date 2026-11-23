@@ -202,11 +202,160 @@ export function resolveCooldownForQuotaError(
   };
 }
 
+const PER_ATTEMPT_TIMEOUT_MS_VERCEL = 28_000;
+const PER_ATTEMPT_TIMEOUT_MS_NODE = 90_000;
+const TOTAL_RUN_BUDGET_MS_VERCEL = 50_000;
+const TOTAL_RUN_BUDGET_MS_NODE = 150_000;
+
+export class BadJsonBodyError extends Error {
+  status = 400;
+  code = 'INVALID_JSON_BODY';
+  constructor(message = 'Invalid JSON request body.') {
+    super(message);
+    this.name = 'BadJsonBodyError';
+  }
+}
+
+export function parseRequestJsonBody(rawBody: any): Record<string, any> {
+  if (rawBody === undefined || rawBody === null || rawBody === '') return {};
+  if (typeof rawBody === 'string') {
+    const trimmed = rawBody.trim();
+    if (!trimmed) return {};
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new BadJsonBodyError('Request body must be a JSON object.');
+      }
+      return parsed;
+    } catch (err: any) {
+      if (err instanceof BadJsonBodyError) throw err;
+      throw new BadJsonBodyError('Malformed JSON request body.');
+    }
+  }
+  if (typeof rawBody === 'object' && !Array.isArray(rawBody)) {
+    return rawBody;
+  }
+  throw new BadJsonBodyError('Request body must be a JSON object.');
+}
+
+export function normalizeAiEndpointResult(
+  result: { status?: number; payload?: any },
+  options?: { requireImage?: boolean; requireText?: boolean }
+): { status: number; payload: Record<string, any> } {
+  const rawPayload =
+    result?.payload && typeof result.payload === 'object' && !Array.isArray(result.payload)
+      ? { ...result.payload }
+      : {
+          ok: false,
+          code: 'INVALID_BACKEND_PAYLOAD',
+          error: 'AI backend produced an invalid payload structure.',
+        };
+
+  if (typeof rawPayload.error === 'string') {
+    rawPayload.error = scrubSecretText(rawPayload.error);
+  }
+  if (typeof rawPayload.note === 'string') {
+    rawPayload.note = scrubSecretText(rawPayload.note);
+  }
+
+  let status = typeof result?.status === 'number' && result.status >= 100 ? result.status : 500;
+
+  // Critical invariant: NEVER return HTTP 200 for an unsuccessful payload
+  if (rawPayload.ok !== true) {
+    if (status >= 200 && status < 300) {
+      status = 502;
+    }
+    if (!rawPayload.error) {
+      rawPayload.error = 'AI request failed.';
+    }
+    rawPayload.ok = false;
+    return { status, payload: rawPayload };
+  }
+
+  // Critical invariant: Photo edit HTTP 200 MUST contain imageBase64 or imageUrl
+  if (options?.requireImage) {
+    const hasImg =
+      (typeof rawPayload.imageBase64 === 'string' && rawPayload.imageBase64.trim().length > 0) ||
+      (typeof rawPayload.imageUrl === 'string' && rawPayload.imageUrl.trim().length > 0);
+    if (!hasImg) {
+      return {
+        status: 502,
+        payload: {
+          ok: false,
+          code: 'GEMINI_NO_IMAGE_OUTPUT',
+          error: 'Gemini completed without returning generated image data.',
+        },
+      };
+    }
+  }
+
+  // Critical invariant: Text generate HTTP 200 MUST contain text
+  if (options?.requireText) {
+    const hasText = typeof rawPayload.text === 'string' && rawPayload.text.trim().length > 0;
+    if (!hasText) {
+      return {
+        status: 502,
+        payload: {
+          ok: false,
+          code: 'GEMINI_NO_TEXT_OUTPUT',
+          error: 'Gemini completed without returning generated text.',
+        },
+      };
+    }
+  }
+
+  return { status, payload: rawPayload };
+}
+
+export function sendNormalizedAiJson(
+  res: any,
+  status: number,
+  payload: any,
+  options?: { requireImage?: boolean; requireText?: boolean }
+) {
+  const normalized = normalizeAiEndpointResult({ status, payload }, options);
+  if (typeof res?.setHeader === 'function') {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store');
+  }
+  return res.status(normalized.status).json(normalized.payload);
+}
+
+async function withExecutionTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return promise;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          const timeoutErr: any = new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s.`);
+          timeoutErr.status = 504;
+          timeoutErr.code = 'DEADLINE_EXCEEDED';
+          reject(timeoutErr);
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export function classifyGeminiError(err: any, modelId?: string): ClassifiedGeminiError {
   const extraDetails = (() => {
     try {
-      if (err?.errorDetails || err?.details) {
-        return scrubSecretText(JSON.stringify(err.errorDetails || err.details));
+      const detailCandidates = [
+        err?.errorDetails,
+        err?.details,
+        err?.error?.details,
+        err?.error?.message,
+        err?.error?.status,
+        err?.cause?.message,
+      ].filter(Boolean);
+      if (detailCandidates.length > 0) {
+        return scrubSecretText(JSON.stringify(detailCandidates));
       }
     } catch {
       return '';
@@ -216,7 +365,7 @@ export function classifyGeminiError(err: any, modelId?: string): ClassifiedGemin
   const rawMessage = scrubSecretText(String(err?.message || err || 'AI processing failed.'));
   const combined = `${rawMessage} ${extraDetails}`.trim();
   const lower = combined.toLowerCase();
-  const statusCode = Number(err?.status || err?.code || 0);
+  const statusCode = Number(err?.status || err?.code || err?.error?.code || err?.response?.status || 0);
 
   if (
     statusCode === 401 ||
@@ -240,14 +389,15 @@ export function classifyGeminiError(err: any, modelId?: string): ClassifiedGemin
     lower.includes('resource_exhausted') ||
     lower.includes('quota') ||
     lower.includes('rate limit') ||
-    lower.includes('too many requests')
+    lower.includes('too many requests') ||
+    lower.includes('quotafailure')
   ) {
     const retryAfterMs = extractRetryAfterMs(combined);
     const isBilling =
       /check your plan and billing|billing account|billing_not_active|spend limit/i.test(combined);
     const isDailyQuota =
       isBilling ||
-      /requestsperday|per_?day|\brpd\b|daily[_ ]?(?:quota|limit|requests)|generate_content_free_tier_requests.*(?:day|0)|limit:\s*0/i.test(
+      /requests_?per_?day|per_?day|\brpd\b|daily[_ ]?(?:quota|limit|requests)|generate_?content_?free_?tier_?requests.*(?:day|0)|free_?tier.*(?:per_?day|limit["':\s]+0)|"limit"\s*:\s*"?0"?|\blimit:\s*0\b/i.test(
         combined
       );
     const quotaScope: QuotaScope = isBilling
@@ -267,8 +417,10 @@ export function classifyGeminiError(err: any, modelId?: string): ClassifiedGemin
           : 'GEMINI_DAILY_QUOTA_EXCEEDED',
       message:
         quotaScope === 'rpm_throttle'
-          ? 'Gemini API per-minute rate limit (RPM) reached; rotating to next healthy key/project.'
-          : 'Gemini project daily quota (RPD) exhausted; failing over to next healthy Google Cloud project.',
+          ? 'Gemini API per-minute rate limit (RPM) reached for this project.'
+          : quotaScope === 'billing'
+          ? 'Gemini project billing or spend quota is exhausted.'
+          : 'Gemini project daily quota (RPD) is exhausted.',
       quotaScope,
       retryAfterMs,
     };
@@ -421,6 +573,143 @@ export function getEligibleKeysForExecution(options?: {
   }
 
   return allowFallback ? ordered : ordered.slice(0, 1);
+}
+
+function buildNoEligibleKeysResult(options?: {
+  overrideKeys?: ResolvedExecutableKey[];
+  overrideProjectHealth?: ProjectHealthRecord[];
+}): { status: number; payload: Record<string, any> } {
+  const allKeys = options?.overrideKeys || listResolvedKeys();
+  const enabledKeys = allKeys.filter((k) => k.enabled);
+  if (enabledKeys.length === 0) {
+    return {
+      status: 503,
+      payload: {
+        ok: false,
+        code: 'AI_PROVIDER_NOT_CONFIGURED',
+        error:
+          'No active Gemini API keys are configured. Add or enable a valid API key in Admin Panel → AI Model Manager.',
+      },
+    };
+  }
+
+  const now = Date.now();
+  const projectHealth = options?.overrideProjectHealth || listProjectHealthSummaries();
+  const exhaustedProjects = new Set(
+    projectHealth
+      .filter((p) => p.status === 'quota_exhausted' && p.cooldownUntil && p.cooldownUntil > now)
+      .map((p) => p.projectId.toLowerCase())
+  );
+
+  const quotaBlockedKeys = enabledKeys.filter(
+    (k) =>
+      k.status === 'quota_exhausted' ||
+      (k.cooldownUntil && k.cooldownUntil > now) ||
+      (k.projectCooldownUntil && k.projectCooldownUntil > now) ||
+      (k.projectId && exhaustedProjects.has(k.projectId.toLowerCase()))
+  );
+
+  if (quotaBlockedKeys.length > 0) {
+    const scopes = quotaBlockedKeys.map((k) => k.quotaScope).filter(Boolean);
+    const hasDailyOrBilling =
+      scopes.includes('daily_rpd') || scopes.includes('billing') || scopes.length === 0;
+    const isBillingOnly = scopes.length > 0 && scopes.every((s) => s === 'billing');
+
+    if (!hasDailyOrBilling) {
+      return {
+        status: 429,
+        payload: {
+          ok: false,
+          code: 'GEMINI_RPM_RATE_LIMITED',
+          error:
+            'All configured Google Cloud Gemini projects/keys are temporarily rate-limited (RPM). Please wait a few seconds and try again.',
+        },
+      };
+    }
+
+    return {
+      status: 429,
+      payload: {
+        ok: false,
+        code: isBillingOnly ? 'GEMINI_BILLING_QUOTA_EXCEEDED' : 'GEMINI_DAILY_QUOTA_EXCEEDED',
+        error:
+          'All configured Google Cloud Gemini projects/keys have exhausted their daily quota (RPD). Add an API key from another Google Cloud project in Admin Panel → AI Model Manager or try again after the daily quota reset.',
+      },
+    };
+  }
+
+  if (enabledKeys.every((k) => k.status === 'invalid')) {
+    return {
+      status: 403,
+      payload: {
+        ok: false,
+        code: 'GEMINI_KEY_INVALID',
+        error:
+          'All configured Gemini API keys were rejected or lack permission. Update keys in Admin Panel → AI Model Manager.',
+      },
+    };
+  }
+
+  return {
+    status: 503,
+    payload: {
+      ok: false,
+      code: 'AI_PROVIDER_NOT_CONFIGURED',
+      error:
+        'No active healthy Gemini API keys are available. Check key health in Admin Panel → AI Model Manager.',
+    },
+  };
+}
+
+function buildExhaustedFailureResult(params: {
+  lastClassified: ClassifiedGeminiError | null;
+  lastQuotaError: ClassifiedGeminiError | null;
+  attempts: number;
+  defaultCode: string;
+  defaultMessage: string;
+}): { status: number; payload: Record<string, any> } {
+  const { lastClassified, lastQuotaError, attempts, defaultCode, defaultMessage } = params;
+  if (lastClassified?.kind === 'QUOTA_EXCEEDED') {
+    const scope = lastClassified.quotaScope || 'daily_rpd';
+    return {
+      status: 429,
+      payload: {
+        ok: false,
+        code: lastClassified.code,
+        quotaScope: scope,
+        error:
+          scope === 'rpm_throttle'
+            ? 'All eligible Google Cloud Gemini projects/keys reached their per-minute rate limit (RPM). Please wait briefly and try again.'
+            : scope === 'billing'
+            ? 'All eligible Google Cloud Gemini projects/keys exceeded billing/spend quota.'
+            : 'All eligible Google Cloud Gemini projects/keys have exhausted their daily quota (RPD). Add a key from another Google Cloud project or try again after reset.',
+        attempts,
+      },
+    };
+  }
+
+  const effective = lastClassified || lastQuotaError;
+  if (effective) {
+    return {
+      status: effective.httpStatus || 502,
+      payload: {
+        ok: false,
+        code: effective.code || defaultCode,
+        error: effective.message || defaultMessage,
+        attempts,
+      },
+    };
+  }
+
+  return {
+    status: 502,
+    payload: {
+      ok: false,
+      code: defaultCode,
+      error: defaultMessage,
+      attempts,
+    },
+  };
 }
 
 const PRO_QUALITY_IMAGE_REGEX =
@@ -790,15 +1079,10 @@ export async function executeImageAiWithFallback(params: {
     overrideProjectHealth: params.overrideProjectHealth,
   });
   if (keys.length === 0) {
-    return {
-      status: 503,
-      payload: {
-        ok: false,
-        code: 'AI_PROVIDER_NOT_CONFIGURED',
-        error:
-          'No active healthy Gemini API keys are available. Add or enable a valid API key in Admin Panel → AI Model Manager.',
-      },
-    };
+    return buildNoEligibleKeysResult({
+      overrideKeys: params.overrideKeys,
+      overrideProjectHealth: params.overrideProjectHealth,
+    });
   }
 
   const hasSourcePhoto = Boolean(params.imageBase64 && params.mimeType);
@@ -825,16 +1109,47 @@ export async function executeImageAiWithFallback(params: {
   const factory = params.clientFactory || defaultClientFactory;
   const instruction = buildPhotoInstruction(params.prompt, params.presetAction, hasSourcePhoto);
   let lastClassified: ClassifiedGeminiError | null = null;
+  let lastQuotaError: ClassifiedGeminiError | null = null;
   let attempts = 0;
   const throttledProjectsInRun = new Set<string>();
+  const throttledKeyIdsInRun = new Set<string>();
+  const runBudgetMs = process.env.VERCEL ? TOTAL_RUN_BUDGET_MS_VERCEL : TOTAL_RUN_BUDGET_MS_NODE;
+  const perAttemptCapMs = process.env.VERCEL ? PER_ATTEMPT_TIMEOUT_MS_VERCEL : PER_ATTEMPT_TIMEOUT_MS_NODE;
+  const deadlineMs = Date.now() + runBudgetMs;
 
   for (let kIdx = 0; kIdx < keys.length; kIdx++) {
+    const remainingBudget = deadlineMs - Date.now();
+    if (remainingBudget <= 1_500) {
+      lastClassified = {
+        kind: 'UPSTREAM_TRANSIENT',
+        httpStatus: 504,
+        code: 'AI_EXECUTION_TIMEOUT',
+        message: 'AI processing exceeded the server time budget before completing. Please try again.',
+      };
+      break;
+    }
+
     const keyItem = keys[kIdx];
-    if (keyItem.projectId && throttledProjectsInRun.has(keyItem.projectId)) {
+    const normalizedProject = keyItem.projectId ? keyItem.projectId.toLowerCase() : '';
+    if (throttledKeyIdsInRun.has(keyItem.id)) {
+      continue;
+    }
+    if (normalizedProject && throttledProjectsInRun.has(normalizedProject)) {
       continue;
     }
 
     for (const modelId of models) {
+      const attemptRemaining = deadlineMs - Date.now();
+      if (attemptRemaining <= 1_500) {
+        lastClassified = {
+          kind: 'UPSTREAM_TRANSIENT',
+          httpStatus: 504,
+          code: 'AI_EXECUTION_TIMEOUT',
+          message: 'AI processing exceeded the server time budget before completing. Please try again.',
+        };
+        break;
+      }
+
       const spec = VERIFIED_GEMINI_MODELS.find((m) => m.id === modelId);
       if (!spec || spec.capability !== 'image') continue; // Hard guard: NEVER run Omni or text models on image path
       const client = factory(keyItem.rawKey, spec?.apiVersion);
@@ -851,10 +1166,14 @@ export async function executeImageAiWithFallback(params: {
         }
         parts.push({ text: instruction });
 
-        const response = await client.generateContent({
-          model: modelId,
-          contents: { parts },
-        });
+        const response = await withExecutionTimeout(
+          client.generateContent({
+            model: modelId,
+            contents: { parts },
+          }),
+          Math.min(perAttemptCapMs, attemptRemaining - 500),
+          `Gemini model ${modelId}`
+        );
 
         const resParts = response?.candidates?.[0]?.content?.parts ?? [];
         let outputBase64 = '';
@@ -863,7 +1182,7 @@ export async function executeImageAiWithFallback(params: {
 
         for (const part of resParts) {
           if (part?.inlineData?.data && !outputBase64) {
-            outputBase64 = part.inlineData.data;
+            outputBase64 = String(part.inlineData.data).trim();
             outputMime = part.inlineData.mimeType || 'image/png';
           } else if (typeof part?.text === 'string' && part.text.trim()) {
             modelNote = modelNote ? `${modelNote} ${part.text.trim()}` : part.text.trim();
@@ -872,7 +1191,7 @@ export async function executeImageAiWithFallback(params: {
 
         if (outputBase64) {
           if (!params.skipStateMutation) {
-            recordKeyHealthResult(keyItem.id, { status: 'ready' });
+            recordKeyHealthResult(keyItem.id, { status: 'ready', projectId: keyItem.projectId });
           }
 
           if (outputBase64.length > VERCEL_SAFE_BASE64_THRESHOLD) {
@@ -911,7 +1230,7 @@ export async function executeImageAiWithFallback(params: {
                   };
                 }
               } catch (cldErr: any) {
-                console.warn('[aiBackend] Large AI image Cloudinary offload notice:', cldErr?.message || cldErr);
+                console.warn('[aiBackend] Large AI image Cloudinary offload notice:', scrubSecretText(cldErr?.message || cldErr));
               }
             }
 
@@ -968,19 +1287,23 @@ export async function executeImageAiWithFallback(params: {
         }
 
         if (classified.kind === 'INVALID_KEY') {
+          throttledKeyIdsInRun.add(keyItem.id);
           if (!params.skipStateMutation) {
             recordKeyHealthResult(keyItem.id, {
               status: 'invalid',
               error: classified.message,
+              projectId: keyItem.projectId,
             });
           }
           break; // Do not try other models on an invalid key
         }
 
         if (classified.kind === 'QUOTA_EXCEEDED') {
+          lastQuotaError = classified;
           const { keyCooldownMs, projectCooldownMs, quotaScope } = resolveCooldownForQuotaError(classified);
-          if (keyItem.projectId) {
-            throttledProjectsInRun.add(keyItem.projectId);
+          throttledKeyIdsInRun.add(keyItem.id);
+          if (normalizedProject) {
+            throttledProjectsInRun.add(normalizedProject);
           }
           if (!params.skipStateMutation) {
             recordKeyHealthResult(keyItem.id, {
@@ -1001,17 +1324,13 @@ export async function executeImageAiWithFallback(params: {
     }
   }
 
-  return {
-    status: lastClassified?.httpStatus || 502,
-    payload: {
-      ok: false,
-      code: lastClassified?.code || 'GEMINI_EDIT_FAILED',
-      error:
-        lastClassified?.message ||
-        'All active Gemini keys or image models failed or exceeded quota.',
-      attempts,
-    },
-  };
+  return buildExhaustedFailureResult({
+    lastClassified,
+    lastQuotaError,
+    attempts,
+    defaultCode: 'GEMINI_EDIT_FAILED',
+    defaultMessage: 'All active Gemini keys or image models failed or exceeded quota.',
+  });
 }
 
 export async function executeTextAiWithFallback(params: {
@@ -1033,15 +1352,10 @@ export async function executeTextAiWithFallback(params: {
     overrideProjectHealth: params.overrideProjectHealth,
   });
   if (keys.length === 0) {
-    return {
-      status: 503,
-      payload: {
-        ok: false,
-        code: 'AI_PROVIDER_NOT_CONFIGURED',
-        error:
-          'No active healthy Gemini API keys are available. Add or enable a valid API key in Admin Panel → AI Model Manager.',
-      },
-    };
+    return buildNoEligibleKeysResult({
+      overrideKeys: params.overrideKeys,
+      overrideProjectHealth: params.overrideProjectHealth,
+    });
   }
 
   const models = getEligibleModelsForDomain('text', {
@@ -1061,33 +1375,68 @@ export async function executeTextAiWithFallback(params: {
 
   const factory = params.clientFactory || defaultClientFactory;
   let lastClassified: ClassifiedGeminiError | null = null;
+  let lastQuotaError: ClassifiedGeminiError | null = null;
   let attempts = 0;
   const throttledProjectsInRun = new Set<string>();
+  const throttledKeyIdsInRun = new Set<string>();
+  const runBudgetMs = process.env.VERCEL ? TOTAL_RUN_BUDGET_MS_VERCEL : TOTAL_RUN_BUDGET_MS_NODE;
+  const perAttemptCapMs = process.env.VERCEL ? PER_ATTEMPT_TIMEOUT_MS_VERCEL : PER_ATTEMPT_TIMEOUT_MS_NODE;
+  const deadlineMs = Date.now() + runBudgetMs;
 
   for (let kIdx = 0; kIdx < keys.length; kIdx++) {
+    const remainingBudget = deadlineMs - Date.now();
+    if (remainingBudget <= 1_500) {
+      lastClassified = {
+        kind: 'UPSTREAM_TRANSIENT',
+        httpStatus: 504,
+        code: 'AI_EXECUTION_TIMEOUT',
+        message: 'Text generation exceeded the server time budget before completing.',
+      };
+      break;
+    }
+
     const keyItem = keys[kIdx];
-    if (keyItem.projectId && throttledProjectsInRun.has(keyItem.projectId)) {
+    const normalizedProject = keyItem.projectId ? keyItem.projectId.toLowerCase() : '';
+    if (throttledKeyIdsInRun.has(keyItem.id)) {
+      continue;
+    }
+    if (normalizedProject && throttledProjectsInRun.has(normalizedProject)) {
       continue;
     }
 
     for (const modelId of models) {
+      const attemptRemaining = deadlineMs - Date.now();
+      if (attemptRemaining <= 1_500) {
+        lastClassified = {
+          kind: 'UPSTREAM_TRANSIENT',
+          httpStatus: 504,
+          code: 'AI_EXECUTION_TIMEOUT',
+          message: 'Text generation exceeded the server time budget before completing.',
+        };
+        break;
+      }
+
       const spec = VERIFIED_GEMINI_MODELS.find((m) => m.id === modelId);
       if (!spec || spec.capability !== 'text') continue; // Hard guard: strictly assistant text models
       const client = factory(keyItem.rawKey, spec?.apiVersion);
       attempts++;
       try {
-        const response = await client.generateContent({
-          model: modelId,
-          contents: params.prompt.trim(),
-          ...(params.systemInstruction
-            ? { config: { systemInstruction: params.systemInstruction.trim() } }
-            : {}),
-        });
+        const response = await withExecutionTimeout(
+          client.generateContent({
+            model: modelId,
+            contents: params.prompt.trim(),
+            ...(params.systemInstruction
+              ? { config: { systemInstruction: params.systemInstruction.trim() } }
+              : {}),
+          }),
+          Math.min(perAttemptCapMs, attemptRemaining - 500),
+          `Gemini model ${modelId}`
+        );
 
         const textOut = typeof response?.text === 'string' ? response.text.trim() : '';
         if (textOut) {
           if (!params.skipStateMutation) {
-            recordKeyHealthResult(keyItem.id, { status: 'ready' });
+            recordKeyHealthResult(keyItem.id, { status: 'ready', projectId: keyItem.projectId });
           }
           return {
             status: 200,
@@ -1102,6 +1451,13 @@ export async function executeTextAiWithFallback(params: {
             },
           };
         }
+
+        lastClassified = {
+          kind: 'MODEL_UNAVAILABLE',
+          httpStatus: 502,
+          code: 'GEMINI_NO_TEXT_OUTPUT',
+          message: `Model ${modelId} returned an empty text response.`,
+        };
       } catch (err: any) {
         const classified = classifyGeminiError(err, modelId);
         lastClassified = classified;
@@ -1118,15 +1474,22 @@ export async function executeTextAiWithFallback(params: {
           };
         }
         if (classified.kind === 'INVALID_KEY') {
+          throttledKeyIdsInRun.add(keyItem.id);
           if (!params.skipStateMutation) {
-            recordKeyHealthResult(keyItem.id, { status: 'invalid', error: classified.message });
+            recordKeyHealthResult(keyItem.id, {
+              status: 'invalid',
+              error: classified.message,
+              projectId: keyItem.projectId,
+            });
           }
           break;
         }
         if (classified.kind === 'QUOTA_EXCEEDED') {
+          lastQuotaError = classified;
           const { keyCooldownMs, projectCooldownMs, quotaScope } = resolveCooldownForQuotaError(classified);
-          if (keyItem.projectId) {
-            throttledProjectsInRun.add(keyItem.projectId);
+          throttledKeyIdsInRun.add(keyItem.id);
+          if (normalizedProject) {
+            throttledProjectsInRun.add(normalizedProject);
           }
           if (!params.skipStateMutation) {
             recordKeyHealthResult(keyItem.id, {
@@ -1145,15 +1508,13 @@ export async function executeTextAiWithFallback(params: {
     }
   }
 
-  return {
-    status: lastClassified?.httpStatus || 502,
-    payload: {
-      ok: false,
-      code: lastClassified?.code || 'GEMINI_TEXT_FAILED',
-      error: lastClassified?.message || 'Text generation failed across eligible Gemini keys.',
-      attempts,
-    },
-  };
+  return buildExhaustedFailureResult({
+    lastClassified,
+    lastQuotaError,
+    attempts,
+    defaultCode: 'GEMINI_TEXT_FAILED',
+    defaultMessage: 'Text generation failed across eligible Gemini keys.',
+  });
 }
 
 export async function executeVideoAiWithFallback(params: {
@@ -1183,15 +1544,10 @@ export async function executeVideoAiWithFallback(params: {
     overrideProjectHealth: params.overrideProjectHealth,
   });
   if (keys.length === 0) {
-    return {
-      status: 503,
-      payload: {
-        ok: false,
-        code: 'AI_PROVIDER_NOT_CONFIGURED',
-        error:
-          'No active healthy Gemini API keys are available. Add or enable a valid API key in Admin Panel → AI Model Manager.',
-      },
-    };
+    return buildNoEligibleKeysResult({
+      overrideKeys: params.overrideKeys,
+      overrideProjectHealth: params.overrideProjectHealth,
+    });
   }
 
   // Validate operation inputs before burning quota
@@ -1238,12 +1594,18 @@ export async function executeVideoAiWithFallback(params: {
 
   const factory = params.clientFactory || defaultClientFactory;
   let lastClassified: ClassifiedGeminiError | null = null;
+  let lastQuotaError: ClassifiedGeminiError | null = null;
   let attempts = 0;
   const throttledProjectsInRun = new Set<string>();
+  const throttledKeyIdsInRun = new Set<string>();
 
   for (let kIdx = 0; kIdx < keys.length; kIdx++) {
     const keyItem = keys[kIdx];
-    if (keyItem.projectId && throttledProjectsInRun.has(keyItem.projectId)) {
+    const normalizedProject = keyItem.projectId ? keyItem.projectId.toLowerCase() : '';
+    if (throttledKeyIdsInRun.has(keyItem.id)) {
+      continue;
+    }
+    if (normalizedProject && throttledProjectsInRun.has(normalizedProject)) {
       continue;
     }
 
@@ -1412,16 +1774,24 @@ export async function executeVideoAiWithFallback(params: {
         }
 
         if (classified.kind === 'INVALID_KEY') {
+          throttledKeyIdsInRun.add(keyItem.id);
           if (!params.skipStateMutation) {
-            recordKeyHealthResult(keyItem.id, { status: 'invalid', error: classified.message });
+            recordKeyHealthResult(keyItem.id, {
+              status: 'invalid',
+              error: classified.message,
+              projectId: keyItem.projectId,
+            });
           }
           break;
         }
 
         if (classified.kind === 'QUOTA_EXCEEDED') {
+          lastQuotaError = classified;
           const { keyCooldownMs, projectCooldownMs, quotaScope } = resolveCooldownForQuotaError(classified);
-          if (keyItem.projectId) {
-            throttledProjectsInRun.add(keyItem.projectId);
+          const normalizedProject = keyItem.projectId ? keyItem.projectId.toLowerCase() : '';
+          throttledKeyIdsInRun.add(keyItem.id);
+          if (normalizedProject) {
+            throttledProjectsInRun.add(normalizedProject);
           }
           if (!params.skipStateMutation) {
             recordKeyHealthResult(keyItem.id, {
@@ -1441,17 +1811,13 @@ export async function executeVideoAiWithFallback(params: {
     }
   }
 
-  return {
-    status: lastClassified?.httpStatus || 502,
-    payload: {
-      ok: false,
-      code: lastClassified?.code || 'GEMINI_VIDEO_FAILED',
-      error:
-        lastClassified?.message ||
-        'Video AI execution failed across configured Gemini Omni models and eligible keys.',
-      attempts,
-    },
-  };
+  return buildExhaustedFailureResult({
+    lastClassified,
+    lastQuotaError,
+    attempts,
+    defaultCode: 'GEMINI_VIDEO_FAILED',
+    defaultMessage: 'Video AI execution failed across configured Gemini Omni models and eligible keys.',
+  });
 }
 
 export async function executeAutoRoutedAiTask(params: {
@@ -1758,7 +2124,7 @@ export async function handleAutoRoutedAiRequest(params: {
 
   await syncVaultFromRemote();
   try {
-    return await executeAutoRoutedAiTask({
+    const rawResult = await executeAutoRoutedAiTask({
       prompt,
       task: typeof body.task === 'string' ? (body.task.trim() as any) : 'auto',
       mediaType: typeof body.mediaType === 'string' ? body.mediaType.trim() : undefined,
@@ -1784,6 +2150,11 @@ export async function handleAutoRoutedAiRequest(params: {
         body.resolution === '4k'
           ? body.resolution
           : undefined,
+    });
+    const domain = rawResult?.payload?.routing?.domain;
+    return normalizeAiEndpointResult(rawResult, {
+      requireImage: domain === 'image',
+      requireText: domain === 'text',
     });
   } finally {
     await flushRemoteVaultWrites();
@@ -1883,7 +2254,7 @@ export async function handlePostAiPhotoEdit(params: {
 
   await syncVaultFromRemote();
   try {
-    return await executeImageAiWithFallback({
+    const rawResult = await executeImageAiWithFallback({
       prompt: rawPrompt,
       presetAction: typeof body.presetAction === 'string' ? body.presetAction : undefined,
       imageBase64: imageBase64 || undefined,
@@ -1891,6 +2262,7 @@ export async function handlePostAiPhotoEdit(params: {
       requestedModel,
       qualityHint,
     });
+    return normalizeAiEndpointResult(rawResult, { requireImage: true });
   } finally {
     await flushRemoteVaultWrites();
   }
@@ -1940,11 +2312,12 @@ export async function handlePostAiTextGenerate(params: {
 
   await syncVaultFromRemote();
   try {
-    return await executeTextAiWithFallback({
+    const rawResult = await executeTextAiWithFallback({
       prompt,
       systemInstruction,
       requestedModel,
     });
+    return normalizeAiEndpointResult(rawResult, { requireText: true });
   } finally {
     await flushRemoteVaultWrites();
   }

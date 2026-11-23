@@ -22,6 +22,7 @@ import {
   handleAutoRoutedAiRequest,
   handlePostAiPhotoEdit,
   handlePostAiTextGenerate,
+  sendNormalizedAiJson,
   testSpecificKeyLive,
   testSpecificModelLive,
 } from './server/aiBackend.ts';
@@ -477,11 +478,11 @@ app.post(
         authHeader: req.headers.authorization,
         body: req.body,
       });
-      return res.status(result.status).json(result.payload);
+      return sendNormalizedAiJson(res, result.status, result.payload, { requireImage: true });
     } catch (err: any) {
       const safeErr = scrubSecretText(err?.message || 'Unexpected AI editor server error.');
       console.error('[server.ts /api/post-editor/ai-edit] Error:', safeErr);
-      return res.status(500).json({
+      return sendNormalizedAiJson(res, 500, {
         ok: false,
         code: 'POST_AI_INTERNAL_ERROR',
         error: safeErr,
@@ -500,11 +501,11 @@ app.post(
         authHeader: req.headers.authorization,
         body: req.body,
       });
-      return res.status(result.status).json(result.payload);
+      return sendNormalizedAiJson(res, result.status, result.payload, { requireText: true });
     } catch (err: any) {
       const safeErr = scrubSecretText(err?.message || 'Unexpected AI text generation error.');
       console.error('[server.ts /api/ai/text-generate] Error:', safeErr);
-      return res.status(500).json({
+      return sendNormalizedAiJson(res, 500, {
         ok: false,
         code: 'TEXT_AI_INTERNAL_ERROR',
         error: safeErr,
@@ -515,9 +516,13 @@ app.post(
 
 app.get('/api/ai/route', generalApiRateLimiter, async (_req, res) => {
   try {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
     return res.status(200).json(await getPublicAiCapabilityStatusAsync());
   } catch (err: any) {
-    return res.status(500).json({ ok: false, error: scrubSecretText(err?.message || 'Status error') });
+    return sendNormalizedAiJson(res, 500, {
+      ok: false,
+      error: scrubSecretText(err?.message || 'Status error'),
+    });
   }
 });
 
@@ -531,11 +536,15 @@ app.post(
         authHeader: req.headers.authorization,
         body: req.body,
       });
-      return res.status(result.status).json(result.payload);
+      const domain = result?.payload?.routing?.domain;
+      return sendNormalizedAiJson(res, result.status, result.payload, {
+        requireImage: domain === 'image',
+        requireText: domain === 'text',
+      });
     } catch (err: any) {
       const safeErr = scrubSecretText(err?.message || 'Unexpected AI routing server error.');
       console.error('[server.ts /api/ai/route] Error:', safeErr);
-      return res.status(500).json({
+      return sendNormalizedAiJson(res, 500, {
         ok: false,
         code: 'AI_ROUTE_INTERNAL_ERROR',
         error: safeErr,
@@ -1037,6 +1046,37 @@ app.post('/api/meta/disconnect', authenticateFirebaseToken, async (req, res) => 
   } catch (err: any) {
     return res.status(500).json({ error: { message: err.message || 'Failed to disconnect meta account' } });
   }
+});
+
+// Ensure Express API middleware errors (e.g., malformed JSON or oversized payload) ALWAYS return JSON, never HTML/plain-text
+app.use('/api', (err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (res.headersSent) {
+    return next(err);
+  }
+  const errType = String(err?.type || '');
+  const status =
+    errType === 'entity.too.large'
+      ? 413
+      : errType === 'entity.parse.failed' || err instanceof SyntaxError
+      ? 400
+      : typeof err?.status === 'number' && err.status >= 400
+      ? err.status
+      : 500;
+  const code =
+    errType === 'entity.too.large'
+      ? 'PAYLOAD_TOO_LARGE'
+      : status === 400
+      ? 'INVALID_JSON_BODY'
+      : 'API_INTERNAL_ERROR';
+  const message =
+    errType === 'entity.too.large'
+      ? 'Request payload exceeds server limit. Try a smaller image.'
+      : status === 400
+      ? 'Malformed JSON request body.'
+      : scrubSecretText(err?.message || 'Unexpected API server error.');
+
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  return res.status(status).json({ ok: false, code, error: message });
 });
 
 async function startServer() {

@@ -283,6 +283,66 @@ function buildHealthFallbackResponse(params: {
   };
 }
 
+export async function parseSafeApiJson(res: Response, endpointLabel = 'AI backend'): Promise<any> {
+  let rawText = '';
+  try {
+    rawText = await res.text();
+  } catch (err: any) {
+    throw new Error(`${endpointLabel} response could not be read (HTTP ${res.status}): ${err?.message || 'read error'}`);
+  }
+
+  const trimmed = rawText.trim();
+  if (!trimmed) {
+    throw new Error(`${endpointLabel} returned an empty response (HTTP ${res.status}).`);
+  }
+
+  const lowerStart = trimmed.slice(0, 64).toLowerCase();
+  if (
+    lowerStart.startsWith('<!doctype') ||
+    lowerStart.startsWith('<html') ||
+    lowerStart.startsWith('<head') ||
+    lowerStart.startsWith('<body')
+  ) {
+    throw new Error(
+      `${endpointLabel} returned an HTML page instead of JSON (HTTP ${res.status}). Check API route configuration.`
+    );
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error(`${endpointLabel} returned an unexpected non-object response (HTTP ${res.status}).`);
+    }
+    return parsed;
+  } catch (err: any) {
+    if (err instanceof Error && err.message.startsWith(`${endpointLabel} returned an unexpected`)) {
+      throw err;
+    }
+
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      throw new Error(`${endpointLabel} returned malformed JSON (HTTP ${res.status}).`);
+    }
+
+    // Plain-text server or serverless platform errors (e.g. "A server error has occurred\nFUNCTION_INVOCATION_FAILED")
+    if (/FUNCTION_INVOCATION_FAILED/i.test(trimmed)) {
+      throw new Error(`${endpointLabel} crashed on server (HTTP ${res.status}: FUNCTION_INVOCATION_FAILED).`);
+    }
+    if (/FUNCTION_PAYLOAD_TOO_LARGE/i.test(trimmed)) {
+      throw new Error(`${endpointLabel} rejected request: payload too large (HTTP ${res.status}).`);
+    }
+    const singleLine = trimmed.replace(/\s+/g, ' ').slice(0, 160);
+    throw new Error(`${endpointLabel} error (HTTP ${res.status}): ${singleLine}`);
+  }
+}
+
+function extractApiErrorMessage(json: any, httpStatus: number, fallback: string): string {
+  const candidate = json?.error?.message || json?.error || json?.message;
+  if (typeof candidate === 'string' && candidate.trim()) {
+    return candidate.trim();
+  }
+  return `${fallback} (HTTP ${httpStatus}).`;
+}
+
 export async function checkPostAiAvailability(): Promise<PostAiCapabilityResponse> {
   let res: Response;
   try {
@@ -297,36 +357,29 @@ export async function checkPostAiAvailability(): Promise<PostAiCapabilityRespons
     });
   }
 
-  const text = await res.text();
   let parsed: any = null;
   try {
-    parsed = JSON.parse(text);
-  } catch {
-    parsed = null;
-  }
-
-  if (!res.ok) {
-    const trimmed = text.trim();
-    const detail =
-      parsed?.error?.message ||
-      parsed?.error ||
-      (trimmed.includes('FUNCTION_INVOCATION_FAILED')
-        ? `Backend serverless function crashed (HTTP ${res.status}: FUNCTION_INVOCATION_FAILED).`
-        : trimmed
-        ? `Backend returned HTTP ${res.status}: ${trimmed.slice(0, 140)}`
-        : `Backend returned HTTP ${res.status}.`);
-    return buildHealthFallbackResponse({
-      healthState: 'server_error',
-      httpStatus: res.status,
-      backendError: detail,
-    });
-  }
-
-  if (!parsed || typeof parsed !== 'object') {
+    parsed = await parseSafeApiJson(res, 'AI status endpoint');
+  } catch (parseErr: any) {
+    if (!res.ok) {
+      return buildHealthFallbackResponse({
+        healthState: 'server_error',
+        httpStatus: res.status,
+        backendError: parseErr?.message || `Backend returned HTTP ${res.status}.`,
+      });
+    }
     return buildHealthFallbackResponse({
       healthState: 'unavailable',
       httpStatus: res.status,
-      backendError: 'AI backend route (/api/ai/status) returned a non-JSON response.',
+      backendError: parseErr?.message || 'AI backend route (/api/ai/status) returned a non-JSON response.',
+    });
+  }
+
+  if (!res.ok) {
+    return buildHealthFallbackResponse({
+      healthState: 'server_error',
+      httpStatus: res.status,
+      backendError: extractApiErrorMessage(parsed, res.status, 'Backend returned an error'),
     });
   }
 
@@ -334,7 +387,7 @@ export async function checkPostAiAvailability(): Promise<PostAiCapabilityRespons
     return buildHealthFallbackResponse({
       healthState: 'server_error',
       httpStatus: res.status,
-      backendError: parsed?.error?.message || parsed?.error || 'AI backend reported an internal error.',
+      backendError: extractApiErrorMessage(parsed, res.status, 'AI backend reported an internal error'),
     });
   }
 
@@ -384,21 +437,23 @@ export async function requestAiPhotoEdit(params: {
     }),
   });
 
-  const rawText = await res.text();
-  let json: any = null;
-  try {
-    json = JSON.parse(rawText);
-  } catch {
-    throw new Error(`AI backend endpoint returned an invalid response (HTTP ${res.status}).`);
+  const json = await parseSafeApiJson(res, 'AI Edit endpoint');
+
+  if (!res.ok || json.ok !== true) {
+    throw new Error(extractApiErrorMessage(json, res.status, 'AI generation failed'));
   }
 
-  if (!res.ok || !json?.ok || (!json?.imageBase64 && !json?.imageUrl)) {
-    throw new Error(json?.error || `AI generation failed (HTTP ${res.status}).`);
+  const hasImageBase64 = typeof json.imageBase64 === 'string' && json.imageBase64.trim().length > 0;
+  const hasImageUrl = typeof json.imageUrl === 'string' && json.imageUrl.trim().length > 0;
+  if (!hasImageBase64 && !hasImageUrl) {
+    throw new Error(
+      json.error || `AI Edit succeeded (HTTP ${res.status}) without returning generated image data.`
+    );
   }
 
   params.onProgress?.(90, 'Rendering image preview...');
   let editedFile: File;
-  if (json.imageBase64) {
+  if (hasImageBase64) {
     editedFile = base64ToFile(
       json.imageBase64,
       json.mimeType || 'image/png',
@@ -445,9 +500,12 @@ export async function requestAiTextGenerate(params: {
       model: params.model,
     }),
   });
-  const json = await res.json();
-  if (!res.ok || !json?.ok || !json?.text) {
-    throw new Error(json?.error || `AI text generation failed (HTTP ${res.status}).`);
+  const json = await parseSafeApiJson(res, 'AI Text endpoint');
+  if (!res.ok || json.ok !== true) {
+    throw new Error(extractApiErrorMessage(json, res.status, 'AI text generation failed'));
+  }
+  if (typeof json.text !== 'string' || !json.text.trim()) {
+    throw new Error(`AI Text endpoint succeeded (HTTP ${res.status}) without returning text output.`);
   }
   return {
     text: json.text,
@@ -499,16 +557,10 @@ export async function requestAutoRoutedAi(params: {
     }),
   });
 
-  const rawText = await res.text();
-  let json: any = null;
-  try {
-    json = JSON.parse(rawText);
-  } catch {
-    throw new Error(`AI router returned an invalid response (HTTP ${res.status}).`);
-  }
+  const json = await parseSafeApiJson(res, 'AI Router endpoint');
 
-  if (!res.ok || !json?.ok) {
-    throw new Error(json?.error || `AI routing failed (HTTP ${res.status}).`);
+  if (!res.ok || json.ok !== true) {
+    throw new Error(extractApiErrorMessage(json, res.status, 'AI routing failed'));
   }
 
   return json as AutoRoutedAiResult;
@@ -525,9 +577,9 @@ async function adminFetch<T>(url: string, options?: RequestInit): Promise<T> {
       ...(options?.headers || {}),
     },
   });
-  const json = await res.json();
-  if (!res.ok) {
-    throw new Error(json?.error?.message || json?.error || `Request failed (${res.status})`);
+  const json = await parseSafeApiJson(res, 'Admin AI endpoint');
+  if (!res.ok || json.ok === false) {
+    throw new Error(extractApiErrorMessage(json, res.status, 'Admin AI request failed'));
   }
   return json as T;
 }
@@ -611,7 +663,7 @@ export async function testAdminAiKey(keyId: string): Promise<{
     headers,
     body: JSON.stringify({ keyId }),
   });
-  return res.json();
+  return parseSafeApiJson(res, 'Admin key test endpoint');
 }
 
 export async function testAdminAiModel(params: {
@@ -633,5 +685,5 @@ export async function testAdminAiModel(params: {
     headers,
     body: JSON.stringify(params),
   });
-  return res.json();
+  return parseSafeApiJson(res, 'Admin model test endpoint');
 }

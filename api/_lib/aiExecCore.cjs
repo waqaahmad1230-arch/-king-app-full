@@ -29,6 +29,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // api/_lib/aiExecEntry.ts
 var aiExecEntry_exports = {};
 __export(aiExecEntry_exports, {
+  BadJsonBodyError: () => BadJsonBodyError,
   SUPER_ADMIN_EMAIL: () => SUPER_ADMIN_EMAIL,
   classifyAiTaskIntent: () => classifyAiTaskIntent,
   fetchLiveModelsFromGoogleApi: () => fetchLiveModelsFromGoogleApi,
@@ -44,8 +45,11 @@ __export(aiExecEntry_exports, {
   handlePostAiPhotoEdit: () => handlePostAiPhotoEdit,
   handlePostAiTextGenerate: () => handlePostAiTextGenerate,
   isVerifiedSuperAdmin: () => isVerifiedSuperAdmin,
+  normalizeAiEndpointResult: () => normalizeAiEndpointResult,
+  parseRequestJsonBody: () => parseRequestJsonBody,
   scrubSecretText: () => scrubSecretText,
   selectAutoImageModelOrder: () => selectAutoImageModelOrder,
+  sendNormalizedAiJson: () => sendNormalizedAiJson,
   testSpecificKeyLive: () => testSpecificKeyLive,
   testSpecificModelLive: () => testSpecificModelLive,
   verifyFirebaseBearerToken: () => verifyFirebaseBearerToken
@@ -1190,11 +1194,132 @@ function resolveCooldownForQuotaError(classified, nowMs = Date.now()) {
     quotaScope: "rpm_throttle"
   };
 }
+var PER_ATTEMPT_TIMEOUT_MS_VERCEL = 28e3;
+var PER_ATTEMPT_TIMEOUT_MS_NODE = 9e4;
+var TOTAL_RUN_BUDGET_MS_VERCEL = 5e4;
+var TOTAL_RUN_BUDGET_MS_NODE = 15e4;
+var BadJsonBodyError = class extends Error {
+  constructor(message = "Invalid JSON request body.") {
+    super(message);
+    this.status = 400;
+    this.code = "INVALID_JSON_BODY";
+    this.name = "BadJsonBodyError";
+  }
+};
+function parseRequestJsonBody(rawBody) {
+  if (rawBody === void 0 || rawBody === null || rawBody === "") return {};
+  if (typeof rawBody === "string") {
+    const trimmed = rawBody.trim();
+    if (!trimmed) return {};
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new BadJsonBodyError("Request body must be a JSON object.");
+      }
+      return parsed;
+    } catch (err) {
+      if (err instanceof BadJsonBodyError) throw err;
+      throw new BadJsonBodyError("Malformed JSON request body.");
+    }
+  }
+  if (typeof rawBody === "object" && !Array.isArray(rawBody)) {
+    return rawBody;
+  }
+  throw new BadJsonBodyError("Request body must be a JSON object.");
+}
+function normalizeAiEndpointResult(result, options) {
+  const rawPayload = result?.payload && typeof result.payload === "object" && !Array.isArray(result.payload) ? { ...result.payload } : {
+    ok: false,
+    code: "INVALID_BACKEND_PAYLOAD",
+    error: "AI backend produced an invalid payload structure."
+  };
+  if (typeof rawPayload.error === "string") {
+    rawPayload.error = scrubSecretText(rawPayload.error);
+  }
+  if (typeof rawPayload.note === "string") {
+    rawPayload.note = scrubSecretText(rawPayload.note);
+  }
+  let status = typeof result?.status === "number" && result.status >= 100 ? result.status : 500;
+  if (rawPayload.ok !== true) {
+    if (status >= 200 && status < 300) {
+      status = 502;
+    }
+    if (!rawPayload.error) {
+      rawPayload.error = "AI request failed.";
+    }
+    rawPayload.ok = false;
+    return { status, payload: rawPayload };
+  }
+  if (options?.requireImage) {
+    const hasImg = typeof rawPayload.imageBase64 === "string" && rawPayload.imageBase64.trim().length > 0 || typeof rawPayload.imageUrl === "string" && rawPayload.imageUrl.trim().length > 0;
+    if (!hasImg) {
+      return {
+        status: 502,
+        payload: {
+          ok: false,
+          code: "GEMINI_NO_IMAGE_OUTPUT",
+          error: "Gemini completed without returning generated image data."
+        }
+      };
+    }
+  }
+  if (options?.requireText) {
+    const hasText = typeof rawPayload.text === "string" && rawPayload.text.trim().length > 0;
+    if (!hasText) {
+      return {
+        status: 502,
+        payload: {
+          ok: false,
+          code: "GEMINI_NO_TEXT_OUTPUT",
+          error: "Gemini completed without returning generated text."
+        }
+      };
+    }
+  }
+  return { status, payload: rawPayload };
+}
+function sendNormalizedAiJson(res, status, payload, options) {
+  const normalized = normalizeAiEndpointResult({ status, payload }, options);
+  if (typeof res?.setHeader === "function") {
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.setHeader("Cache-Control", "no-store");
+  }
+  return res.status(normalized.status).json(normalized.payload);
+}
+async function withExecutionTimeout(promise, timeoutMs, label) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return promise;
+  }
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_resolve, reject) => {
+        timer = setTimeout(() => {
+          const timeoutErr = new Error(`${label} timed out after ${Math.round(timeoutMs / 1e3)}s.`);
+          timeoutErr.status = 504;
+          timeoutErr.code = "DEADLINE_EXCEEDED";
+          reject(timeoutErr);
+        }, timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 function classifyGeminiError(err, modelId) {
   const extraDetails = (() => {
     try {
-      if (err?.errorDetails || err?.details) {
-        return scrubSecretText(JSON.stringify(err.errorDetails || err.details));
+      const detailCandidates = [
+        err?.errorDetails,
+        err?.details,
+        err?.error?.details,
+        err?.error?.message,
+        err?.error?.status,
+        err?.cause?.message
+      ].filter(Boolean);
+      if (detailCandidates.length > 0) {
+        return scrubSecretText(JSON.stringify(detailCandidates));
       }
     } catch {
       return "";
@@ -1204,7 +1329,7 @@ function classifyGeminiError(err, modelId) {
   const rawMessage = scrubSecretText(String(err?.message || err || "AI processing failed."));
   const combined = `${rawMessage} ${extraDetails}`.trim();
   const lower = combined.toLowerCase();
-  const statusCode = Number(err?.status || err?.code || 0);
+  const statusCode = Number(err?.status || err?.code || err?.error?.code || err?.response?.status || 0);
   if (statusCode === 401 || statusCode === 403 || lower.includes("permission_denied") || lower.includes("api_key_invalid") || lower.includes("api key not valid") || lower.includes("invalid api key") || lower.includes("unauthenticated")) {
     return {
       kind: "INVALID_KEY",
@@ -1213,10 +1338,10 @@ function classifyGeminiError(err, modelId) {
       message: "API key was rejected or lacks Gemini API permission."
     };
   }
-  if (statusCode === 429 || lower.includes("resource_exhausted") || lower.includes("quota") || lower.includes("rate limit") || lower.includes("too many requests")) {
+  if (statusCode === 429 || lower.includes("resource_exhausted") || lower.includes("quota") || lower.includes("rate limit") || lower.includes("too many requests") || lower.includes("quotafailure")) {
     const retryAfterMs = extractRetryAfterMs(combined);
     const isBilling = /check your plan and billing|billing account|billing_not_active|spend limit/i.test(combined);
-    const isDailyQuota = isBilling || /requestsperday|per_?day|\brpd\b|daily[_ ]?(?:quota|limit|requests)|generate_content_free_tier_requests.*(?:day|0)|limit:\s*0/i.test(
+    const isDailyQuota = isBilling || /requests_?per_?day|per_?day|\brpd\b|daily[_ ]?(?:quota|limit|requests)|generate_?content_?free_?tier_?requests.*(?:day|0)|free_?tier.*(?:per_?day|limit["':\s]+0)|"limit"\s*:\s*"?0"?|\blimit:\s*0\b/i.test(
       combined
     );
     const quotaScope = isBilling ? "billing" : isDailyQuota ? "daily_rpd" : "rpm_throttle";
@@ -1224,7 +1349,7 @@ function classifyGeminiError(err, modelId) {
       kind: "QUOTA_EXCEEDED",
       httpStatus: 429,
       code: quotaScope === "rpm_throttle" ? "GEMINI_RPM_RATE_LIMITED" : quotaScope === "billing" ? "GEMINI_BILLING_QUOTA_EXCEEDED" : "GEMINI_DAILY_QUOTA_EXCEEDED",
-      message: quotaScope === "rpm_throttle" ? "Gemini API per-minute rate limit (RPM) reached; rotating to next healthy key/project." : "Gemini project daily quota (RPD) exhausted; failing over to next healthy Google Cloud project.",
+      message: quotaScope === "rpm_throttle" ? "Gemini API per-minute rate limit (RPM) reached for this project." : quotaScope === "billing" ? "Gemini project billing or spend quota is exhausted." : "Gemini project daily quota (RPD) is exhausted.",
       quotaScope,
       retryAfterMs
     };
@@ -1337,6 +1462,106 @@ function getEligibleKeysForExecution(options) {
     ordered = eligible;
   }
   return allowFallback ? ordered : ordered.slice(0, 1);
+}
+function buildNoEligibleKeysResult(options) {
+  const allKeys = options?.overrideKeys || listResolvedKeys();
+  const enabledKeys = allKeys.filter((k) => k.enabled);
+  if (enabledKeys.length === 0) {
+    return {
+      status: 503,
+      payload: {
+        ok: false,
+        code: "AI_PROVIDER_NOT_CONFIGURED",
+        error: "No active Gemini API keys are configured. Add or enable a valid API key in Admin Panel \u2192 AI Model Manager."
+      }
+    };
+  }
+  const now = Date.now();
+  const projectHealth = options?.overrideProjectHealth || listProjectHealthSummaries();
+  const exhaustedProjects = new Set(
+    projectHealth.filter((p) => p.status === "quota_exhausted" && p.cooldownUntil && p.cooldownUntil > now).map((p) => p.projectId.toLowerCase())
+  );
+  const quotaBlockedKeys = enabledKeys.filter(
+    (k) => k.status === "quota_exhausted" || k.cooldownUntil && k.cooldownUntil > now || k.projectCooldownUntil && k.projectCooldownUntil > now || k.projectId && exhaustedProjects.has(k.projectId.toLowerCase())
+  );
+  if (quotaBlockedKeys.length > 0) {
+    const scopes = quotaBlockedKeys.map((k) => k.quotaScope).filter(Boolean);
+    const hasDailyOrBilling = scopes.includes("daily_rpd") || scopes.includes("billing") || scopes.length === 0;
+    const isBillingOnly = scopes.length > 0 && scopes.every((s) => s === "billing");
+    if (!hasDailyOrBilling) {
+      return {
+        status: 429,
+        payload: {
+          ok: false,
+          code: "GEMINI_RPM_RATE_LIMITED",
+          error: "All configured Google Cloud Gemini projects/keys are temporarily rate-limited (RPM). Please wait a few seconds and try again."
+        }
+      };
+    }
+    return {
+      status: 429,
+      payload: {
+        ok: false,
+        code: isBillingOnly ? "GEMINI_BILLING_QUOTA_EXCEEDED" : "GEMINI_DAILY_QUOTA_EXCEEDED",
+        error: "All configured Google Cloud Gemini projects/keys have exhausted their daily quota (RPD). Add an API key from another Google Cloud project in Admin Panel \u2192 AI Model Manager or try again after the daily quota reset."
+      }
+    };
+  }
+  if (enabledKeys.every((k) => k.status === "invalid")) {
+    return {
+      status: 403,
+      payload: {
+        ok: false,
+        code: "GEMINI_KEY_INVALID",
+        error: "All configured Gemini API keys were rejected or lack permission. Update keys in Admin Panel \u2192 AI Model Manager."
+      }
+    };
+  }
+  return {
+    status: 503,
+    payload: {
+      ok: false,
+      code: "AI_PROVIDER_NOT_CONFIGURED",
+      error: "No active healthy Gemini API keys are available. Check key health in Admin Panel \u2192 AI Model Manager."
+    }
+  };
+}
+function buildExhaustedFailureResult(params) {
+  const { lastClassified, lastQuotaError, attempts, defaultCode, defaultMessage } = params;
+  if (lastClassified?.kind === "QUOTA_EXCEEDED") {
+    const scope = lastClassified.quotaScope || "daily_rpd";
+    return {
+      status: 429,
+      payload: {
+        ok: false,
+        code: lastClassified.code,
+        quotaScope: scope,
+        error: scope === "rpm_throttle" ? "All eligible Google Cloud Gemini projects/keys reached their per-minute rate limit (RPM). Please wait briefly and try again." : scope === "billing" ? "All eligible Google Cloud Gemini projects/keys exceeded billing/spend quota." : "All eligible Google Cloud Gemini projects/keys have exhausted their daily quota (RPD). Add a key from another Google Cloud project or try again after reset.",
+        attempts
+      }
+    };
+  }
+  const effective = lastClassified || lastQuotaError;
+  if (effective) {
+    return {
+      status: effective.httpStatus || 502,
+      payload: {
+        ok: false,
+        code: effective.code || defaultCode,
+        error: effective.message || defaultMessage,
+        attempts
+      }
+    };
+  }
+  return {
+    status: 502,
+    payload: {
+      ok: false,
+      code: defaultCode,
+      error: defaultMessage,
+      attempts
+    }
+  };
 }
 var PRO_QUALITY_IMAGE_REGEX = /\b(4k|8k|ultra|studio|pro|professional|editorial|luxury|cinematic|poster|billboard|typography|exact text|logo design|product shoot|architecture|hyper[- ]?realistic|photorealistic|multi[- ]?reference|magazine|high[- ]?res(?:olution)?)\b/i;
 var LITE_ECONOMY_IMAGE_REGEX = /\b(fast|quick|draft|preview|simple|minimal|sketch|icon|sticker|lite|economical|thumbnail|lighting|brighten|enhance quality|remove bg|remove background)\b/i;
@@ -1586,14 +1811,10 @@ async function executeImageAiWithFallback(params) {
     overrideProjectHealth: params.overrideProjectHealth
   });
   if (keys.length === 0) {
-    return {
-      status: 503,
-      payload: {
-        ok: false,
-        code: "AI_PROVIDER_NOT_CONFIGURED",
-        error: "No active healthy Gemini API keys are available. Add or enable a valid API key in Admin Panel \u2192 AI Model Manager."
-      }
-    };
+    return buildNoEligibleKeysResult({
+      overrideKeys: params.overrideKeys,
+      overrideProjectHealth: params.overrideProjectHealth
+    });
   }
   const hasSourcePhoto = Boolean(params.imageBase64 && params.mimeType);
   const autoPlan = selectAutoImageModelOrder({
@@ -1618,14 +1839,43 @@ async function executeImageAiWithFallback(params) {
   const factory = params.clientFactory || defaultClientFactory;
   const instruction = buildPhotoInstruction(params.prompt, params.presetAction, hasSourcePhoto);
   let lastClassified = null;
+  let lastQuotaError = null;
   let attempts = 0;
   const throttledProjectsInRun = /* @__PURE__ */ new Set();
+  const throttledKeyIdsInRun = /* @__PURE__ */ new Set();
+  const runBudgetMs = process.env.VERCEL ? TOTAL_RUN_BUDGET_MS_VERCEL : TOTAL_RUN_BUDGET_MS_NODE;
+  const perAttemptCapMs = process.env.VERCEL ? PER_ATTEMPT_TIMEOUT_MS_VERCEL : PER_ATTEMPT_TIMEOUT_MS_NODE;
+  const deadlineMs = Date.now() + runBudgetMs;
   for (let kIdx = 0; kIdx < keys.length; kIdx++) {
+    const remainingBudget = deadlineMs - Date.now();
+    if (remainingBudget <= 1500) {
+      lastClassified = {
+        kind: "UPSTREAM_TRANSIENT",
+        httpStatus: 504,
+        code: "AI_EXECUTION_TIMEOUT",
+        message: "AI processing exceeded the server time budget before completing. Please try again."
+      };
+      break;
+    }
     const keyItem = keys[kIdx];
-    if (keyItem.projectId && throttledProjectsInRun.has(keyItem.projectId)) {
+    const normalizedProject = keyItem.projectId ? keyItem.projectId.toLowerCase() : "";
+    if (throttledKeyIdsInRun.has(keyItem.id)) {
+      continue;
+    }
+    if (normalizedProject && throttledProjectsInRun.has(normalizedProject)) {
       continue;
     }
     for (const modelId of models) {
+      const attemptRemaining = deadlineMs - Date.now();
+      if (attemptRemaining <= 1500) {
+        lastClassified = {
+          kind: "UPSTREAM_TRANSIENT",
+          httpStatus: 504,
+          code: "AI_EXECUTION_TIMEOUT",
+          message: "AI processing exceeded the server time budget before completing. Please try again."
+        };
+        break;
+      }
       const spec = VERIFIED_GEMINI_MODELS.find((m) => m.id === modelId);
       if (!spec || spec.capability !== "image") continue;
       const client = factory(keyItem.rawKey, spec?.apiVersion);
@@ -1641,17 +1891,21 @@ async function executeImageAiWithFallback(params) {
           });
         }
         parts.push({ text: instruction });
-        const response = await client.generateContent({
-          model: modelId,
-          contents: { parts }
-        });
+        const response = await withExecutionTimeout(
+          client.generateContent({
+            model: modelId,
+            contents: { parts }
+          }),
+          Math.min(perAttemptCapMs, attemptRemaining - 500),
+          `Gemini model ${modelId}`
+        );
         const resParts = response?.candidates?.[0]?.content?.parts ?? [];
         let outputBase64 = "";
         let outputMime = "image/png";
         let modelNote = "";
         for (const part of resParts) {
           if (part?.inlineData?.data && !outputBase64) {
-            outputBase64 = part.inlineData.data;
+            outputBase64 = String(part.inlineData.data).trim();
             outputMime = part.inlineData.mimeType || "image/png";
           } else if (typeof part?.text === "string" && part.text.trim()) {
             modelNote = modelNote ? `${modelNote} ${part.text.trim()}` : part.text.trim();
@@ -1659,7 +1913,7 @@ async function executeImageAiWithFallback(params) {
         }
         if (outputBase64) {
           if (!params.skipStateMutation) {
-            recordKeyHealthResult(keyItem.id, { status: "ready" });
+            recordKeyHealthResult(keyItem.id, { status: "ready", projectId: keyItem.projectId });
           }
           if (outputBase64.length > VERCEL_SAFE_BASE64_THRESHOLD) {
             const cldCreds = getCloudinaryCredentials();
@@ -1697,7 +1951,7 @@ async function executeImageAiWithFallback(params) {
                   };
                 }
               } catch (cldErr) {
-                console.warn("[aiBackend] Large AI image Cloudinary offload notice:", cldErr?.message || cldErr);
+                console.warn("[aiBackend] Large AI image Cloudinary offload notice:", scrubSecretText(cldErr?.message || cldErr));
               }
             }
             if (process.env.VERCEL && outputBase64.length > VERCEL_HARD_BASE64_LIMIT) {
@@ -1747,18 +2001,22 @@ async function executeImageAiWithFallback(params) {
           };
         }
         if (classified.kind === "INVALID_KEY") {
+          throttledKeyIdsInRun.add(keyItem.id);
           if (!params.skipStateMutation) {
             recordKeyHealthResult(keyItem.id, {
               status: "invalid",
-              error: classified.message
+              error: classified.message,
+              projectId: keyItem.projectId
             });
           }
           break;
         }
         if (classified.kind === "QUOTA_EXCEEDED") {
+          lastQuotaError = classified;
           const { keyCooldownMs, projectCooldownMs, quotaScope } = resolveCooldownForQuotaError(classified);
-          if (keyItem.projectId) {
-            throttledProjectsInRun.add(keyItem.projectId);
+          throttledKeyIdsInRun.add(keyItem.id);
+          if (normalizedProject) {
+            throttledProjectsInRun.add(normalizedProject);
           }
           if (!params.skipStateMutation) {
             recordKeyHealthResult(keyItem.id, {
@@ -1776,15 +2034,13 @@ async function executeImageAiWithFallback(params) {
       }
     }
   }
-  return {
-    status: lastClassified?.httpStatus || 502,
-    payload: {
-      ok: false,
-      code: lastClassified?.code || "GEMINI_EDIT_FAILED",
-      error: lastClassified?.message || "All active Gemini keys or image models failed or exceeded quota.",
-      attempts
-    }
-  };
+  return buildExhaustedFailureResult({
+    lastClassified,
+    lastQuotaError,
+    attempts,
+    defaultCode: "GEMINI_EDIT_FAILED",
+    defaultMessage: "All active Gemini keys or image models failed or exceeded quota."
+  });
 }
 async function executeTextAiWithFallback(params) {
   const keys = getEligibleKeysForExecution({
@@ -1793,14 +2049,10 @@ async function executeTextAiWithFallback(params) {
     overrideProjectHealth: params.overrideProjectHealth
   });
   if (keys.length === 0) {
-    return {
-      status: 503,
-      payload: {
-        ok: false,
-        code: "AI_PROVIDER_NOT_CONFIGURED",
-        error: "No active healthy Gemini API keys are available. Add or enable a valid API key in Admin Panel \u2192 AI Model Manager."
-      }
-    };
+    return buildNoEligibleKeysResult({
+      overrideKeys: params.overrideKeys,
+      overrideProjectHealth: params.overrideProjectHealth
+    });
   }
   const models = getEligibleModelsForDomain("text", {
     requestedModel: params.requestedModel,
@@ -1818,28 +2070,61 @@ async function executeTextAiWithFallback(params) {
   }
   const factory = params.clientFactory || defaultClientFactory;
   let lastClassified = null;
+  let lastQuotaError = null;
   let attempts = 0;
   const throttledProjectsInRun = /* @__PURE__ */ new Set();
+  const throttledKeyIdsInRun = /* @__PURE__ */ new Set();
+  const runBudgetMs = process.env.VERCEL ? TOTAL_RUN_BUDGET_MS_VERCEL : TOTAL_RUN_BUDGET_MS_NODE;
+  const perAttemptCapMs = process.env.VERCEL ? PER_ATTEMPT_TIMEOUT_MS_VERCEL : PER_ATTEMPT_TIMEOUT_MS_NODE;
+  const deadlineMs = Date.now() + runBudgetMs;
   for (let kIdx = 0; kIdx < keys.length; kIdx++) {
+    const remainingBudget = deadlineMs - Date.now();
+    if (remainingBudget <= 1500) {
+      lastClassified = {
+        kind: "UPSTREAM_TRANSIENT",
+        httpStatus: 504,
+        code: "AI_EXECUTION_TIMEOUT",
+        message: "Text generation exceeded the server time budget before completing."
+      };
+      break;
+    }
     const keyItem = keys[kIdx];
-    if (keyItem.projectId && throttledProjectsInRun.has(keyItem.projectId)) {
+    const normalizedProject = keyItem.projectId ? keyItem.projectId.toLowerCase() : "";
+    if (throttledKeyIdsInRun.has(keyItem.id)) {
+      continue;
+    }
+    if (normalizedProject && throttledProjectsInRun.has(normalizedProject)) {
       continue;
     }
     for (const modelId of models) {
+      const attemptRemaining = deadlineMs - Date.now();
+      if (attemptRemaining <= 1500) {
+        lastClassified = {
+          kind: "UPSTREAM_TRANSIENT",
+          httpStatus: 504,
+          code: "AI_EXECUTION_TIMEOUT",
+          message: "Text generation exceeded the server time budget before completing."
+        };
+        break;
+      }
       const spec = VERIFIED_GEMINI_MODELS.find((m) => m.id === modelId);
       if (!spec || spec.capability !== "text") continue;
       const client = factory(keyItem.rawKey, spec?.apiVersion);
       attempts++;
       try {
-        const response = await client.generateContent({
-          model: modelId,
-          contents: params.prompt.trim(),
-          ...params.systemInstruction ? { config: { systemInstruction: params.systemInstruction.trim() } } : {}
-        });
+        const response = await withExecutionTimeout(
+          client.generateContent({
+            model: modelId,
+            contents: params.prompt.trim(),
+            ...params.systemInstruction ? { config: { systemInstruction: params.systemInstruction.trim() } } : {}
+          }),
+          Math.min(perAttemptCapMs, attemptRemaining - 500),
+          `Gemini model ${modelId}`
+        );
         const textOut = typeof response?.text === "string" ? response.text.trim() : "";
         if (textOut) {
           if (!params.skipStateMutation) {
-            recordKeyHealthResult(keyItem.id, { status: "ready" });
+            recordKeyHealthResult(keyItem.id, { status: "ready", projectId: keyItem.projectId });
           }
           return {
             status: 200,
@@ -1854,6 +2139,12 @@ async function executeTextAiWithFallback(params) {
             }
           };
         }
+        lastClassified = {
+          kind: "MODEL_UNAVAILABLE",
+          httpStatus: 502,
+          code: "GEMINI_NO_TEXT_OUTPUT",
+          message: `Model ${modelId} returned an empty text response.`
+        };
       } catch (err) {
         const classified = classifyGeminiError(err, modelId);
         lastClassified = classified;
@@ -1869,15 +2160,22 @@ async function executeTextAiWithFallback(params) {
           };
         }
         if (classified.kind === "INVALID_KEY") {
+          throttledKeyIdsInRun.add(keyItem.id);
           if (!params.skipStateMutation) {
-            recordKeyHealthResult(keyItem.id, { status: "invalid", error: classified.message });
+            recordKeyHealthResult(keyItem.id, {
+              status: "invalid",
+              error: classified.message,
+              projectId: keyItem.projectId
+            });
           }
           break;
         }
         if (classified.kind === "QUOTA_EXCEEDED") {
+          lastQuotaError = classified;
           const { keyCooldownMs, projectCooldownMs, quotaScope } = resolveCooldownForQuotaError(classified);
-          if (keyItem.projectId) {
-            throttledProjectsInRun.add(keyItem.projectId);
+          throttledKeyIdsInRun.add(keyItem.id);
+          if (normalizedProject) {
+            throttledProjectsInRun.add(normalizedProject);
           }
           if (!params.skipStateMutation) {
             recordKeyHealthResult(keyItem.id, {
@@ -1895,15 +2193,13 @@ async function executeTextAiWithFallback(params) {
       }
     }
   }
-  return {
-    status: lastClassified?.httpStatus || 502,
-    payload: {
-      ok: false,
-      code: lastClassified?.code || "GEMINI_TEXT_FAILED",
-      error: lastClassified?.message || "Text generation failed across eligible Gemini keys.",
-      attempts
-    }
-  };
+  return buildExhaustedFailureResult({
+    lastClassified,
+    lastQuotaError,
+    attempts,
+    defaultCode: "GEMINI_TEXT_FAILED",
+    defaultMessage: "Text generation failed across eligible Gemini keys."
+  });
 }
 async function executeVideoAiWithFallback(params) {
   const keys = getEligibleKeysForExecution({
@@ -1912,14 +2208,10 @@ async function executeVideoAiWithFallback(params) {
     overrideProjectHealth: params.overrideProjectHealth
   });
   if (keys.length === 0) {
-    return {
-      status: 503,
-      payload: {
-        ok: false,
-        code: "AI_PROVIDER_NOT_CONFIGURED",
-        error: "No active healthy Gemini API keys are available. Add or enable a valid API key in Admin Panel \u2192 AI Model Manager."
-      }
-    };
+    return buildNoEligibleKeysResult({
+      overrideKeys: params.overrideKeys,
+      overrideProjectHealth: params.overrideProjectHealth
+    });
   }
   if (params.task === "image_to_video" && (!params.imageBase64 || !params.mimeType)) {
     return {
@@ -1958,11 +2250,17 @@ async function executeVideoAiWithFallback(params) {
   }
   const factory = params.clientFactory || defaultClientFactory;
   let lastClassified = null;
+  let lastQuotaError = null;
   let attempts = 0;
   const throttledProjectsInRun = /* @__PURE__ */ new Set();
+  const throttledKeyIdsInRun = /* @__PURE__ */ new Set();
   for (let kIdx = 0; kIdx < keys.length; kIdx++) {
     const keyItem = keys[kIdx];
-    if (keyItem.projectId && throttledProjectsInRun.has(keyItem.projectId)) {
+    const normalizedProject = keyItem.projectId ? keyItem.projectId.toLowerCase() : "";
+    if (throttledKeyIdsInRun.has(keyItem.id)) {
+      continue;
+    }
+    if (normalizedProject && throttledProjectsInRun.has(normalizedProject)) {
       continue;
     }
     for (const modelId of models) {
@@ -2115,15 +2413,23 @@ async function executeVideoAiWithFallback(params) {
           };
         }
         if (classified.kind === "INVALID_KEY") {
+          throttledKeyIdsInRun.add(keyItem.id);
           if (!params.skipStateMutation) {
-            recordKeyHealthResult(keyItem.id, { status: "invalid", error: classified.message });
+            recordKeyHealthResult(keyItem.id, {
+              status: "invalid",
+              error: classified.message,
+              projectId: keyItem.projectId
+            });
           }
           break;
         }
         if (classified.kind === "QUOTA_EXCEEDED") {
+          lastQuotaError = classified;
           const { keyCooldownMs, projectCooldownMs, quotaScope } = resolveCooldownForQuotaError(classified);
-          if (keyItem.projectId) {
-            throttledProjectsInRun.add(keyItem.projectId);
+          const normalizedProject2 = keyItem.projectId ? keyItem.projectId.toLowerCase() : "";
+          throttledKeyIdsInRun.add(keyItem.id);
+          if (normalizedProject2) {
+            throttledProjectsInRun.add(normalizedProject2);
           }
           if (!params.skipStateMutation) {
             recordKeyHealthResult(keyItem.id, {
@@ -2141,15 +2447,13 @@ async function executeVideoAiWithFallback(params) {
       }
     }
   }
-  return {
-    status: lastClassified?.httpStatus || 502,
-    payload: {
-      ok: false,
-      code: lastClassified?.code || "GEMINI_VIDEO_FAILED",
-      error: lastClassified?.message || "Video AI execution failed across configured Gemini Omni models and eligible keys.",
-      attempts
-    }
-  };
+  return buildExhaustedFailureResult({
+    lastClassified,
+    lastQuotaError,
+    attempts,
+    defaultCode: "GEMINI_VIDEO_FAILED",
+    defaultMessage: "Video AI execution failed across configured Gemini Omni models and eligible keys."
+  });
 }
 async function executeAutoRoutedAiTask(params) {
   const cfg = params.overrideConfig || getModelConfig();
@@ -2398,7 +2702,7 @@ async function handleAutoRoutedAiRequest(params) {
   }
   await syncVaultFromRemote();
   try {
-    return await executeAutoRoutedAiTask({
+    const rawResult = await executeAutoRoutedAiTask({
       prompt,
       task: typeof body.task === "string" ? body.task.trim() : "auto",
       mediaType: typeof body.mediaType === "string" ? body.mediaType.trim() : void 0,
@@ -2415,6 +2719,11 @@ async function handleAutoRoutedAiRequest(params) {
       aspectRatio: body.aspectRatio === "9:16" ? "9:16" : "16:9",
       duration: typeof body.duration === "string" ? body.duration.trim() : void 0,
       resolution: body.resolution === "360p" || body.resolution === "720p" || body.resolution === "1080p" || body.resolution === "4k" ? body.resolution : void 0
+    });
+    const domain = rawResult?.payload?.routing?.domain;
+    return normalizeAiEndpointResult(rawResult, {
+      requireImage: domain === "image",
+      requireText: domain === "text"
     });
   } finally {
     await flushRemoteVaultWrites();
@@ -2494,7 +2803,7 @@ async function handlePostAiPhotoEdit(params) {
   const qualityHint = body.qualityHint === "lite" || body.qualityHint === "standard" || body.qualityHint === "pro" ? body.qualityHint : void 0;
   await syncVaultFromRemote();
   try {
-    return await executeImageAiWithFallback({
+    const rawResult = await executeImageAiWithFallback({
       prompt: rawPrompt,
       presetAction: typeof body.presetAction === "string" ? body.presetAction : void 0,
       imageBase64: imageBase64 || void 0,
@@ -2502,6 +2811,7 @@ async function handlePostAiPhotoEdit(params) {
       requestedModel,
       qualityHint
     });
+    return normalizeAiEndpointResult(rawResult, { requireImage: true });
   } finally {
     await flushRemoteVaultWrites();
   }
@@ -2540,11 +2850,12 @@ async function handlePostAiTextGenerate(params) {
   const systemInstruction = typeof body.systemInstruction === "string" ? body.systemInstruction.trim() : void 0;
   await syncVaultFromRemote();
   try {
-    return await executeTextAiWithFallback({
+    const rawResult = await executeTextAiWithFallback({
       prompt,
       systemInstruction,
       requestedModel
     });
+    return normalizeAiEndpointResult(rawResult, { requireText: true });
   } finally {
     await flushRemoteVaultWrites();
   }
@@ -2816,6 +3127,7 @@ async function fetchLiveModelsFromGoogleApi(overrideApiKey) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  BadJsonBodyError,
   SUPER_ADMIN_EMAIL,
   classifyAiTaskIntent,
   fetchLiveModelsFromGoogleApi,
@@ -2831,8 +3143,11 @@ async function fetchLiveModelsFromGoogleApi(overrideApiKey) {
   handlePostAiPhotoEdit,
   handlePostAiTextGenerate,
   isVerifiedSuperAdmin,
+  normalizeAiEndpointResult,
+  parseRequestJsonBody,
   scrubSecretText,
   selectAutoImageModelOrder,
+  sendNormalizedAiJson,
   testSpecificKeyLive,
   testSpecificModelLive,
   verifyFirebaseBearerToken

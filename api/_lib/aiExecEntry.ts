@@ -1,4 +1,5 @@
 export {
+  BadJsonBodyError,
   classifyAiTaskIntent,
   fetchLiveModelsFromGoogleApi,
   getAdminAiStateAsync,
@@ -13,8 +14,11 @@ export {
   handlePostAiPhotoEdit,
   handlePostAiTextGenerate,
   isVerifiedSuperAdmin,
+  normalizeAiEndpointResult,
+  parseRequestJsonBody,
   scrubSecretText,
   selectAutoImageModelOrder,
+  sendNormalizedAiJson,
   testSpecificKeyLive,
   testSpecificModelLive,
 } from '../../server/aiBackend.ts';
