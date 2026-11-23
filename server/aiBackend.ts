@@ -162,6 +162,7 @@ export interface ClassifiedGeminiError {
   message: string;
   quotaScope?: QuotaScope;
   retryAfterMs?: number;
+  isModelSpecificQuota?: boolean;
 }
 
 function extractRetryAfterMs(text: string): number | undefined {
@@ -395,9 +396,15 @@ export function classifyGeminiError(err: any, modelId?: string): ClassifiedGemin
     const retryAfterMs = extractRetryAfterMs(combined);
     const isBilling =
       /check your plan and billing|billing account|billing_not_active|spend limit/i.test(combined);
+    const isModelSpecificQuota =
+      !isBilling &&
+      /"limit"\s*:\s*"?0"?|\blimit:\s*0\b|"quotavalue"\s*:\s*"?0"?|free_?tier.*(?:limit["':\s]+0|not enabled|zero)|per_?model|perprojectpermodel/i.test(
+        combined
+      );
     const isDailyQuota =
       isBilling ||
-      /requests_?per_?day|per_?day|\brpd\b|daily[_ ]?(?:quota|limit|requests)|generate_?content_?free_?tier_?requests.*(?:day|0)|free_?tier.*(?:per_?day|limit["':\s]+0)|"limit"\s*:\s*"?0"?|\blimit:\s*0\b/i.test(
+      isModelSpecificQuota ||
+      /requests_?per_?day|per_?day|\brpd\b|daily[_ ]?(?:quota|limit|requests)|generate_?content_?free_?tier_?requests.*(?:day|0)/i.test(
         combined
       );
     const quotaScope: QuotaScope = isBilling
@@ -415,14 +422,16 @@ export function classifyGeminiError(err: any, modelId?: string): ClassifiedGemin
           : quotaScope === 'billing'
           ? 'GEMINI_BILLING_QUOTA_EXCEEDED'
           : 'GEMINI_DAILY_QUOTA_EXCEEDED',
-      message:
-        quotaScope === 'rpm_throttle'
-          ? 'Gemini API per-minute rate limit (RPM) reached for this project.'
-          : quotaScope === 'billing'
-          ? 'Gemini project billing or spend quota is exhausted.'
-          : 'Gemini project daily quota (RPD) is exhausted.',
+      message: isModelSpecificQuota
+        ? `Model ${modelId || 'selected'} has zero/exhausted quota (limit: 0) on this tier.`
+        : quotaScope === 'rpm_throttle'
+        ? 'Gemini API per-minute rate limit (RPM) reached for this project.'
+        : quotaScope === 'billing'
+        ? 'Gemini project billing or spend quota is exhausted.'
+        : 'Gemini project daily quota (RPD) is exhausted.',
       quotaScope,
       retryAfterMs,
+      isModelSpecificQuota,
     };
   }
 
@@ -1300,6 +1309,11 @@ export async function executeImageAiWithFallback(params: {
 
         if (classified.kind === 'QUOTA_EXCEEDED') {
           lastQuotaError = classified;
+          if (classified.isModelSpecificQuota) {
+            // Model-specific restriction (e.g. limit: 0 on Pro/free tier): skip this model and
+            // try remaining enabled image models on the same key without quarantining the project.
+            continue;
+          }
           const { keyCooldownMs, projectCooldownMs, quotaScope } = resolveCooldownForQuotaError(classified);
           throttledKeyIdsInRun.add(keyItem.id);
           if (normalizedProject) {
@@ -1486,6 +1500,9 @@ export async function executeTextAiWithFallback(params: {
         }
         if (classified.kind === 'QUOTA_EXCEEDED') {
           lastQuotaError = classified;
+          if (classified.isModelSpecificQuota) {
+            continue;
+          }
           const { keyCooldownMs, projectCooldownMs, quotaScope } = resolveCooldownForQuotaError(classified);
           throttledKeyIdsInRun.add(keyItem.id);
           if (normalizedProject) {
@@ -1787,6 +1804,9 @@ export async function executeVideoAiWithFallback(params: {
 
         if (classified.kind === 'QUOTA_EXCEEDED') {
           lastQuotaError = classified;
+          if (classified.isModelSpecificQuota) {
+            continue;
+          }
           const { keyCooldownMs, projectCooldownMs, quotaScope } = resolveCooldownForQuotaError(classified);
           const normalizedProject = keyItem.projectId ? keyItem.projectId.toLowerCase() : '';
           throttledKeyIdsInRun.add(keyItem.id);
@@ -2418,9 +2438,11 @@ export async function testSpecificKeyLive(keyId: string): Promise<{
       UPSTREAM_TRANSIENT: 'error',
     };
     const quotaCooldown =
-      classified.kind === 'QUOTA_EXCEEDED' ? resolveCooldownForQuotaError(classified) : null;
+      classified.kind === 'QUOTA_EXCEEDED' && !classified.isModelSpecificQuota
+        ? resolveCooldownForQuotaError(classified)
+        : null;
     recordKeyHealthResult(keyItem.id, {
-      status: statusMap[classified.kind],
+      status: classified.isModelSpecificQuota ? 'ready' : statusMap[classified.kind],
       error: classified.message,
       cooldownMs: quotaCooldown?.keyCooldownMs,
       quotaScope: quotaCooldown?.quotaScope,

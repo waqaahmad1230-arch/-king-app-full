@@ -43,12 +43,14 @@ export function AdminAiModelManagerSection({ showToast }: AdminAiModelManagerSec
 
   // Add Key Form State
   const [newKeyLabel, setNewKeyLabel] = useState('');
+  const [newKeyProjectId, setNewKeyProjectId] = useState('');
   const [newKeySecret, setNewKeySecret] = useState('');
   const [savingNewKey, setSavingNewKey] = useState(false);
 
   // Inline Key Update State
   const [editingKeyId, setEditingKeyId] = useState<string | null>(null);
   const [editLabel, setEditLabel] = useState('');
+  const [editProjectId, setEditProjectId] = useState('');
   const [editSecret, setEditSecret] = useState('');
   const [busyKeyId, setBusyKeyId] = useState<string | null>(null);
 
@@ -142,10 +144,12 @@ export function AdminAiModelManagerSection({ showToast }: AdminAiModelManagerSec
     try {
       const res = await addAdminAiKey({
         label: newKeyLabel.trim() || 'Admin Gemini Key',
+        projectId: newKeyProjectId.trim() || undefined,
         apiKey: newKeySecret.trim(),
       });
       setAiState(res.state);
       setNewKeyLabel('');
+      setNewKeyProjectId('');
       setNewKeySecret('');
       showToast('API key encrypted and stored in backend vault.');
     } catch (err: any) {
@@ -181,16 +185,22 @@ export function AdminAiModelManagerSection({ showToast }: AdminAiModelManagerSec
     }
   };
 
-  const handleSaveKeyEdit = async (keyId: string) => {
-    setBusyKeyId(keyId);
+  const handleSaveKeyEdit = async (keyItem: SafeAdminKeySummary) => {
+    setBusyKeyId(keyItem.id);
     try {
-      const res = await updateAdminAiKey(keyId, {
-        label: editLabel.trim() || undefined,
-        apiKey: editSecret.trim() || undefined,
+      const res = await updateAdminAiKey(keyItem.id, {
+        ...(keyItem.source === 'admin_vault'
+          ? {
+              label: editLabel.trim() || undefined,
+              apiKey: editSecret.trim() || undefined,
+            }
+          : {}),
+        projectId: editProjectId.trim(),
       });
       setAiState(res.state);
       setEditingKeyId(null);
       setEditLabel('');
+      setEditProjectId('');
       setEditSecret('');
       showToast('API key updated securely.');
     } catch (err: any) {
@@ -405,13 +415,20 @@ export function AdminAiModelManagerSection({ showToast }: AdminAiModelManagerSec
         {/* Add Key Form */}
         <form onSubmit={handleAddKey} className="p-3 rounded-xl bg-[#03060d] border border-slate-800 space-y-2">
           <div className="text-[11px] font-bold text-slate-200">Add Gemini API Key (Encrypted on Server)</div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
             <input
               type="text"
               value={newKeyLabel}
               onChange={(e) => setNewKeyLabel(e.target.value)}
               placeholder="Label (e.g. Primary Paid Project)"
               className="bg-[#080d1a] border border-slate-700 text-white px-3 py-2 rounded-xl text-xs focus:outline-none focus:border-blue-500"
+            />
+            <input
+              type="text"
+              value={newKeyProjectId}
+              onChange={(e) => setNewKeyProjectId(e.target.value)}
+              placeholder="Google Cloud Project ID (e.g. gcp-ai-1)"
+              className="bg-[#080d1a] border border-slate-700 text-white px-3 py-2 rounded-xl text-xs font-mono focus:outline-none focus:border-blue-500"
             />
             <input
               type="password"
@@ -461,6 +478,15 @@ export function AdminAiModelManagerSection({ showToast }: AdminAiModelManagerSec
                       <div className="text-xs font-bold text-white flex items-center gap-2 flex-wrap">
                         <span className="truncate">{k.label}</span>
                         <span className="font-mono text-[10px] text-slate-400">{k.maskedKey}</span>
+                        <span
+                          className={`text-[9px] px-2 py-0.5 rounded-full border font-mono ${
+                            k.projectId
+                              ? 'bg-blue-500/15 text-blue-300 border-blue-500/35'
+                              : 'bg-slate-900 text-slate-500 border-slate-800'
+                          }`}
+                        >
+                          {k.projectId ? `Project: ${k.projectId}` : 'No Project ID'}
+                        </span>
                         <span className={`text-[9px] px-2 py-0.5 rounded-full border font-bold uppercase ${statusBadgeClass}`}>
                           {k.status.replace('_', ' ')}
                         </span>
@@ -510,55 +536,74 @@ export function AdminAiModelManagerSection({ showToast }: AdminAiModelManagerSec
                         </button>
                       )}
 
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingKeyId(isEditing ? null : k.id);
+                          setEditLabel(k.label);
+                          setEditProjectId(k.projectId || '');
+                          setEditSecret('');
+                        }}
+                        className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer"
+                        title={
+                          k.source === 'admin_vault'
+                            ? 'Update key, label, or Project ID'
+                            : 'Assign Google Cloud Project ID'
+                        }
+                      >
+                        <Edit3 className="w-3.5 h-3.5" />
+                      </button>
+
                       {k.source === 'admin_vault' && (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setEditingKeyId(isEditing ? null : k.id);
-                              setEditLabel(k.label);
-                              setEditSecret('');
-                            }}
-                            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer"
-                            title="Update key or label"
-                          >
-                            <Edit3 className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            disabled={isBusy}
-                            onClick={() => void handleDeleteKey(k)}
-                            className="p-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900 text-rose-400 cursor-pointer"
-                            title="Delete key"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </>
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => void handleDeleteKey(k)}
+                          className="p-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900 text-rose-400 cursor-pointer"
+                          title="Delete key"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
                       )}
                     </div>
                   </div>
 
-                  {isEditing && k.source === 'admin_vault' && (
-                    <div className="pt-2 border-t border-slate-800 grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  {isEditing && (
+                    <div
+                      className={`pt-2 border-t border-slate-800 grid grid-cols-1 ${
+                        k.source === 'admin_vault' ? 'sm:grid-cols-4' : 'sm:grid-cols-2'
+                      } gap-2`}
+                    >
+                      {k.source === 'admin_vault' && (
+                        <input
+                          type="text"
+                          value={editLabel}
+                          onChange={(e) => setEditLabel(e.target.value)}
+                          placeholder="Key label"
+                          className="bg-[#080d1a] border border-slate-700 text-white px-2.5 py-1.5 rounded-lg text-xs"
+                        />
+                      )}
                       <input
                         type="text"
-                        value={editLabel}
-                        onChange={(e) => setEditLabel(e.target.value)}
-                        placeholder="Key label"
-                        className="bg-[#080d1a] border border-slate-700 text-white px-2.5 py-1.5 rounded-lg text-xs"
+                        value={editProjectId}
+                        onChange={(e) => setEditProjectId(e.target.value)}
+                        placeholder="Project ID (e.g. gcp-ai-1)"
+                        className="bg-[#080d1a] border border-slate-700 text-white px-2.5 py-1.5 rounded-lg text-xs font-mono"
                       />
-                      <input
-                        type="password"
-                        value={editSecret}
-                        onChange={(e) => setEditSecret(e.target.value)}
-                        placeholder="New key (optional)"
-                        autoComplete="new-password"
-                        className="bg-[#080d1a] border border-slate-700 text-white px-2.5 py-1.5 rounded-lg text-xs"
-                      />
+                      {k.source === 'admin_vault' && (
+                        <input
+                          type="password"
+                          value={editSecret}
+                          onChange={(e) => setEditSecret(e.target.value)}
+                          placeholder="New key (optional)"
+                          autoComplete="new-password"
+                          className="bg-[#080d1a] border border-slate-700 text-white px-2.5 py-1.5 rounded-lg text-xs"
+                        />
+                      )}
                       <button
                         type="button"
                         disabled={isBusy}
-                        onClick={() => void handleSaveKeyEdit(k.id)}
+                        onClick={() => void handleSaveKeyEdit(k)}
                         className="py-1.5 px-3 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold cursor-pointer"
                       >
                         Save Changes
