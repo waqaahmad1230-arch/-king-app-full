@@ -59,6 +59,12 @@ export interface SocialUserProfile {
   uid: string;
   displayName: string;
   photoURL: string | null;
+  username?: string;
+  usernameLower?: string;
+  displayNameLower?: string;
+  followersCount?: number;
+  followingCount?: number;
+  isVerified?: boolean;
 }
 
 export interface StatusPrivacyOptionMeta {
@@ -242,7 +248,7 @@ export interface AppNotificationRecord {
   actorName: string;
   actorPhoto: string;
   type: 'status_reaction' | 'status_reply' | 'friend_request' | 'friend_accepted' | 'new_follower';
-  statusId: string;
+  statusId?: string;
   title: string;
   body: string;
   emoji?: string;

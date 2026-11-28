@@ -12,6 +12,65 @@ import {
 } from 'firebase/auth';
 import { doc, setDoc, getDoc } from 'firebase/firestore';
 import { auth, db } from '../firebase';
+import { ensureDefaultUsername } from '../services/socialGraphService';
+
+async function syncPublicProfileSafely(
+  uid: string,
+  providerDisplayName: string,
+  providerPhotoURL: string | null | undefined
+) {
+  const pubRef = doc(db, 'publicProfiles', uid);
+  const pubSnap = await getDoc(pubRef);
+  const nowIso = new Date().toISOString();
+
+  if (!pubSnap.exists()) {
+    const cleanName = (providerDisplayName || 'KING Creator').trim().slice(0, 100) || 'KING Creator';
+    await setDoc(pubRef, {
+      uid,
+      displayName: cleanName,
+      name: cleanName,
+      displayNameLower: cleanName.toLowerCase(),
+      photoURL: providerPhotoURL || '',
+      followersCount: 0,
+      followingCount: 0,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    });
+    await ensureDefaultUsername(uid, cleanName);
+    return;
+  }
+
+  const existing = pubSnap.data() || {};
+  const updates: Record<string, any> = {};
+
+  if (!existing.displayName && providerDisplayName) {
+    updates.displayName = providerDisplayName.trim().slice(0, 100);
+    updates.name = updates.displayName;
+    updates.displayNameLower = updates.displayName.toLowerCase();
+  } else if (!existing.displayNameLower && (existing.displayName || existing.name)) {
+    updates.displayNameLower = String(existing.displayName || existing.name).trim().toLowerCase();
+  }
+
+  if (!existing.photoURL && providerPhotoURL) {
+    updates.photoURL = providerPhotoURL;
+  }
+
+  if (typeof existing.followersCount !== 'number') {
+    updates.followersCount = 0;
+  }
+  if (typeof existing.followingCount !== 'number') {
+    updates.followingCount = 0;
+  }
+
+  if (Object.keys(updates).length > 0) {
+    updates.updatedAt = nowIso;
+    await setDoc(pubRef, updates, { merge: true });
+  }
+
+  if (!existing.username) {
+    await ensureDefaultUsername(uid, existing.displayName || existing.name || providerDisplayName);
+  }
+}
 
 interface AuthContextType {
   user: FirebaseUser | null;
@@ -82,14 +141,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             lastLogin: new Date().toISOString(),
           }, { merge: true });
 
-          // Save public profile without sensitive fields
-          await setDoc(doc(db, 'publicProfiles', result.user.uid), {
-            uid: result.user.uid,
-            displayName: displayName,
-            name: displayName,
-            photoURL: photoURL,
-            updatedAt: new Date().toISOString(),
-          }, { merge: true });
+          await syncPublicProfileSafely(result.user.uid, displayName, photoURL);
         } catch (e) {
           console.warn("Could not save user profile to Firestore:", e);
         }
@@ -258,18 +310,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
         await setDoc(doc(db, 'users', result.user.uid), userPayload, { merge: true });
 
-        // Save public profile without sensitive fields
-        const publicPayload: Record<string, any> = {
-          uid: result.user.uid,
-          displayName: finalName,
-          name: finalName,
-          updatedAt: new Date().toISOString(),
-        };
-        if (finalPhoto) {
-          publicPayload.photoURL = finalPhoto;
-        }
-
-        await setDoc(doc(db, 'publicProfiles', result.user.uid), publicPayload, { merge: true });
+        await syncPublicProfileSafely(result.user.uid, finalName, finalPhoto);
 
         if (!userData || userData.fb_auto_ads === undefined) {
           setPendingFbUserUid(result.user.uid);
@@ -333,15 +374,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           createdAt: new Date().toISOString(),
         }, { merge: true });
 
-        // Save public profile without sensitive fields
-        await setDoc(doc(db, 'publicProfiles', result.user.uid), {
-          uid: result.user.uid,
-          displayName: displayName,
-          name: displayName,
-          photoURL: '',
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        }, { merge: true });
+        await syncPublicProfileSafely(result.user.uid, displayName, '');
       } catch (e) {
         console.warn("Could not save user profile to Firestore:", e);
       }

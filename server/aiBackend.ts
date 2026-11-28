@@ -18,30 +18,49 @@ import {
   getCloudinaryCredentials,
 } from '../api/_lib/cloudinaryConfig.ts';
 import {
+  addFalVaultApiKey,
   addVaultApiKey,
+  deleteFalVaultApiKey,
   deleteVaultApiKey,
   flushRemoteVaultWrites,
+  getFalConfig,
   getModelConfig,
   getVaultPersistenceInfo,
+  listFalModelHealthSummaries,
   listProjectHealthSummaries,
+  listResolvedFalKeys,
   listResolvedKeys,
+  listSafeFalKeySummaries,
   listSafeKeySummaries,
   recordKeyHealthResult,
   scrubSecretText,
   syncVaultFromRemote,
+  updateFalConfig,
+  updateFalVaultApiKey,
   updateModelConfig,
   updateVaultApiKey,
+  VERIFIED_FAL_MODELS,
   VERIFIED_GEMINI_MODELS,
   type AiModelConfigState,
+  type FalAiConfigState,
+  type FalModelHealthRecord,
   type ImageQualityTier,
   type ImageSelectionPolicy,
   type ProjectHealthRecord,
   type QuotaScope,
   type ResolvedExecutableKey,
+  type SafeFalKeySummary,
   type SafeKeySummary,
   type VaultPersistenceInfo,
+  type VerifiedFalModelSpec,
   type VerifiedGeminiModelSpec,
 } from './aiVault.ts';
+import {
+  executeFalImageWithFallback,
+  executeFalVideoWithFallback,
+  getFalRuntimeMetrics,
+  testSpecificFalKeyLive as runFalKeyLiveTest,
+} from './falBackend.ts';
 
 export {
   getPublicAiCapabilityStatus,
@@ -146,6 +165,14 @@ export interface AdminAiManagerState {
   modelConfig: AiModelConfigState;
   keys: SafeKeySummary[];
   projects?: ProjectHealthRecord[];
+  falKeys: SafeFalKeySummary[];
+  falConfig: FalAiConfigState;
+  falModels: VerifiedFalModelSpec[];
+  falModelHealth: FalModelHealthRecord[];
+  falRuntimeMetrics?: {
+    activeInFlightByKey: Record<string, number>;
+    pendingQueueJobsByKey: Record<string, number>;
+  };
 }
 
 export type ClassifiedErrorKind =
@@ -486,6 +513,11 @@ export function getAdminAiState(): AdminAiManagerState {
     modelConfig,
     keys,
     projects: listProjectHealthSummaries(),
+    falKeys: listSafeFalKeySummaries(),
+    falConfig: getFalConfig(),
+    falModels: VERIFIED_FAL_MODELS,
+    falModelHealth: listFalModelHealthSummaries(),
+    falRuntimeMetrics: getFalRuntimeMetrics(),
   };
 }
 
@@ -1940,19 +1972,68 @@ export async function executeAutoRoutedAiTask(params: {
       qualityHint: params.qualityHint,
       overrideConfig: cfg,
     });
-    const res = await executeImageAiWithFallback({
-      prompt: params.prompt,
-      presetAction: params.presetAction,
-      imageBase64: params.imageBase64,
-      mimeType: params.mimeType,
-      requestedModel: params.requestedModel,
-      qualityHint: params.qualityHint,
-      overrideKeys: params.overrideKeys,
-      overrideConfig: cfg,
-      overrideProjectHealth: params.overrideProjectHealth,
-      clientFactory: params.clientFactory,
-      skipStateMutation: params.skipStateMutation,
-    });
+    const falCfg = getFalConfig();
+    const wantsFalExplicit = Boolean(params.requestedModel && params.requestedModel.startsWith('fal-ai/'));
+    let res: { status: number; payload: Record<string, any> };
+
+    if (wantsFalExplicit) {
+      res = await executeFalImageWithFallback({
+        prompt: params.prompt,
+        imageBase64: params.imageBase64,
+        mimeType: params.mimeType,
+        requestedModel: params.requestedModel,
+        overrideConfig: falCfg,
+        skipStateMutation: params.skipStateMutation,
+      });
+    } else {
+      res = await executeImageAiWithFallback({
+        prompt: params.prompt,
+        presetAction: params.presetAction,
+        imageBase64: params.imageBase64,
+        mimeType: params.mimeType,
+        requestedModel: params.requestedModel,
+        qualityHint: params.qualityHint,
+        overrideKeys: params.overrideKeys,
+        overrideConfig: cfg,
+        overrideProjectHealth: params.overrideProjectHealth,
+        clientFactory: params.clientFactory,
+        skipStateMutation: params.skipStateMutation,
+      });
+      const canFallbackToFal =
+        res.status !== 200 &&
+        res.status !== 400 &&
+        res.status !== 413 &&
+        falCfg.enableFalImageFallback &&
+        !params.overrideKeys &&
+        listResolvedFalKeys().some((k) => k.enabled);
+      if (canFallbackToFal) {
+        const falRes = await executeFalImageWithFallback({
+          prompt: params.prompt,
+          imageBase64: params.imageBase64,
+          mimeType: params.mimeType,
+          overrideConfig: falCfg,
+          skipStateMutation: params.skipStateMutation,
+        });
+        if (falRes.status === 200) {
+          res = {
+            ...falRes,
+            payload: { ...falRes.payload, fallbackFrom: 'google-gemini' },
+          };
+        } else if (falRes.payload?.falDiagnostics) {
+          res = {
+            ...res,
+            payload: {
+              ...res.payload,
+              falDiagnostics: falRes.payload.falDiagnostics,
+              error: `${res.payload.error || 'Gemini failed.'} fal.ai fallback also failed: ${
+                falRes.payload.error || 'Exhausted.'
+              }`,
+            },
+          };
+        }
+      }
+    }
+
     return {
       status: res.status,
       payload: {
@@ -1980,24 +2061,105 @@ export async function executeAutoRoutedAiTask(params: {
       videoTask,
       overrideConfig: cfg,
     });
-    const res = await executeVideoAiWithFallback({
-      task: videoTask,
-      prompt: params.prompt,
-      imageBase64: params.imageBase64,
-      mimeType: params.mimeType,
-      videoBase64: params.videoBase64,
-      videoMimeType: params.videoMimeType,
-      videoUri: params.videoUri,
-      aspectRatio: params.aspectRatio,
-      duration: params.duration,
-      resolution: params.resolution,
-      requestedModel: params.requestedModel,
-      overrideKeys: params.overrideKeys,
-      overrideConfig: cfg,
-      overrideProjectHealth: params.overrideProjectHealth,
-      clientFactory: params.clientFactory,
-      skipStateMutation: params.skipStateMutation,
-    });
+    const falCfg = getFalConfig();
+    const hasEnabledFal = !params.overrideKeys && listResolvedFalKeys().some((k) => k.enabled);
+    const wantsFalExplicit = Boolean(params.requestedModel && params.requestedModel.startsWith('fal-ai/'));
+    const supportsFalVideoTask = videoTask === 'video_generation' || videoTask === 'image_to_video';
+    let res: { status: number; payload: Record<string, any> };
+
+    if (supportsFalVideoTask && (wantsFalExplicit || (falCfg.preferFalForVideo && hasEnabledFal))) {
+      res = await executeFalVideoWithFallback({
+        task: videoTask,
+        prompt: params.prompt,
+        imageBase64: params.imageBase64,
+        mimeType: params.mimeType,
+        aspectRatio: params.aspectRatio,
+        duration: params.duration,
+        requestedModel: params.requestedModel,
+        overrideConfig: falCfg,
+        skipStateMutation: params.skipStateMutation,
+      });
+      if (
+        res.status !== 200 &&
+        res.status !== 400 &&
+        !wantsFalExplicit &&
+        listResolvedKeys().some((k) => k.enabled)
+      ) {
+        const gemRes = await executeVideoAiWithFallback({
+          task: videoTask,
+          prompt: params.prompt,
+          imageBase64: params.imageBase64,
+          mimeType: params.mimeType,
+          videoBase64: params.videoBase64,
+          videoMimeType: params.videoMimeType,
+          videoUri: params.videoUri,
+          aspectRatio: params.aspectRatio,
+          duration: params.duration,
+          resolution: params.resolution,
+          requestedModel: params.requestedModel,
+          overrideKeys: params.overrideKeys,
+          overrideConfig: cfg,
+          overrideProjectHealth: params.overrideProjectHealth,
+          clientFactory: params.clientFactory,
+          skipStateMutation: params.skipStateMutation,
+        });
+        if (gemRes.status === 200) {
+          res = { ...gemRes, payload: { ...gemRes.payload, fallbackFrom: 'fal-ai' } };
+        }
+      }
+    } else {
+      res = await executeVideoAiWithFallback({
+        task: videoTask,
+        prompt: params.prompt,
+        imageBase64: params.imageBase64,
+        mimeType: params.mimeType,
+        videoBase64: params.videoBase64,
+        videoMimeType: params.videoMimeType,
+        videoUri: params.videoUri,
+        aspectRatio: params.aspectRatio,
+        duration: params.duration,
+        resolution: params.resolution,
+        requestedModel: params.requestedModel,
+        overrideKeys: params.overrideKeys,
+        overrideConfig: cfg,
+        overrideProjectHealth: params.overrideProjectHealth,
+        clientFactory: params.clientFactory,
+        skipStateMutation: params.skipStateMutation,
+      });
+      if (
+        res.status !== 200 &&
+        res.status !== 400 &&
+        supportsFalVideoTask &&
+        falCfg.enableFalVideoFallback &&
+        hasEnabledFal
+      ) {
+        const falRes = await executeFalVideoWithFallback({
+          task: videoTask,
+          prompt: params.prompt,
+          imageBase64: params.imageBase64,
+          mimeType: params.mimeType,
+          aspectRatio: params.aspectRatio,
+          duration: params.duration,
+          overrideConfig: falCfg,
+          skipStateMutation: params.skipStateMutation,
+        });
+        if (falRes.status === 200) {
+          res = { ...falRes, payload: { ...falRes.payload, fallbackFrom: 'google-gemini' } };
+        } else if (falRes.payload?.falDiagnostics) {
+          res = {
+            ...res,
+            payload: {
+              ...res.payload,
+              falDiagnostics: falRes.payload.falDiagnostics,
+              error: `${res.payload.error || 'Gemini Video AI failed.'} fal.ai fallback also failed: ${
+                falRes.payload.error || 'Exhausted.'
+              }`,
+            },
+          };
+        }
+      }
+    }
+
     return {
       status: res.status,
       payload: {
@@ -2267,6 +2429,7 @@ export async function handlePostAiPhotoEdit(params: {
   }
 
   const requestedModel = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : undefined;
+  const requestedProvider = typeof body.provider === 'string' ? body.provider.trim().toLowerCase() : undefined;
   const qualityHint =
     body.qualityHint === 'lite' || body.qualityHint === 'standard' || body.qualityHint === 'pro'
       ? body.qualityHint
@@ -2274,14 +2437,61 @@ export async function handlePostAiPhotoEdit(params: {
 
   await syncVaultFromRemote();
   try {
-    const rawResult = await executeImageAiWithFallback({
-      prompt: rawPrompt,
-      presetAction: typeof body.presetAction === 'string' ? body.presetAction : undefined,
-      imageBase64: imageBase64 || undefined,
-      mimeType: mimeType || undefined,
-      requestedModel,
-      qualityHint,
-    });
+    const falCfg = getFalConfig();
+    const wantsFal = requestedProvider === 'fal-ai' || Boolean(requestedModel && requestedModel.startsWith('fal-ai/'));
+    let rawResult: { status: number; payload: Record<string, any> };
+
+    if (wantsFal) {
+      rawResult = await executeFalImageWithFallback({
+        prompt: rawPrompt,
+        imageBase64: imageBase64 || undefined,
+        mimeType: mimeType || undefined,
+        requestedModel,
+        overrideConfig: falCfg,
+      });
+    } else {
+      rawResult = await executeImageAiWithFallback({
+        prompt: rawPrompt,
+        presetAction: typeof body.presetAction === 'string' ? body.presetAction : undefined,
+        imageBase64: imageBase64 || undefined,
+        mimeType: mimeType || undefined,
+        requestedModel,
+        qualityHint,
+      });
+
+      const canFallbackToFal =
+        rawResult.status !== 200 &&
+        rawResult.status !== 400 &&
+        rawResult.status !== 413 &&
+        falCfg.enableFalImageFallback &&
+        listResolvedFalKeys().some((k) => k.enabled);
+      if (canFallbackToFal) {
+        const falRes = await executeFalImageWithFallback({
+          prompt: rawPrompt,
+          imageBase64: imageBase64 || undefined,
+          mimeType: mimeType || undefined,
+          overrideConfig: falCfg,
+        });
+        if (falRes.status === 200) {
+          rawResult = {
+            ...falRes,
+            payload: { ...falRes.payload, fallbackFrom: 'google-gemini' },
+          };
+        } else if (falRes.payload?.falDiagnostics) {
+          rawResult = {
+            ...rawResult,
+            payload: {
+              ...rawResult.payload,
+              falDiagnostics: falRes.payload.falDiagnostics,
+              error: `${rawResult.payload.error || 'Gemini failed.'} fal.ai fallback also failed: ${
+                falRes.payload.error || 'Exhausted.'
+              }`,
+            },
+          };
+        }
+      }
+    }
+
     return normalizeAiEndpointResult(rawResult, { requireImage: true });
   } finally {
     await flushRemoteVaultWrites();
@@ -2346,9 +2556,9 @@ export async function handlePostAiTextGenerate(params: {
 // --- ADMIN ENDPOINT HANDLERS ---
 
 export async function handleAdminUpdateModels(patch: Partial<AiModelConfigState>) {
-  await syncVaultFromRemote();
+  await syncVaultFromRemote(true);
   const modelConfig = updateModelConfig(patch);
-  await flushRemoteVaultWrites();
+  await flushRemoteVaultWrites({ throwOnError: true });
   return { ok: true as const, modelConfig, state: getAdminAiState() };
 }
 
@@ -2358,9 +2568,9 @@ export async function handleAdminAddKey(params: {
   priority?: number;
   projectId?: string;
 }) {
-  await syncVaultFromRemote();
+  await syncVaultFromRemote(true);
   const key = addVaultApiKey(params);
-  await flushRemoteVaultWrites();
+  await flushRemoteVaultWrites({ throwOnError: true });
   return { ok: true as const, key, state: getAdminAiState() };
 }
 
@@ -2375,24 +2585,73 @@ export async function handleAdminUpdateKey(
     resetHealth?: boolean;
   }
 ) {
-  await syncVaultFromRemote();
+  await syncVaultFromRemote(true);
   const key = updateVaultApiKey(keyId, patch);
-  await flushRemoteVaultWrites();
+  await flushRemoteVaultWrites({ throwOnError: true });
   return key ? { ok: true as const, key, state: getAdminAiState() } : null;
 }
 
 export async function handleAdminDeleteKey(keyId: string) {
-  await syncVaultFromRemote();
+  await syncVaultFromRemote(true);
   const deleted = deleteVaultApiKey(keyId);
-  await flushRemoteVaultWrites();
+  await flushRemoteVaultWrites({ throwOnError: true });
   return deleted ? { ok: true as const, state: getAdminAiState() } : null;
+}
+
+// --- ADMIN fal.ai ENDPOINT HANDLERS (Strictly isolated from Gemini keys) ---
+
+export async function handleAdminAddFalKey(params: {
+  label: string;
+  apiKey: string;
+  priority?: number;
+}) {
+  await syncVaultFromRemote(true);
+  const key = addFalVaultApiKey(params);
+  await flushRemoteVaultWrites({ throwOnError: true });
+  return { ok: true as const, key, state: getAdminAiState() };
+}
+
+export async function handleAdminUpdateFalKey(
+  keyId: string,
+  patch: {
+    label?: string;
+    apiKey?: string;
+    enabled?: boolean;
+    priority?: number;
+    resetHealth?: boolean;
+  }
+) {
+  await syncVaultFromRemote(true);
+  const key = updateFalVaultApiKey(keyId, patch);
+  await flushRemoteVaultWrites({ throwOnError: true });
+  return key ? { ok: true as const, key, state: getAdminAiState() } : null;
+}
+
+export async function handleAdminDeleteFalKey(keyId: string) {
+  await syncVaultFromRemote(true);
+  const deleted = deleteFalVaultApiKey(keyId);
+  await flushRemoteVaultWrites({ throwOnError: true });
+  return deleted ? { ok: true as const, state: getAdminAiState() } : null;
+}
+
+export async function handleAdminUpdateFalConfig(patch: Partial<FalAiConfigState>) {
+  await syncVaultFromRemote(true);
+  const falConfig = updateFalConfig(patch);
+  await flushRemoteVaultWrites({ throwOnError: true });
+  return { ok: true as const, falConfig, state: getAdminAiState() };
+}
+
+export async function testSpecificFalKeyLive(keyId: string) {
+  const result = await runFalKeyLiveTest(keyId);
+  await flushRemoteVaultWrites();
+  return result;
 }
 
 export async function testSpecificKeyLive(keyId: string): Promise<{
   status: number;
   payload: Record<string, any>;
 }> {
-  await syncVaultFromRemote();
+  await syncVaultFromRemote(true);
   const keyItem = listResolvedKeys().find((k) => k.id === keyId);
   if (!keyItem) {
     return {
@@ -2471,7 +2730,7 @@ export async function testSpecificModelLive(params: {
   status: number;
   payload: Record<string, any>;
 }> {
-  await syncVaultFromRemote();
+  await syncVaultFromRemote(true);
   const spec = VERIFIED_GEMINI_MODELS.find((m) => m.id === params.modelId);
   if (!spec) {
     return {
@@ -2610,7 +2869,7 @@ export async function fetchLiveModelsFromGoogleApi(overrideApiKey?: string): Pro
   }>;
   error?: string;
 }> {
-  await syncVaultFromRemote();
+  await syncVaultFromRemote(true);
   let rawKey = (overrideApiKey || '').trim();
   if (!rawKey) {
     const keys = listResolvedKeys().filter((k) => k.enabled && k.status !== 'invalid');

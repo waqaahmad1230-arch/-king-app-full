@@ -25,6 +25,7 @@ import {
 } from '../services/catalogService';
 import { uploadFileToCloudinary, uploadBatchFilesToCloudinary, validateProductFile } from '../utils/cloudinaryUpload';
 import { useAuth } from '../context/AuthContext';
+import { KingShopAdminSection } from './KingShopAdminSection';
 
 interface CatalogAdminSectionProps {
   showToast: (msg: string) => void;
@@ -810,6 +811,8 @@ export function CatalogAdminSection({ showToast }: CatalogAdminSectionProps) {
         </div>
       )}
 
+      {/* Phase 9: KING Coins & Rewards Admin Controls */}
+      <KingShopAdminSection isSuperAdminAuthed={isSuperAdminAuthed} showToast={showToast} />
     </div>
   );
 }

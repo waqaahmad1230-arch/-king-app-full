@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Heart, Loader2, Sparkles, UserCheck } from 'lucide-react';
+import { X, Heart, Loader2 } from 'lucide-react';
 import CreatorAvatar, { CreatorDisplayName } from './CreatorAvatar';
 import { fetchVideoLikedByUsers, LikedUserItem } from '../services/videoSocialService';
 import { useAuth } from '../context/AuthContext';
@@ -10,6 +10,7 @@ interface LikedByModalProps {
   videoId: string | null;
   videoTitle?: string;
   totalLikesCount?: number;
+  onOpenCreatorProfile?: (uid: string) => void;
 }
 
 function formatLikedTime(timestamp: any): string {
@@ -42,7 +43,8 @@ export default function LikedByModal({
   onClose,
   videoId,
   videoTitle,
-  totalLikesCount = 0
+  totalLikesCount = 0,
+  onOpenCreatorProfile,
 }: LikedByModalProps) {
   const { user: authUser } = useAuth();
   const [likes, setLikes] = useState<LikedUserItem[]>([]);
@@ -137,9 +139,17 @@ export default function LikedByModal({
             likes.map((item) => {
               const isMe = authUser?.uid === item.userId;
               return (
-                <div 
+                <div
                   key={item.userId}
-                  className="flex items-center justify-between py-2.5 px-2 hover:bg-slate-800/40 rounded-xl transition"
+                  onClick={() => {
+                    if (item.userId && onOpenCreatorProfile) {
+                      onClose();
+                      onOpenCreatorProfile(item.userId);
+                    }
+                  }}
+                  className={`flex items-center justify-between py-2.5 px-2 hover:bg-slate-800/40 rounded-xl transition ${
+                    onOpenCreatorProfile ? 'cursor-pointer' : ''
+                  }`}
                 >
                   <div className="flex items-center gap-3 min-w-0">
                     <CreatorAvatar

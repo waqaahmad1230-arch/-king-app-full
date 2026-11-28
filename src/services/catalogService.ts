@@ -351,17 +351,19 @@ export async function deleteCatalogProduct(productId: string): Promise<void> {
   }
 }
 
-function buildWhatsAppOrderMessage(product: CatalogProduct): string {
+function buildWhatsAppOrderMessage(product: CatalogProduct, quantity = 1): string {
+  const qty = Math.max(1, Math.min(20, Math.floor(quantity || 1)));
   const effectivePrice =
     product.discountPrice && product.discountPrice > 0
       ? product.discountPrice
       : product.originalPrice;
-  const price = (product as any).price ?? effectivePrice.toLocaleString();
+  const subtotal = effectivePrice * qty;
 
   return `Hello KING SHOP! 👑
 I want to order:
 🛍️ Product: ${product.name}
-💰 Price: Rs. ${price}
+📦 Quantity: ${qty}
+💰 Subtotal: Rs. ${subtotal.toLocaleString()}
 🏷️ Category: ${product.category}
 Please confirm order!`;
 }
@@ -372,10 +374,11 @@ Please confirm order!`;
 export function generateWhatsAppOrderUrl(
   product: CatalogProduct,
   customNumber?: string,
-  useAppIntent = false
+  useAppIntent = false,
+  quantity = 1
 ): string {
   const phone = (customNumber || OWNER_WHATSAPP).replace(/[^0-9]/g, '');
-  const message = buildWhatsAppOrderMessage(product);
+  const message = buildWhatsAppOrderMessage(product, quantity);
   const encoded = encodeURIComponent(message);
   if (useAppIntent) {
     return `whatsapp://send?phone=${phone}&text=${encoded}`;
@@ -386,9 +389,9 @@ export function generateWhatsAppOrderUrl(
 /**
  * Direct WhatsApp chat redirect to owner (NO sharing popup, NO navigator.share, NO links in text)
  */
-export function orderOnWhatsApp(product: CatalogProduct, customNumber?: string): void {
+export function orderOnWhatsApp(product: CatalogProduct, customNumber?: string, quantity = 1): void {
   if (typeof window === 'undefined') return;
-  const url = generateWhatsAppOrderUrl(product, customNumber);
+  const url = generateWhatsAppOrderUrl(product, customNumber, false, quantity);
   window.location.href = url;
 }
 

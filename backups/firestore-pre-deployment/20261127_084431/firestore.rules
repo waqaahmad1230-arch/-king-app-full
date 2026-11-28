@@ -1,0 +1,1184 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // --- Helper Functions ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Single Authorized Super Admin Email (requires verified email claim)
+    function isSuperAdmin() {
+      return request.auth != null &&
+        request.auth.token.email == "waqaahmad1230@gmail.com" &&
+        request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isSuperAdmin();
+    }
+
+    // Safe ownership check supporting legacy 'uid' and standard 'userId' without missing-field crashes
+    function isVideoOwner(videoData) {
+      return isSignedIn() && videoData != null && (
+        (('userId' in videoData) && videoData.userId == request.auth.uid) ||
+        (('uid' in videoData) && videoData.uid == request.auth.uid)
+      );
+    }
+
+    // Safe numeric extraction for likes (handles missing, null, or number type)
+    function getDocLikes(docData) {
+      return (docData != null && ('likes' in docData) && docData.likes is number) ? docData.likes : 0;
+    }
+
+    // Safe numeric extraction for views (handles missing, null, or number type)
+    function getDocViews(docData) {
+      return (docData != null && ('views' in docData) && docData.views is number) ? docData.views : 0;
+    }
+
+    // Validate Firestore document IDs and UIDs to prevent path/regex metacharacter injection
+    function isValidId(id) {
+      return id is string &&
+        id.size() >= 1 &&
+        id.size() <= 128 &&
+        id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Validate normalized lowercase unique @username (3-24 chars: a-z, 0-9, underscore, dot)
+    function isValidUsername(u) {
+      return u is string &&
+        u.size() >= 3 &&
+        u.size() <= 24 &&
+        u.matches('^[a-z0-9_.]{3,24}$');
+    }
+
+    function isValidSocialLinksMap(links) {
+      return links is map && links.keys().hasOnly([
+        'whatsapp', 'instagram', 'facebook', 'tiktok', 'youtube', 'twitter', 'website'
+      ]);
+    }
+
+    // Validate future Status visibility privacy config stored privately on /users/{userId}
+    function isValidStatusPrivacy(p) {
+      return p is map &&
+        p.keys().hasAll(['visibility', 'selectedUids', 'exceptUids']) &&
+        p.keys().hasOnly(['visibility', 'selectedUids', 'exceptUids', 'updatedAt']) &&
+        p.visibility in ['public', 'friends', 'followers', 'selected', 'except', 'only_me'] &&
+        p.selectedUids is list &&
+        p.selectedUids.size() <= 200 &&
+        (p.selectedUids.size() == 0 || isValidId(p.selectedUids[0])) &&
+        p.exceptUids is list &&
+        p.exceptUids.size() <= 200 &&
+        (p.exceptUids.size() == 0 || isValidId(p.exceptUids[0])) &&
+        (!('updatedAt' in p) || (p.updatedAt is string && p.updatedAt.size() <= 64) || p.updatedAt is timestamp);
+    }
+
+    // Check if either user has blocked the other
+    function isBlockedBetween(uid1, uid2) {
+      return exists(/databases/$(database)/documents/blocks/$(uid1 + '_' + uid2)) ||
+             exists(/databases/$(database)/documents/blocks/$(uid2 + '_' + uid1));
+    }
+
+    // Check if two users have an accepted mutual friendship
+    function isAcceptedFriend(uid1, uid2) {
+      return uid1 < uid2
+        ? (exists(/databases/$(database)/documents/friendships/$(uid1 + '_' + uid2)) &&
+           get(/databases/$(database)/documents/friendships/$(uid1 + '_' + uid2)).data.status == 'accepted')
+        : (exists(/databases/$(database)/documents/friendships/$(uid2 + '_' + uid1)) &&
+           get(/databases/$(database)/documents/friendships/$(uid2 + '_' + uid1)).data.status == 'accepted');
+    }
+
+    // Safe numeric extraction helper for counters
+    function getDocCounter(docData, fieldName) {
+      return (docData != null && (fieldName in docData) && docData[fieldName] is number && docData[fieldName] >= 0)
+        ? docData[fieldName]
+        : 0;
+    }
+
+    // Mathematical follow-edge delta inside a transaction (+1 create, -1 delete, 0 unchanged)
+    function followEdgeDelta(edgeId) {
+      return (!exists(/databases/$(database)/documents/follows/$(edgeId)) &&
+              existsAfter(/databases/$(database)/documents/follows/$(edgeId)))
+        ? 1
+        : ((exists(/databases/$(database)/documents/follows/$(edgeId)) &&
+            !existsAfter(/databases/$(database)/documents/follows/$(edgeId)))
+            ? -1
+            : 0);
+    }
+
+    function expectedClampedCounter(currentVal, delta) {
+      return (currentVal + delta) >= 0 ? (currentVal + delta) : 0;
+    }
+
+    // Verify publicProfiles counter changes match atomic /follows edge changes in the same transaction
+    function isValidFollowCounterSync(userId, otherUid) {
+      return isValidId(otherUid) &&
+        otherUid != userId &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'followersCount', 'followingCount', 'updatedAt'
+        ]) &&
+        (
+          followEdgeDelta(userId + '_' + otherUid) != 0 ||
+          followEdgeDelta(otherUid + '_' + userId) != 0
+        ) &&
+        (
+          (followEdgeDelta(userId + '_' + otherUid) <= 0 && followEdgeDelta(otherUid + '_' + userId) <= 0) ||
+          !isBlockedBetween(userId, otherUid)
+        ) &&
+        (
+          (!('followingCount' in request.resource.data.diff(resource.data).affectedKeys()) &&
+           followEdgeDelta(userId + '_' + otherUid) == 0) ||
+          (request.resource.data.followingCount is int &&
+           request.resource.data.followingCount == expectedClampedCounter(
+             getDocCounter(resource.data, 'followingCount'),
+             followEdgeDelta(userId + '_' + otherUid)
+           ))
+        ) &&
+        (
+          (!('followersCount' in request.resource.data.diff(resource.data).affectedKeys()) &&
+           followEdgeDelta(otherUid + '_' + userId) == 0) ||
+          (request.resource.data.followersCount is int &&
+           request.resource.data.followersCount == expectedClampedCounter(
+             getDocCounter(resource.data, 'followersCount'),
+             followEdgeDelta(otherUid + '_' + userId)
+           ))
+        );
+    }
+
+    // Verify publicProfiles counter is incremented (+1) in the same transaction as /follows create
+    function isProfileCounterIncrementedOnFollow(profileUid, fieldName) {
+      return existsAfter(/databases/$(database)/documents/publicProfiles/$(profileUid)) &&
+        (fieldName in getAfter(/databases/$(database)/documents/publicProfiles/$(profileUid)).data) &&
+        getAfter(/databases/$(database)/documents/publicProfiles/$(profileUid)).data[fieldName] is int &&
+        getAfter(/databases/$(database)/documents/publicProfiles/$(profileUid)).data[fieldName] == (
+          exists(/databases/$(database)/documents/publicProfiles/$(profileUid))
+            ? getDocCounter(get(/databases/$(database)/documents/publicProfiles/$(profileUid)).data, fieldName)
+            : 0
+        ) + 1;
+    }
+
+    // Verify existing publicProfiles counter is decremented (-1, clamped >= 0) in the same transaction as /follows delete
+    function isProfileCounterDecrementedOnUnfollow(profileUid, fieldName) {
+      return !exists(/databases/$(database)/documents/publicProfiles/$(profileUid)) || (
+        existsAfter(/databases/$(database)/documents/publicProfiles/$(profileUid)) &&
+        (fieldName in getAfter(/databases/$(database)/documents/publicProfiles/$(profileUid)).data) &&
+        getAfter(/databases/$(database)/documents/publicProfiles/$(profileUid)).data[fieldName] is int &&
+        getAfter(/databases/$(database)/documents/publicProfiles/$(profileUid)).data[fieldName] == expectedClampedCounter(
+          getDocCounter(get(/databases/$(database)/documents/publicProfiles/$(profileUid)).data, fieldName),
+          -1
+        )
+      );
+    }
+
+    // Enforce Status visibility, 24h expiry, and bidirectional blocks on single-doc gets and relational checks
+    function canViewStatusDoc(statusData) {
+      return isAdmin() || (
+        isSignedIn() &&
+        statusData != null && (
+          statusData.authorUid == request.auth.uid || (
+            ('expiresAt' in statusData) &&
+            statusData.expiresAt is timestamp &&
+            statusData.expiresAt > request.time &&
+            !isBlockedBetween(request.auth.uid, statusData.authorUid) && (
+              statusData.privacyMode == 'public' ||
+              (statusData.privacyMode == 'selected' && ('allowedUids' in statusData) && statusData.allowedUids is list && request.auth.uid in statusData.allowedUids) ||
+              (statusData.privacyMode == 'except' && (isAcceptedFriend(request.auth.uid, statusData.authorUid) || exists(/databases/$(database)/documents/follows/$(request.auth.uid + '_' + statusData.authorUid))) && (!('excludedUids' in statusData) || (statusData.excludedUids is list && !(request.auth.uid in statusData.excludedUids)))) ||
+              (statusData.privacyMode == 'friends' && isAcceptedFriend(request.auth.uid, statusData.authorUid)) ||
+              (statusData.privacyMode == 'followers' && exists(/databases/$(database)/documents/follows/$(request.auth.uid + '_' + statusData.authorUid)))
+            )
+          )
+        )
+      );
+    }
+
+    // Validate Status audioTrack map
+    function isValidAudioTrack(track) {
+      return track is map &&
+        track.keys().hasAll(['mode', 'label']) &&
+        track.keys().hasOnly(['mode', 'label', 'presetId', 'audioUrl', 'cloudinaryPublicId']) &&
+        track.mode in ['original', 'royalty_free', 'custom_audio'] &&
+        track.label is string && track.label.size() <= 100 &&
+        (!('presetId' in track) || (track.presetId is string && track.presetId.size() <= 64)) &&
+        (!('audioUrl' in track) || (track.audioUrl is string && track.audioUrl.size() <= 2000)) &&
+        (!('cloudinaryPublicId' in track) || (track.cloudinaryPublicId is string && track.cloudinaryPublicId.size() <= 500));
+    }
+
+    // Validate optional WhatsApp CTA button on a Status
+    function isValidWhatsAppCta(cta) {
+      return cta is map &&
+        cta.keys().hasAll(['enabled', 'url', 'label']) &&
+        cta.keys().hasOnly(['enabled', 'url', 'label']) &&
+        cta.enabled is bool &&
+        cta.url is string &&
+        cta.url.size() <= 300 &&
+        (
+          cta.url == '' ||
+          cta.url.matches('^https://(wa\\.me|api\\.whatsapp\\.com|chat\\.whatsapp\\.com)/.*') ||
+          cta.url.matches('^whatsapp://.*')
+        ) &&
+        cta.label is string &&
+        cta.label.size() <= 40;
+    }
+
+    // Validate optional Video trim/mute/overlay edit metadata on a Status
+    function isValidVideoEdits(edits) {
+      return edits is map &&
+        edits.keys().hasAll(['trimStartSec', 'trimEndSec', 'muted', 'overlays']) &&
+        edits.keys().hasOnly(['trimStartSec', 'trimEndSec', 'muted', 'overlays']) &&
+        edits.trimStartSec is number && edits.trimStartSec >= 0 && edits.trimStartSec <= 3600 &&
+        edits.trimEndSec is number && edits.trimEndSec >= edits.trimStartSec && edits.trimEndSec <= 3600 &&
+        (edits.trimEndSec - edits.trimStartSec) <= 60.5 &&
+        edits.muted is bool &&
+        edits.overlays is list &&
+        edits.overlays.size() <= 25 &&
+        (edits.overlays.size() == 0 || edits.overlays[0] is map);
+    }
+
+    // Validate new Status payload on create
+    function isValidStatusCreate(data) {
+      return data.keys().hasAll([
+          'authorUid', 'authorName', 'authorPhoto', 'type', 'mediaUrl', 'thumbnailUrl',
+          'cloudinaryPublicId', 'cloudinaryResourceType', 'cloudinaryDeliveryType',
+          'caption', 'textContent', 'bgGradient', 'textStyle', 'durationSec',
+          'audioTrack', 'privacyMode', 'allowedUids', 'excludedUids',
+          'viewsCount', 'likesCount', 'createdAt', 'expiresAt'
+        ]) &&
+        data.keys().hasOnly([
+          'authorUid', 'authorName', 'authorPhoto', 'type', 'mediaUrl', 'thumbnailUrl',
+          'cloudinaryPublicId', 'cloudinaryResourceType', 'cloudinaryDeliveryType',
+          'caption', 'textContent', 'bgGradient', 'textStyle', 'durationSec',
+          'audioTrack', 'whatsappCta', 'videoEdits', 'privacyMode', 'allowedUids', 'excludedUids',
+          'viewsCount', 'likesCount', 'createdAt', 'expiresAt'
+        ]) &&
+        isValidId(request.auth.uid) &&
+        data.authorUid == request.auth.uid &&
+        data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 100 &&
+        data.authorPhoto is string && data.authorPhoto.size() <= 1000 &&
+        data.type in ['image', 'video', 'text'] &&
+        data.mediaUrl is string && data.mediaUrl.size() <= 2000 &&
+        data.thumbnailUrl is string && data.thumbnailUrl.size() <= 2000 &&
+        data.cloudinaryPublicId is string && data.cloudinaryPublicId.size() <= 500 &&
+        data.cloudinaryResourceType in ['image', 'video', 'raw', ''] &&
+        data.cloudinaryDeliveryType in ['upload', 'authenticated', 'none'] &&
+        data.caption is string && data.caption.size() <= 300 &&
+        data.textContent is string && data.textContent.size() <= 700 &&
+        data.bgGradient is string && data.bgGradient.size() <= 120 &&
+        data.textStyle in ['classic', 'bold', 'editorial', 'mono'] &&
+        data.durationSec is number && data.durationSec >= 0 && data.durationSec <= 60 &&
+        isValidAudioTrack(data.audioTrack) &&
+        (!('whatsappCta' in data) || isValidWhatsAppCta(data.whatsappCta)) &&
+        (!('videoEdits' in data) || isValidVideoEdits(data.videoEdits)) &&
+        data.privacyMode in ['public', 'friends', 'followers', 'selected', 'except', 'only_me'] &&
+        data.allowedUids is list && data.allowedUids.size() <= 200 &&
+        (data.allowedUids.size() == 0 || isValidId(data.allowedUids[0])) &&
+        data.excludedUids is list && data.excludedUids.size() <= 200 &&
+        (data.excludedUids.size() == 0 || isValidId(data.excludedUids[0])) &&
+        data.viewsCount == 0 &&
+        data.likesCount == 0 &&
+        data.createdAt == request.time &&
+        data.expiresAt is timestamp &&
+        data.expiresAt > request.time &&
+        data.expiresAt <= request.time + duration.value(25, 'h');
+    }
+
+    // --- catalog_products Collection ---
+    // Public reads ONLY active products; drafts and all writes strictly restricted to Super Admin
+    match /catalog_products/{productId} {
+      allow read: if (resource != null && resource.data.isActive == true) || isAdmin();
+      allow create: if isAdmin() &&
+        request.resource.data.keys().hasAll([
+          'name', 'originalPrice', 'stock', 'category', 'imageUrls', 'isActive', 'createdAt', 'updatedAt'
+        ]) &&
+        request.resource.data.name is string && request.resource.data.name.size() >= 1 && request.resource.data.name.size() <= 200 &&
+        request.resource.data.originalPrice is number && request.resource.data.originalPrice > 0 &&
+        request.resource.data.stock is number && request.resource.data.stock >= 0 &&
+        request.resource.data.category is string && request.resource.data.category.size() >= 1 &&
+        request.resource.data.imageUrls is list &&
+        request.resource.data.isActive is bool;
+      allow update: if isAdmin() &&
+        request.resource.data.name is string && request.resource.data.name.size() >= 1 &&
+        request.resource.data.originalPrice is number && request.resource.data.originalPrice > 0 &&
+        request.resource.data.stock is number && request.resource.data.stock >= 0 &&
+        request.resource.data.isActive is bool;
+      allow delete: if isAdmin();
+    }
+
+    // --- Users Collection ---
+    match /users/{userId} {
+      // Owner can get their own document; only Super Admin can list all users
+      allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isAdmin() || (
+        isSignedIn() && request.auth.uid == userId &&
+        !request.resource.data.keys().hasAny(['isAdmin', 'admin', 'role', 'permissions', 'isSuperAdmin']) &&
+        (!('uid' in request.resource.data) || request.resource.data.uid == userId) &&
+        (!('statusPrivacy' in request.resource.data) || isValidStatusPrivacy(request.resource.data.statusPrivacy))
+      );
+      allow update: if isAdmin() || (
+        isSignedIn() && request.auth.uid == userId &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['isAdmin', 'admin', 'role', 'permissions', 'isSuperAdmin']) &&
+        (!('uid' in request.resource.data.diff(resource.data).affectedKeys()) || (('uid' in request.resource.data) && request.resource.data.uid == userId)) &&
+        (!('statusPrivacy' in request.resource.data.diff(resource.data).affectedKeys()) || (('statusPrivacy' in request.resource.data) && isValidStatusPrivacy(request.resource.data.statusPrivacy)))
+      );
+      allow delete: if isAdmin();
+
+      // Nested Subcollection: /users/{userId}/channel_uploads/{uploadId}
+      match /channel_uploads/{uploadId} {
+        allow read: if true;
+        allow create, update, delete: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      }
+
+      // Nested Subcollection: /users/{userId}/downloads/{downloadId}
+      match /downloads/{downloadId} {
+        allow read, write: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      }
+    }
+
+    // --- Public Profiles Collection ---
+    match /publicProfiles/{userId} {
+      allow read: if true;
+
+      allow create: if isAdmin() || (
+        isSignedIn() && isValidId(userId) && (
+          // Owner creating their own public profile (zero initial follow counters; never self-verifiable)
+          (
+            request.auth.uid == userId &&
+            request.resource.data.keys().hasOnly([
+              'uid', 'displayName', 'name', 'displayNameLower', 'username', 'usernameLower',
+              'photoURL', 'bio', 'socialLinks', 'followersCount', 'followingCount', 'createdAt', 'updatedAt'
+            ]) &&
+            (!('uid' in request.resource.data) || request.resource.data.uid == userId) &&
+            (!('followersCount' in request.resource.data) || request.resource.data.followersCount == 0) &&
+            (!('followingCount' in request.resource.data) || (
+              request.resource.data.followingCount == 0 || (
+                request.resource.data.followingCount == 1 &&
+                existsAfter(/databases/$(database)/documents/users/$(userId)) &&
+                isValidId(getAfter(/databases/$(database)/documents/users/$(userId)).data._socialSyncUid) &&
+                getAfter(/databases/$(database)/documents/users/$(userId)).data._socialSyncUid != userId &&
+                followEdgeDelta(userId + '_' + getAfter(/databases/$(database)/documents/users/$(userId)).data._socialSyncUid) == 1 &&
+                !isBlockedBetween(userId, getAfter(/databases/$(database)/documents/users/$(userId)).data._socialSyncUid)
+              )
+            )) &&
+            (!('username' in request.resource.data) || (
+              isValidUsername(request.resource.data.username) &&
+              request.resource.data.usernameLower == request.resource.data.username &&
+              existsAfter(/databases/$(database)/documents/usernames/$(request.resource.data.username)) &&
+              getAfter(/databases/$(database)/documents/usernames/$(request.resource.data.username)).data.uid == request.auth.uid
+            )) &&
+            (!('socialLinks' in request.resource.data) || isValidSocialLinksMap(request.resource.data.socialLinks))
+          ) ||
+          // Follower initializing a missing legacy creator profile doc atomically inside a follow transaction
+          (
+            request.auth.uid != userId &&
+            request.resource.data.keys().hasAll(['uid', 'followersCount', 'followingCount', 'updatedAt']) &&
+            request.resource.data.keys().hasOnly(['uid', 'followersCount', 'followingCount', 'updatedAt']) &&
+            request.resource.data.uid == userId &&
+            request.resource.data.followersCount == 1 &&
+            request.resource.data.followingCount == 0 &&
+            followEdgeDelta(request.auth.uid + '_' + userId) == 1 &&
+            !isBlockedBetween(request.auth.uid, userId)
+          )
+        )
+      );
+
+      allow update: if isAdmin() || (
+        isSignedIn() && (
+          // Owner editing own profile metadata (cannot tamper with counters or isVerified)
+          (
+            request.auth.uid == userId &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'uid', 'displayName', 'name', 'displayNameLower', 'username', 'usernameLower',
+              'photoURL', 'bio', 'socialLinks', 'followersCount', 'followingCount', 'createdAt', 'updatedAt'
+            ]) &&
+            (!('uid' in request.resource.data.diff(resource.data).affectedKeys()) || (('uid' in request.resource.data) && request.resource.data.uid == userId)) &&
+            (!('followersCount' in request.resource.data.diff(resource.data).affectedKeys()) || (!('followersCount' in resource.data) && request.resource.data.followersCount == 0)) &&
+            (!('followingCount' in request.resource.data.diff(resource.data).affectedKeys()) || (!('followingCount' in resource.data) && request.resource.data.followingCount == 0)) &&
+            (!('displayName' in request.resource.data.diff(resource.data).affectedKeys()) || (request.resource.data.displayName is string && request.resource.data.displayName.size() <= 100)) &&
+            (!('displayNameLower' in request.resource.data.diff(resource.data).affectedKeys()) || (request.resource.data.displayNameLower is string && request.resource.data.displayNameLower.size() <= 100)) &&
+            (!('bio' in request.resource.data.diff(resource.data).affectedKeys()) || (request.resource.data.bio is string && request.resource.data.bio.size() <= 500)) &&
+            (!('socialLinks' in request.resource.data.diff(resource.data).affectedKeys()) || isValidSocialLinksMap(request.resource.data.socialLinks)) &&
+            (
+              (!('username' in request.resource.data.diff(resource.data).affectedKeys()) &&
+               !('usernameLower' in request.resource.data.diff(resource.data).affectedKeys())) ||
+              (
+                ('username' in request.resource.data) &&
+                ('usernameLower' in request.resource.data) &&
+                isValidUsername(request.resource.data.username) &&
+                request.resource.data.usernameLower == request.resource.data.username &&
+                existsAfter(/databases/$(database)/documents/usernames/$(request.resource.data.username)) &&
+                getAfter(/databases/$(database)/documents/usernames/$(request.resource.data.username)).data.uid == request.auth.uid &&
+                (
+                  !('username' in resource.data) ||
+                  !isValidUsername(resource.data.username) ||
+                  resource.data.username == request.resource.data.username ||
+                  !exists(/databases/$(database)/documents/usernames/$(resource.data.username)) ||
+                  get(/databases/$(database)/documents/usernames/$(resource.data.username)).data.uid != request.auth.uid ||
+                  !existsAfter(/databases/$(database)/documents/usernames/$(resource.data.username))
+                )
+              )
+            )
+          ) ||
+          // Actor updating own counters atomically paired with /users/{me}._socialSyncUid & /follows edge change
+          (
+            request.auth.uid == userId &&
+            existsAfter(/databases/$(database)/documents/users/$(userId)) &&
+            isValidFollowCounterSync(userId, getAfter(/databases/$(database)/documents/users/$(userId)).data._socialSyncUid)
+          ) ||
+          // Actor updating target profile counters atomically paired with /follows edge change
+          (
+            request.auth.uid != userId &&
+            isValidFollowCounterSync(userId, request.auth.uid)
+          )
+        )
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // --- Unique Usernames Collection (/usernames/{username}) ---
+    match /usernames/{username} {
+      allow get: if true;
+      allow list: if isAdmin();
+      allow create: if isSignedIn() &&
+        isValidUsername(username) &&
+        request.resource.data.keys().hasAll(['uid', 'username', 'createdAt']) &&
+        request.resource.data.keys().hasOnly(['uid', 'username', 'createdAt']) &&
+        request.resource.data.uid == request.auth.uid &&
+        request.resource.data.username == username &&
+        request.resource.data.createdAt == request.time &&
+        existsAfter(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)) &&
+        ('username' in getAfter(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)).data) &&
+        ('usernameLower' in getAfter(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)).data) &&
+        getAfter(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)).data.username == username &&
+        getAfter(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)).data.usernameLower == username;
+      allow update: if false;
+      allow delete: if isAdmin() || (
+        isSignedIn() &&
+        resource.data.uid == request.auth.uid && (
+          !existsAfter(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)) ||
+          !('username' in getAfter(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)).data) ||
+          getAfter(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)).data.username != username
+        )
+      );
+    }
+
+    // --- Videos Collection ---
+    match /videos/{videoId} {
+      // 1. Public reads published videos; unpublished/rejected visible only to owner or Super Admin
+      allow read: if isAdmin() || isVideoOwner(resource.data) || (
+        resource != null &&
+        resource.data.publicationStatus != 'unpublished' &&
+        resource.data.publicationStatus != 'rejected' &&
+        resource.data.status != 'unpublished' &&
+        resource.data.status != 'rejected'
+      );
+
+      // 2. Authenticated user can create their own video with validated initial counters
+      allow create: if isSignedIn() && isValidId(videoId) && (
+        isAdmin() || (
+          (('userId' in request.resource.data && request.resource.data.userId == request.auth.uid) ||
+           ('uid' in request.resource.data && request.resource.data.uid == request.auth.uid)) &&
+          request.resource.data.keys().hasAll(['title', 'createdAt']) &&
+          request.resource.data.keys().hasOnly([
+            'url', 'videoUrl', 'thumbnailUrl', 'title', 'caption', 'userId', 'uid',
+            'uploaderPhoto', 'channelAvatar', 'uploaderName', 'channelName',
+            'contentType', 'publicationStatus', 'status',
+            'likes', 'views', 'commentsCount', 'createdAt', 'type', 'duration'
+          ]) &&
+          request.resource.data.title is string && request.resource.data.title.size() >= 1 && request.resource.data.title.size() <= 200 &&
+          (!('caption' in request.resource.data) || (request.resource.data.caption is string && request.resource.data.caption.size() <= 500)) &&
+          (!('likes' in request.resource.data) || request.resource.data.likes == 0) &&
+          (!('views' in request.resource.data) || request.resource.data.views == 0) &&
+          (!('commentsCount' in request.resource.data) || request.resource.data.commentsCount == 0) &&
+          (!('publicationStatus' in request.resource.data) || request.resource.data.publicationStatus == 'published') &&
+          request.resource.data.createdAt == request.time
+        )
+      );
+
+      // 3. Strict update logic: exactly one branch must be satisfied
+      allow update: if (
+        // Branch A: Super Admin full access
+        isAdmin() ||
+
+        // Branch B: Video creator metadata update (strictly excludes ownership, URLs, createdAt, status, and counters)
+        (
+          isVideoOwner(resource.data) &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+            'userId', 'uid', 'url', 'videoUrl', 'createdAt', 'likes', 'views', 'commentsCount', 'publicationStatus', 'status'
+          ])
+        ) ||
+
+        // Branch C1: Atomic Like increment (+1) coupled with like document creation
+        (
+          isSignedIn() &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes']) &&
+          request.resource.data.likes == (getDocLikes(resource.data) + 1) &&
+          !exists(/databases/$(database)/documents/videos/$(videoId)/likes/$(request.auth.uid)) &&
+          existsAfter(/databases/$(database)/documents/videos/$(videoId)/likes/$(request.auth.uid))
+        ) ||
+
+        // Branch C2: Atomic Unlike decrement (-1) coupled with like document deletion
+        (
+          isSignedIn() &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes']) &&
+          request.resource.data.likes == (getDocLikes(resource.data) > 0 ? getDocLikes(resource.data) - 1 : 0) &&
+          exists(/databases/$(database)/documents/videos/$(videoId)/likes/$(request.auth.uid)) &&
+          !existsAfter(/databases/$(database)/documents/videos/$(videoId)/likes/$(request.auth.uid))
+        ) ||
+
+        // Branch D: Atomic View increment (+1) strictly requiring authenticated viewer and view doc creation
+        (
+          isSignedIn() &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['views']) &&
+          request.resource.data.views == (getDocViews(resource.data) + 1) &&
+          !exists(/databases/$(database)/documents/videos/$(videoId)/views/$(request.auth.uid)) &&
+          existsAfter(/databases/$(database)/documents/videos/$(videoId)/views/$(request.auth.uid))
+        ) ||
+
+        // Branch E1: Atomic Comment create increment (+1) coupled with new comment doc creation
+        (
+          isSignedIn() &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['commentsCount', 'lastCommentId']) &&
+          request.resource.data.commentsCount == getDocCounter(resource.data, 'commentsCount') + 1 &&
+          isValidId(request.resource.data.lastCommentId) &&
+          request.resource.data.lastCommentId.matches('^' + request.auth.uid + '_.*') &&
+          !exists(/databases/$(database)/documents/videos/$(videoId)/comments/$(request.resource.data.lastCommentId)) &&
+          existsAfter(/databases/$(database)/documents/videos/$(videoId)/comments/$(request.resource.data.lastCommentId))
+        ) ||
+
+        // Branch E2: Atomic Comment delete decrement (-1) coupled with comment doc deletion
+        (
+          isSignedIn() &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['commentsCount', 'lastDeletedCommentId']) &&
+          request.resource.data.commentsCount == (getDocCounter(resource.data, 'commentsCount') > 0 ? getDocCounter(resource.data, 'commentsCount') - 1 : 0) &&
+          isValidId(request.resource.data.lastDeletedCommentId) &&
+          exists(/databases/$(database)/documents/videos/$(videoId)/comments/$(request.resource.data.lastDeletedCommentId)) &&
+          !existsAfter(/databases/$(database)/documents/videos/$(videoId)/comments/$(request.resource.data.lastDeletedCommentId))
+        )
+      );
+
+      // 4. Video deletion (Creator or Super Admin only)
+      allow delete: if isSignedIn() && (isVideoOwner(resource.data) || isAdmin());
+
+      // --- Likes Subcollection: /videos/{videoId}/likes/{userId} ---
+      match /likes/{userId} {
+        allow read: if true;
+
+        allow create: if isSignedIn() &&
+          request.auth.uid == userId &&
+          request.resource.data.userId == request.auth.uid &&
+          request.resource.data.keys().hasOnly(['userId', 'displayName', 'photoURL', 'createdAt']) &&
+          exists(/databases/$(database)/documents/videos/$(videoId));
+
+        allow delete: if isAdmin() || (
+          isSignedIn() &&
+          request.auth.uid == userId
+        );
+
+        allow update: if false;
+      }
+
+      // --- Views Subcollection: /videos/{videoId}/views/{viewerId} ---
+      match /views/{viewerId} {
+        allow read: if (isSignedIn() && request.auth.uid == viewerId) || isAdmin();
+
+        allow create: if isSignedIn() &&
+          request.auth.uid == viewerId &&
+          request.resource.data.viewerId == request.auth.uid &&
+          exists(/databases/$(database)/documents/videos/$(videoId));
+
+        allow update: if false;
+        allow delete: if isAdmin();
+      }
+
+      // --- Comments Subcollection: /videos/{videoId}/comments/{commentId} ---
+      match /comments/{commentId} {
+        allow read: if true;
+
+        allow create: if isSignedIn() &&
+          isValidId(commentId) &&
+          commentId.matches('^' + request.auth.uid + '_.*') &&
+          request.resource.data.keys().hasAll(['authorUid', 'authorName', 'authorPhoto', 'text', 'createdAt']) &&
+          request.resource.data.keys().hasOnly(['authorUid', 'authorName', 'authorPhoto', 'text', 'createdAt']) &&
+          request.resource.data.authorUid == request.auth.uid &&
+          request.resource.data.authorName is string && request.resource.data.authorName.size() <= 100 &&
+          request.resource.data.authorPhoto is string && request.resource.data.authorPhoto.size() <= 1000 &&
+          request.resource.data.text is string && request.resource.data.text.size() >= 1 && request.resource.data.text.size() <= 500 &&
+          request.resource.data.createdAt == request.time &&
+          exists(/databases/$(database)/documents/videos/$(videoId));
+
+        allow update: if false;
+        allow delete: if isAdmin() || (
+          isSignedIn() && (
+            resource.data.authorUid == request.auth.uid ||
+            isVideoOwner(get(/databases/$(database)/documents/videos/$(videoId)).data)
+          )
+        );
+      }
+    }
+
+    // --- user_posts Collection (Centralized Home Social Photo/Post Feed) ---
+    match /user_posts/{postId} {
+      allow read: if isAdmin() || (
+        resource != null && (
+          resource.data.publicationStatus == 'published' ||
+          (isSignedIn() && resource.data.authorUid == request.auth.uid)
+        )
+      );
+
+      allow create: if isSignedIn() &&
+        isValidId(postId) &&
+        request.resource.data.keys().hasAll([
+          'contentType', 'publicationStatus', 'authorUid', 'authorName', 'authorPhoto',
+          'mediaUrl', 'thumbnailUrl', 'caption', 'likesCount', 'commentsCount', 'createdAt', 'updatedAt'
+        ]) &&
+        request.resource.data.keys().hasOnly([
+          'contentType', 'publicationStatus', 'authorUid', 'authorName', 'authorPhoto',
+          'mediaUrl', 'thumbnailUrl', 'caption', 'likesCount', 'commentsCount',
+          'source', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(request.auth.uid) &&
+        request.resource.data.authorUid == request.auth.uid &&
+        request.resource.data.authorName is string && request.resource.data.authorName.size() >= 1 && request.resource.data.authorName.size() <= 100 &&
+        request.resource.data.authorPhoto is string && request.resource.data.authorPhoto.size() <= 1000 &&
+        request.resource.data.contentType in ['photo', 'video'] &&
+        request.resource.data.publicationStatus == 'published' &&
+        request.resource.data.mediaUrl is string && request.resource.data.mediaUrl.size() >= 10 && request.resource.data.mediaUrl.size() <= 2000 &&
+        request.resource.data.thumbnailUrl is string && request.resource.data.thumbnailUrl.size() <= 2000 &&
+        request.resource.data.caption is string && request.resource.data.caption.size() <= 500 &&
+        request.resource.data.likesCount == 0 &&
+        request.resource.data.commentsCount == 0 &&
+        request.resource.data.createdAt == request.time &&
+        request.resource.data.updatedAt == request.time;
+
+      allow update: if isAdmin() || (
+        isSignedIn() && (
+          // Owner caption edit
+          (
+            resource.data.authorUid == request.auth.uid &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['caption', 'updatedAt']) &&
+            request.resource.data.caption is string && request.resource.data.caption.size() <= 500 &&
+            request.resource.data.updatedAt == request.time
+          ) ||
+          // Atomic Like (+1)
+          (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likesCount']) &&
+            request.resource.data.likesCount == getDocCounter(resource.data, 'likesCount') + 1 &&
+            !exists(/databases/$(database)/documents/user_posts/$(postId)/likes/$(request.auth.uid)) &&
+            existsAfter(/databases/$(database)/documents/user_posts/$(postId)/likes/$(request.auth.uid))
+          ) ||
+          // Atomic Unlike (-1)
+          (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likesCount']) &&
+            request.resource.data.likesCount == (getDocCounter(resource.data, 'likesCount') > 0 ? getDocCounter(resource.data, 'likesCount') - 1 : 0) &&
+            exists(/databases/$(database)/documents/user_posts/$(postId)/likes/$(request.auth.uid)) &&
+            !existsAfter(/databases/$(database)/documents/user_posts/$(postId)/likes/$(request.auth.uid))
+          ) ||
+          // Atomic Comment create (+1)
+          (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['commentsCount', 'lastCommentId']) &&
+            request.resource.data.commentsCount == getDocCounter(resource.data, 'commentsCount') + 1 &&
+            isValidId(request.resource.data.lastCommentId) &&
+            request.resource.data.lastCommentId.matches('^' + request.auth.uid + '_.*') &&
+            !exists(/databases/$(database)/documents/user_posts/$(postId)/comments/$(request.resource.data.lastCommentId)) &&
+            existsAfter(/databases/$(database)/documents/user_posts/$(postId)/comments/$(request.resource.data.lastCommentId))
+          ) ||
+          // Atomic Comment delete (-1)
+          (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['commentsCount', 'lastDeletedCommentId']) &&
+            request.resource.data.commentsCount == (getDocCounter(resource.data, 'commentsCount') > 0 ? getDocCounter(resource.data, 'commentsCount') - 1 : 0) &&
+            isValidId(request.resource.data.lastDeletedCommentId) &&
+            exists(/databases/$(database)/documents/user_posts/$(postId)/comments/$(request.resource.data.lastDeletedCommentId)) &&
+            !existsAfter(/databases/$(database)/documents/user_posts/$(postId)/comments/$(request.resource.data.lastDeletedCommentId))
+          )
+        )
+      );
+
+      allow delete: if isAdmin() || (isSignedIn() && resource.data.authorUid == request.auth.uid);
+
+      match /likes/{userId} {
+        allow read: if true;
+        allow create: if isSignedIn() &&
+          request.auth.uid == userId &&
+          request.resource.data.userId == request.auth.uid &&
+          request.resource.data.keys().hasOnly(['userId', 'displayName', 'photoURL', 'createdAt']) &&
+          exists(/databases/$(database)/documents/user_posts/$(postId));
+        allow delete: if isAdmin() || (isSignedIn() && request.auth.uid == userId);
+        allow update: if false;
+      }
+
+      match /comments/{commentId} {
+        allow read: if true;
+        allow create: if isSignedIn() &&
+          isValidId(commentId) &&
+          commentId.matches('^' + request.auth.uid + '_.*') &&
+          request.resource.data.keys().hasAll(['authorUid', 'authorName', 'authorPhoto', 'text', 'createdAt']) &&
+          request.resource.data.keys().hasOnly(['authorUid', 'authorName', 'authorPhoto', 'text', 'createdAt']) &&
+          request.resource.data.authorUid == request.auth.uid &&
+          request.resource.data.authorName is string && request.resource.data.authorName.size() <= 100 &&
+          request.resource.data.authorPhoto is string && request.resource.data.authorPhoto.size() <= 1000 &&
+          request.resource.data.text is string && request.resource.data.text.size() >= 1 && request.resource.data.text.size() <= 500 &&
+          request.resource.data.createdAt == request.time &&
+          exists(/databases/$(database)/documents/user_posts/$(postId));
+        allow update: if false;
+        allow delete: if isAdmin() || (
+          isSignedIn() && (
+            resource.data.authorUid == request.auth.uid ||
+            get(/databases/$(database)/documents/user_posts/$(postId)).data.authorUid == request.auth.uid
+          )
+        );
+      }
+    }
+
+    // --- king_games Collection ---
+    // Public reads ONLY approved & published games; pending, rejected, unpublished & all writes strictly Super Admin
+    match /king_games/{gameId} {
+      allow read: if isAdmin() || (
+        resource != null &&
+        resource.data.status != 'pending' &&
+        resource.data.status != 'rejected' &&
+        resource.data.status != 'unpublished' &&
+        resource.data.publicationStatus != 'unpublished' &&
+        resource.data.approved != false &&
+        resource.data.isApproved != false
+      );
+      allow create, update, delete: if isAdmin();
+    }
+
+    // --- user_uploaded_games Collection ---
+    // User submits game drafts for review; protected by creation and update whitelists; Admin approves or rejects
+    match /user_uploaded_games/{gameId} {
+      allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+
+      allow create: if isSignedIn() &&
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.keys().hasOnly([
+          'userId', 'userEmail', 'title', 'category', 'description', 'thumbnailUrl', 'gameUrl',
+          'status', 'createdAt', 'plays', 'earnings',
+          'gameOverText', 'template', 'speed', 'jump', 'gap', 'difficulty', 'control',
+          'bgColor', 'map', 'pipeStyle', 'building', 'decoration', 'isEngineGame', 'isPhase2',
+          'playerEmoji', 'playerBase64', 'bgBase64', 'obstacleType', 'gapSize', 'levels'
+        ]) &&
+        (!('plays' in request.resource.data) || (request.resource.data.plays is number && request.resource.data.plays == 0)) &&
+        (!('earnings' in request.resource.data) || (request.resource.data.earnings is number && request.resource.data.earnings == 0));
+
+      allow update: if isAdmin() || (
+        isSignedIn() &&
+        resource.data.userId == request.auth.uid &&
+        resource.data.status == 'pending' &&
+        request.resource.data.userId == resource.data.userId &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'title', 'category', 'description', 'thumbnailUrl', 'gameUrl',
+          'gameOverText', 'template', 'speed', 'jump', 'gap', 'difficulty', 'control',
+          'bgColor', 'map', 'pipeStyle', 'building', 'decoration', 'isEngineGame', 'isPhase2',
+          'playerEmoji', 'playerBase64', 'bgBase64', 'obstacleType', 'gapSize', 'levels'
+        ])
+      );
+
+      allow delete: if isAdmin() || (
+        isSignedIn() &&
+        resource.data.userId == request.auth.uid &&
+        resource.data.status == 'pending'
+      );
+    }
+
+    // --- user_notifications Collection ---
+    // User reads own notifications and can update only 'read' to boolean; Admin creates/deletes
+    match /user_notifications/{notificationId} {
+      allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAdmin();
+      allow update: if isAdmin() || (
+        isSignedIn() &&
+        resource.data.userId == request.auth.uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']) &&
+        request.resource.data.read is bool
+      );
+      allow delete: if isAdmin();
+    }
+
+
+    // --- Blocks Collection (/blocks/{blockerUid_blockedUid}) ---
+    // Only blocker can read/list/delete their own blocks; blocked users cannot enumerate who blocked them
+    match /blocks/{blockId} {
+      allow get: if isAdmin() || (
+        isSignedIn() && (
+          resource == null
+            ? (isValidId(blockId) && blockId.matches('^' + request.auth.uid + '_.*'))
+            : resource.data.blockerUid == request.auth.uid
+        )
+      );
+      allow list: if isAdmin() || (
+        isSignedIn() && resource.data.blockerUid == request.auth.uid
+      );
+      allow create: if isSignedIn() &&
+        request.resource.data.keys().hasOnly(['blockerUid', 'blockedUid', 'createdAt']) &&
+        isValidId(request.auth.uid) &&
+        request.resource.data.blockerUid == request.auth.uid &&
+        isValidId(request.resource.data.blockedUid) &&
+        request.resource.data.blockedUid != request.auth.uid &&
+        isValidId(blockId) &&
+        blockId == request.resource.data.blockerUid + '_' + request.resource.data.blockedUid &&
+        request.resource.data.createdAt == request.time;
+      allow update: if false;
+      allow delete: if isAdmin() || (
+        isSignedIn() && resource.data.blockerUid == request.auth.uid
+      );
+    }
+
+    // --- Friendships & Friend Requests Collection (/friendships/{minUid_maxUid}) ---
+    // Canonical sorted pair ID prevents duplicate or simultaneous cross-direction requests
+    match /friendships/{pairId} {
+      allow get: if isAdmin() || (
+        isSignedIn() && (
+          resource == null
+            ? (isValidId(pairId) && (pairId.matches('^' + request.auth.uid + '_.*') || pairId.matches('.*_' + request.auth.uid + '$')))
+            : (request.auth.uid in resource.data.users)
+        )
+      );
+      allow list: if isAdmin() || (
+        isSignedIn() && request.auth.uid in resource.data.users
+      );
+      allow create: if isSignedIn() &&
+        request.resource.data.keys().hasOnly([
+          'userA', 'userB', 'users', 'status', 'requestedBy', 'targetUid', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(request.auth.uid) &&
+        isValidId(request.resource.data.userA) &&
+        isValidId(request.resource.data.userB) &&
+        request.resource.data.userA < request.resource.data.userB &&
+        isValidId(pairId) &&
+        pairId == request.resource.data.userA + '_' + request.resource.data.userB &&
+        request.resource.data.users is list &&
+        request.resource.data.users.size() == 2 &&
+        request.resource.data.userA in request.resource.data.users &&
+        request.resource.data.userB in request.resource.data.users &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.requestedBy == request.auth.uid &&
+        isValidId(request.resource.data.targetUid) &&
+        request.resource.data.targetUid != request.auth.uid &&
+        request.resource.data.requestedBy in request.resource.data.users &&
+        request.resource.data.targetUid in request.resource.data.users &&
+        request.resource.data.createdAt == request.time &&
+        request.resource.data.updatedAt == request.time &&
+        !isBlockedBetween(request.resource.data.userA, request.resource.data.userB);
+
+      // Only the recipient (targetUid) can accept a pending request; no tampering with participants
+      allow update: if isAdmin() || (
+        isSignedIn() &&
+        resource.data.status == 'pending' &&
+        resource.data.targetUid == request.auth.uid &&
+        request.resource.data.status == 'accepted' &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']) &&
+        request.resource.data.updatedAt == request.time &&
+        !isBlockedBetween(resource.data.userA, resource.data.userB)
+      );
+
+      // Either participant can cancel outgoing request, reject incoming request, or remove friend
+      allow delete: if isAdmin() || (
+        isSignedIn() && request.auth.uid in resource.data.users
+      );
+    }
+
+    // --- Follows Collection (/follows/{followerUid_targetUid}) ---
+    // Contains only UIDs and createdAt (no PII) so Followers/Following lists load cleanly on creator profiles.
+    match /follows/{followId} {
+      allow get, list: if true;
+      allow create: if isSignedIn() &&
+        request.resource.data.keys().hasOnly(['followerUid', 'targetUid', 'createdAt']) &&
+        isValidId(request.auth.uid) &&
+        request.resource.data.followerUid == request.auth.uid &&
+        isValidId(request.resource.data.targetUid) &&
+        request.resource.data.targetUid != request.auth.uid &&
+        isValidId(followId) &&
+        followId == request.resource.data.followerUid + '_' + request.resource.data.targetUid &&
+        request.resource.data.createdAt == request.time &&
+        !isBlockedBetween(request.resource.data.followerUid, request.resource.data.targetUid) &&
+        isProfileCounterIncrementedOnFollow(request.resource.data.followerUid, 'followingCount') &&
+        isProfileCounterIncrementedOnFollow(request.resource.data.targetUid, 'followersCount');
+      allow update: if false;
+      allow delete: if isAdmin() || (
+        isSignedIn() && (
+          resource.data.followerUid == request.auth.uid ||
+          resource.data.targetUid == request.auth.uid
+        ) &&
+        isProfileCounterDecrementedOnUnfollow(resource.data.followerUid, 'followingCount') &&
+        isProfileCounterDecrementedOnUnfollow(resource.data.targetUid, 'followersCount')
+      );
+    }
+
+    // --- Statuses Collection (/statuses/{statusId}) ---
+    // Multi-user feed listing is delegated to authenticated backend /api/status/feed;
+    // clients can only list their own statuses directly, while single-doc gets enforce full privacy + expiry + blocks.
+    match /statuses/{statusId} {
+      allow get: if canViewStatusDoc(resource.data);
+      allow list: if isAdmin() || (isSignedIn() && resource.data.authorUid == request.auth.uid);
+      allow create: if isSignedIn() && isValidId(statusId) && isValidStatusCreate(request.resource.data);
+      allow update: if isAdmin() || (
+        isSignedIn() && (
+          // Atomic unique view increment (+1) coupled with status_views/{statusId}_{viewerUid} creation; owner cannot view own
+          (
+            resource.data.authorUid != request.auth.uid &&
+            canViewStatusDoc(resource.data) &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['viewsCount']) &&
+            request.resource.data.viewsCount == getDocCounter(resource.data, 'viewsCount') + 1 &&
+            !exists(/databases/$(database)/documents/status_views/$(statusId + '_' + request.auth.uid)) &&
+            existsAfter(/databases/$(database)/documents/status_views/$(statusId + '_' + request.auth.uid))
+          ) ||
+          // Atomic reaction increment (+1) coupled with status_likes/{statusId}_{userUid} creation
+          (
+            resource.data.authorUid != request.auth.uid &&
+            canViewStatusDoc(resource.data) &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likesCount']) &&
+            request.resource.data.likesCount == getDocCounter(resource.data, 'likesCount') + 1 &&
+            !exists(/databases/$(database)/documents/status_likes/$(statusId + '_' + request.auth.uid)) &&
+            existsAfter(/databases/$(database)/documents/status_likes/$(statusId + '_' + request.auth.uid))
+          ) ||
+          // Atomic unreact decrement (-1) coupled with status_likes/{statusId}_{userUid} deletion
+          (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likesCount']) &&
+            request.resource.data.likesCount == (getDocCounter(resource.data, 'likesCount') > 0 ? getDocCounter(resource.data, 'likesCount') - 1 : 0) &&
+            exists(/databases/$(database)/documents/status_likes/$(statusId + '_' + request.auth.uid)) &&
+            !existsAfter(/databases/$(database)/documents/status_likes/$(statusId + '_' + request.auth.uid))
+          )
+        )
+      );
+      allow delete: if isAdmin() || (isSignedIn() && resource.data.authorUid == request.auth.uid);
+    }
+
+    // --- Status Views Collection (/status_views/{statusId}_{viewerUid}) ---
+    // Deterministic doc ID prevents duplicate views; owner cannot count own view; viewer list strictly owner-only.
+    match /status_views/{viewId} {
+      allow get: if isAdmin() || (
+        isSignedIn() && (
+          resource == null
+            ? (isValidId(viewId) && viewId.matches('.*_' + request.auth.uid + '$'))
+            : (resource.data.statusOwnerUid == request.auth.uid || resource.data.viewerUid == request.auth.uid)
+        )
+      );
+      allow list: if isAdmin() || (isSignedIn() && resource.data.statusOwnerUid == request.auth.uid);
+      allow create: if isSignedIn() &&
+        isValidId(viewId) &&
+        request.resource.data.keys().hasAll([
+          'statusId', 'statusOwnerUid', 'viewerUid', 'viewerName', 'viewerPhoto', 'viewedAt', 'expiresAt'
+        ]) &&
+        request.resource.data.keys().hasOnly([
+          'statusId', 'statusOwnerUid', 'viewerUid', 'viewerName', 'viewerPhoto', 'viewedAt', 'expiresAt'
+        ]) &&
+        isValidId(request.resource.data.statusId) &&
+        isValidId(request.resource.data.statusOwnerUid) &&
+        request.resource.data.viewerUid == request.auth.uid &&
+        request.resource.data.statusOwnerUid != request.auth.uid &&
+        viewId == request.resource.data.statusId + '_' + request.auth.uid &&
+        request.resource.data.viewerName is string && request.resource.data.viewerName.size() <= 100 &&
+        request.resource.data.viewerPhoto is string && request.resource.data.viewerPhoto.size() <= 1000 &&
+        request.resource.data.viewedAt == request.time &&
+        request.resource.data.expiresAt is timestamp &&
+        exists(/databases/$(database)/documents/statuses/$(request.resource.data.statusId)) &&
+        get(/databases/$(database)/documents/statuses/$(request.resource.data.statusId)).data.authorUid == request.resource.data.statusOwnerUid &&
+        canViewStatusDoc(get(/databases/$(database)/documents/statuses/$(request.resource.data.statusId)).data);
+      allow update: if false;
+      allow delete: if isAdmin() || (isSignedIn() && resource.data.statusOwnerUid == request.auth.uid);
+    }
+
+    // --- Status Likes / Reactions Collection (/status_likes/{statusId}_{userUid}) ---
+    match /status_likes/{likeId} {
+      allow get: if isAdmin() || (
+        isSignedIn() && (
+          resource == null
+            ? (isValidId(likeId) && likeId.matches('.*_' + request.auth.uid + '$'))
+            : (resource.data.statusOwnerUid == request.auth.uid || resource.data.userUid == request.auth.uid)
+        )
+      );
+      allow list: if isAdmin() || (
+        isSignedIn() && (
+          resource.data.statusOwnerUid == request.auth.uid ||
+          resource.data.userUid == request.auth.uid
+        )
+      );
+      allow create: if isSignedIn() &&
+        isValidId(likeId) &&
+        request.resource.data.keys().hasAll([
+          'statusId', 'statusOwnerUid', 'userUid', 'userName', 'userPhoto', 'emoji', 'createdAt', 'expiresAt'
+        ]) &&
+        request.resource.data.keys().hasOnly([
+          'statusId', 'statusOwnerUid', 'userUid', 'userName', 'userPhoto', 'emoji', 'createdAt', 'expiresAt'
+        ]) &&
+        isValidId(request.resource.data.statusId) &&
+        isValidId(request.resource.data.statusOwnerUid) &&
+        request.resource.data.userUid == request.auth.uid &&
+        request.resource.data.statusOwnerUid != request.auth.uid &&
+        likeId == request.resource.data.statusId + '_' + request.auth.uid &&
+        request.resource.data.userName is string && request.resource.data.userName.size() <= 100 &&
+        request.resource.data.userPhoto is string && request.resource.data.userPhoto.size() <= 1000 &&
+        request.resource.data.emoji in ['❤️', '🔥', '👑', '😂', '😮', '👏'] &&
+        request.resource.data.createdAt == request.time &&
+        request.resource.data.expiresAt is timestamp &&
+        exists(/databases/$(database)/documents/statuses/$(request.resource.data.statusId)) &&
+        get(/databases/$(database)/documents/statuses/$(request.resource.data.statusId)).data.authorUid == request.resource.data.statusOwnerUid &&
+        canViewStatusDoc(get(/databases/$(database)/documents/statuses/$(request.resource.data.statusId)).data);
+      allow update: if isSignedIn() &&
+        resource.data.userUid == request.auth.uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['emoji', 'createdAt']) &&
+        request.resource.data.emoji in ['❤️', '🔥', '👑', '😂', '😮', '👏'] &&
+        request.resource.data.createdAt == request.time &&
+        !isBlockedBetween(request.auth.uid, resource.data.statusOwnerUid);
+      allow delete: if isAdmin() || (
+        isSignedIn() && (
+          resource.data.userUid == request.auth.uid ||
+          resource.data.statusOwnerUid == request.auth.uid
+        )
+      );
+    }
+
+    // --- Status Private Replies Collection (/status_replies/{replyId}) ---
+    // Strictly readable only by sender and status owner.
+    match /status_replies/{replyId} {
+      allow get, list: if isAdmin() || (
+        isSignedIn() && (
+          resource.data.statusOwnerUid == request.auth.uid ||
+          resource.data.senderUid == request.auth.uid
+        )
+      );
+      allow create: if isSignedIn() &&
+        isValidId(replyId) &&
+        request.resource.data.keys().hasAll([
+          'statusId', 'statusOwnerUid', 'senderUid', 'senderName', 'senderPhoto', 'message', 'createdAt', 'expiresAt'
+        ]) &&
+        request.resource.data.keys().hasOnly([
+          'statusId', 'statusOwnerUid', 'senderUid', 'senderName', 'senderPhoto', 'message', 'createdAt', 'expiresAt'
+        ]) &&
+        isValidId(request.resource.data.statusId) &&
+        isValidId(request.resource.data.statusOwnerUid) &&
+        request.resource.data.senderUid == request.auth.uid &&
+        request.resource.data.statusOwnerUid != request.auth.uid &&
+        request.resource.data.senderName is string && request.resource.data.senderName.size() <= 100 &&
+        request.resource.data.senderPhoto is string && request.resource.data.senderPhoto.size() <= 1000 &&
+        request.resource.data.message is string &&
+        request.resource.data.message.size() >= 1 &&
+        request.resource.data.message.size() <= 500 &&
+        request.resource.data.createdAt == request.time &&
+        request.resource.data.expiresAt is timestamp &&
+        exists(/databases/$(database)/documents/statuses/$(request.resource.data.statusId)) &&
+        get(/databases/$(database)/documents/statuses/$(request.resource.data.statusId)).data.authorUid == request.resource.data.statusOwnerUid &&
+        canViewStatusDoc(get(/databases/$(database)/documents/statuses/$(request.resource.data.statusId)).data);
+      allow update: if false;
+      allow delete: if isAdmin() || (
+        isSignedIn() && (
+          resource.data.senderUid == request.auth.uid ||
+          resource.data.statusOwnerUid == request.auth.uid
+        )
+      );
+    }
+
+    // --- Notifications Collection (/notifications/{notificationId}) ---
+    // Recipient reads and marks read; actors can only emit verified status or follow notifications when not blocked.
+    match /notifications/{notificationId} {
+      allow get: if isAdmin() || (
+        isSignedIn() && (
+          resource == null
+            ? isValidId(notificationId)
+            : (
+                resource.data.recipientUid == request.auth.uid ||
+                (
+                  resource.data.actorUid == request.auth.uid &&
+                  resource.data.type == 'new_follower' &&
+                  notificationId == 'follow_' + request.auth.uid + '_' + resource.data.recipientUid
+                )
+              )
+        )
+      );
+      allow list: if isAdmin() || (
+        isSignedIn() && resource.data.recipientUid == request.auth.uid
+      );
+      allow create: if isAdmin() || (
+        isSignedIn() &&
+        isValidId(notificationId) &&
+        request.resource.data.keys().hasAll([
+          'recipientUid', 'actorUid', 'actorName', 'actorPhoto', 'type',
+          'title', 'body', 'read', 'createdAt', 'expiresAt'
+        ]) &&
+        request.resource.data.keys().hasOnly([
+          'recipientUid', 'actorUid', 'actorName', 'actorPhoto', 'type', 'statusId',
+          'title', 'body', 'emoji', 'read', 'createdAt', 'expiresAt'
+        ]) &&
+        isValidId(request.resource.data.recipientUid) &&
+        request.resource.data.actorUid == request.auth.uid &&
+        request.resource.data.recipientUid != request.auth.uid &&
+        request.resource.data.actorName is string && request.resource.data.actorName.size() <= 100 &&
+        request.resource.data.actorPhoto is string && request.resource.data.actorPhoto.size() <= 1000 &&
+        request.resource.data.title is string && request.resource.data.title.size() >= 1 && request.resource.data.title.size() <= 120 &&
+        request.resource.data.body is string && request.resource.data.body.size() >= 1 && request.resource.data.body.size() <= 300 &&
+        (!('emoji' in request.resource.data) || (request.resource.data.emoji is string && request.resource.data.emoji.size() <= 16)) &&
+        request.resource.data.read == false &&
+        request.resource.data.createdAt == request.time &&
+        request.resource.data.expiresAt is timestamp &&
+        !isBlockedBetween(request.auth.uid, request.resource.data.recipientUid) &&
+        (
+          (
+            request.resource.data.type in ['status_reaction', 'status_reply'] &&
+            ('statusId' in request.resource.data) &&
+            isValidId(request.resource.data.statusId) &&
+            exists(/databases/$(database)/documents/statuses/$(request.resource.data.statusId)) &&
+            get(/databases/$(database)/documents/statuses/$(request.resource.data.statusId)).data.authorUid == request.resource.data.recipientUid &&
+            canViewStatusDoc(get(/databases/$(database)/documents/statuses/$(request.resource.data.statusId)).data) &&
+            (
+              request.resource.data.type != 'status_reaction' ||
+              exists(/databases/$(database)/documents/status_likes/$(request.resource.data.statusId + '_' + request.auth.uid)) ||
+              existsAfter(/databases/$(database)/documents/status_likes/$(request.resource.data.statusId + '_' + request.auth.uid))
+            )
+          ) ||
+          (
+            request.resource.data.type == 'new_follower' &&
+            notificationId == 'follow_' + request.auth.uid + '_' + request.resource.data.recipientUid &&
+            (
+              exists(/databases/$(database)/documents/follows/$(request.auth.uid + '_' + request.resource.data.recipientUid)) ||
+              existsAfter(/databases/$(database)/documents/follows/$(request.auth.uid + '_' + request.resource.data.recipientUid))
+            )
+          )
+        )
+      );
+      allow update: if isAdmin() || (
+        isSignedIn() && (
+          // Recipient marks notification read/unread
+          (
+            resource.data.recipientUid == request.auth.uid &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']) &&
+            request.resource.data.read is bool
+          ) ||
+          // Re-follow notification refresh gated by deterministic ID + 1-hour anti-spam cooldown
+          (
+            resource.data.actorUid == request.auth.uid &&
+            resource.data.type == 'new_follower' &&
+            notificationId == 'follow_' + request.auth.uid + '_' + resource.data.recipientUid &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'actorName', 'actorPhoto', 'title', 'body', 'read', 'createdAt', 'expiresAt'
+            ]) &&
+            request.resource.data.actorName is string && request.resource.data.actorName.size() <= 100 &&
+            request.resource.data.actorPhoto is string && request.resource.data.actorPhoto.size() <= 1000 &&
+            request.resource.data.title is string && request.resource.data.title.size() >= 1 && request.resource.data.title.size() <= 120 &&
+            request.resource.data.body is string && request.resource.data.body.size() >= 1 && request.resource.data.body.size() <= 300 &&
+            request.resource.data.read == false &&
+            request.resource.data.createdAt == request.time &&
+            request.resource.data.expiresAt is timestamp &&
+            request.time > resource.data.createdAt + duration.value(1, 'h') &&
+            !isBlockedBetween(request.auth.uid, resource.data.recipientUid) &&
+            (
+              exists(/databases/$(database)/documents/follows/$(request.auth.uid + '_' + resource.data.recipientUid)) ||
+              existsAfter(/databases/$(database)/documents/follows/$(request.auth.uid + '_' + resource.data.recipientUid))
+            )
+          )
+        )
+      );
+      allow delete: if isAdmin() || (
+        isSignedIn() && resource.data.recipientUid == request.auth.uid
+      );
+    }
+
+    // --- Bottom Fallback Rule ---
+    // Restricted to Super Admin to protect private user data (emails, notifications, drafts)
+    match /{document=**} {
+      allow read, write: if isSuperAdmin();
+    }
+  }
+}

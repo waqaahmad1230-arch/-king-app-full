@@ -167,6 +167,73 @@ var VERIFIED_GEMINI_MODELS = [
     apiVersion: "v1beta"
   }
 ];
+var VERIFIED_FAL_MODELS = [
+  {
+    id: "fal-ai/flux/schnell",
+    displayName: "FLUX.1 Schnell (Fast Image)",
+    capability: "image",
+    description: "Ultra-fast 4-step text-to-image generation on fal.ai.",
+    defaultEnabled: true,
+    supportedAspectRatios: ["1:1", "16:9", "9:16", "4:3", "3:4"]
+  },
+  {
+    id: "fal-ai/flux/dev",
+    displayName: "FLUX.1 Dev (High Quality)",
+    capability: "image",
+    description: "High-detail image generation fallback on fal.ai.",
+    defaultEnabled: true,
+    supportedAspectRatios: ["1:1", "16:9", "9:16", "4:3", "3:4"]
+  },
+  {
+    id: "fal-ai/flux/dev/image-to-image",
+    displayName: "FLUX.1 Dev (Image-to-Image Edit)",
+    capability: "image_edit",
+    description: "Restyle & image-to-image editing with uploaded source photos.",
+    defaultEnabled: true,
+    maxInputImageMb: 10,
+    requiresSourceImage: true,
+    supportedAspectRatios: ["1:1", "16:9", "9:16", "4:3", "3:4"]
+  },
+  {
+    id: "fal-ai/flux-kontext/pro",
+    displayName: "FLUX Kontext Pro (Instruction Edit)",
+    capability: "image_edit",
+    description: "Instruction-guided precision photo editing on fal.ai.",
+    defaultEnabled: true,
+    maxInputImageMb: 10,
+    requiresSourceImage: true,
+    supportedAspectRatios: ["1:1", "16:9", "9:16", "4:3", "3:4"]
+  },
+  {
+    id: "fal-ai/wan/v2.1/1.3b/text-to-video",
+    displayName: "Wan 2.1 Fast Text-to-Video",
+    capability: "video",
+    description: "Fast text-to-video generation on fal.ai queue.",
+    defaultEnabled: true,
+    supportedAspectRatios: ["16:9", "9:16"],
+    supportedDurations: ["5s"]
+  },
+  {
+    id: "fal-ai/kling-video/v2.1/standard/text-to-video",
+    displayName: "Kling 2.1 Text-to-Video",
+    capability: "video",
+    description: "Cinematic text-to-video fallback on fal.ai.",
+    defaultEnabled: true,
+    supportedAspectRatios: ["16:9", "9:16"],
+    supportedDurations: ["5s", "10s"]
+  },
+  {
+    id: "fal-ai/kling-video/v2.1/standard/image-to-video",
+    displayName: "Kling 2.1 Image-to-Video",
+    capability: "image_to_video",
+    description: "Animate a source still photo into video via fal.ai.",
+    defaultEnabled: true,
+    maxInputImageMb: 10,
+    requiresSourceImage: true,
+    supportedAspectRatios: ["16:9", "9:16"],
+    supportedDurations: ["5s", "10s"]
+  }
+];
 var VAULT_BASE_DIR = import_node_path.default.resolve(
   process.env.AI_VAULT_DIR?.trim() || (process.env.VERCEL ? import_node_os.default.tmpdir() : process.cwd())
 );
@@ -186,8 +253,21 @@ var DEFAULT_MODEL_CONFIG = {
   enableKeyFallback: true,
   enableModelFallback: true
 };
+var DEFAULT_FAL_CONFIG = {
+  enableFalKeyFallback: true,
+  enableFalImageFallback: true,
+  enableFalVideoFallback: true,
+  preferFalForVideo: false,
+  maxConcurrentPerKey: 2,
+  requestTimeoutSec: 45,
+  maxQueueWaitSec: 45,
+  primaryFalImageModel: "fal-ai/flux/schnell",
+  primaryFalImageEditModel: "fal-ai/flux/dev/image-to-image",
+  primaryFalVideoModel: "fal-ai/wan/v2.1/1.3b/text-to-video",
+  primaryFalImageToVideoModel: "fal-ai/kling-video/v2.1/standard/image-to-video"
+};
 var UPSTASH_VAULT_REDIS_KEY = "king:ai_vault:v1";
-var REMOTE_SYNC_TTL_MS = 8e3;
+var REMOTE_SYNC_TTL_MS = 2e3;
 function getUpstashConfig() {
   const url = (process.env.UPSTASH_REDIS_REST_URL || "").trim().replace(/\/+$/, "");
   const token = (process.env.UPSTASH_REDIS_REST_TOKEN || "").trim();
@@ -249,12 +329,20 @@ function createDefaultVaultData() {
     modelConfig: {
       ...DEFAULT_MODEL_CONFIG,
       enabledModels: { ...DEFAULT_MODEL_CONFIG.enabledModels }
-    }
+    },
+    falKeys: [],
+    falEnvOverrides: {},
+    falModelHealth: {},
+    falConfig: { ...DEFAULT_FAL_CONFIG }
   };
 }
 var inMemoryFallbackVault = null;
 var lastRemoteSyncAt = 0;
+var lastSuccessfulRemoteSyncAt;
+var lastRemoteSyncError;
+var lastDecryptionError;
 var inFlightRemoteSync = null;
+var pendingRemoteWrites = [];
 function normalizePlainVaultData(parsed) {
   const defaults = createDefaultVaultData();
   const rawCfg = parsed.modelConfig || {};
@@ -283,6 +371,8 @@ function normalizePlainVaultData(parsed) {
     "manual_primary"
   ]);
   const resolvedPolicy = rawCfg.imageSelectionPolicy && validPolicies.has(rawCfg.imageSelectionPolicy) ? rawCfg.imageSelectionPolicy : defaults.modelConfig.imageSelectionPolicy;
+  const rawFalCfg = parsed.falConfig || {};
+  const validFalIds = new Set(VERIFIED_FAL_MODELS.map((m) => m.id));
   return {
     keys: Array.isArray(parsed.keys) ? parsed.keys : [],
     envOverrides: parsed.envOverrides && typeof parsed.envOverrides === "object" ? parsed.envOverrides : {},
@@ -297,6 +387,22 @@ function normalizePlainVaultData(parsed) {
       enableAutoRouting: typeof rawCfg.enableAutoRouting === "boolean" ? rawCfg.enableAutoRouting : defaults.modelConfig.enableAutoRouting,
       enableKeyFallback: typeof rawCfg.enableKeyFallback === "boolean" ? rawCfg.enableKeyFallback : defaults.modelConfig.enableKeyFallback,
       enableModelFallback: typeof rawCfg.enableModelFallback === "boolean" ? rawCfg.enableModelFallback : defaults.modelConfig.enableModelFallback
+    },
+    falKeys: Array.isArray(parsed.falKeys) ? parsed.falKeys : [],
+    falEnvOverrides: parsed.falEnvOverrides && typeof parsed.falEnvOverrides === "object" ? parsed.falEnvOverrides : {},
+    falModelHealth: parsed.falModelHealth && typeof parsed.falModelHealth === "object" ? parsed.falModelHealth : {},
+    falConfig: {
+      enableFalKeyFallback: typeof rawFalCfg.enableFalKeyFallback === "boolean" ? rawFalCfg.enableFalKeyFallback : DEFAULT_FAL_CONFIG.enableFalKeyFallback,
+      enableFalImageFallback: typeof rawFalCfg.enableFalImageFallback === "boolean" ? rawFalCfg.enableFalImageFallback : DEFAULT_FAL_CONFIG.enableFalImageFallback,
+      enableFalVideoFallback: typeof rawFalCfg.enableFalVideoFallback === "boolean" ? rawFalCfg.enableFalVideoFallback : DEFAULT_FAL_CONFIG.enableFalVideoFallback,
+      preferFalForVideo: typeof rawFalCfg.preferFalForVideo === "boolean" ? rawFalCfg.preferFalForVideo : DEFAULT_FAL_CONFIG.preferFalForVideo,
+      maxConcurrentPerKey: typeof rawFalCfg.maxConcurrentPerKey === "number" && Number.isFinite(rawFalCfg.maxConcurrentPerKey) ? Math.max(1, Math.min(10, Math.round(rawFalCfg.maxConcurrentPerKey))) : DEFAULT_FAL_CONFIG.maxConcurrentPerKey,
+      requestTimeoutSec: typeof rawFalCfg.requestTimeoutSec === "number" && Number.isFinite(rawFalCfg.requestTimeoutSec) ? Math.max(10, Math.min(180, Math.round(rawFalCfg.requestTimeoutSec))) : DEFAULT_FAL_CONFIG.requestTimeoutSec,
+      maxQueueWaitSec: typeof rawFalCfg.maxQueueWaitSec === "number" && Number.isFinite(rawFalCfg.maxQueueWaitSec) ? Math.max(15, Math.min(240, Math.round(rawFalCfg.maxQueueWaitSec))) : DEFAULT_FAL_CONFIG.maxQueueWaitSec,
+      primaryFalImageModel: rawFalCfg.primaryFalImageModel && validFalIds.has(rawFalCfg.primaryFalImageModel) ? rawFalCfg.primaryFalImageModel : DEFAULT_FAL_CONFIG.primaryFalImageModel,
+      primaryFalImageEditModel: rawFalCfg.primaryFalImageEditModel && validFalIds.has(rawFalCfg.primaryFalImageEditModel) ? rawFalCfg.primaryFalImageEditModel : DEFAULT_FAL_CONFIG.primaryFalImageEditModel,
+      primaryFalVideoModel: rawFalCfg.primaryFalVideoModel && validFalIds.has(rawFalCfg.primaryFalVideoModel) ? rawFalCfg.primaryFalVideoModel : DEFAULT_FAL_CONFIG.primaryFalVideoModel,
+      primaryFalImageToVideoModel: rawFalCfg.primaryFalImageToVideoModel && validFalIds.has(rawFalCfg.primaryFalImageToVideoModel) ? rawFalCfg.primaryFalImageToVideoModel : DEFAULT_FAL_CONFIG.primaryFalImageToVideoModel
     }
   };
 }
@@ -314,9 +420,39 @@ function decryptVaultWrapper(wrapper) {
   ]).toString("utf8");
   return normalizePlainVaultData(JSON.parse(plain));
 }
+async function fetchRemoteUpstashVault(upstash) {
+  const resp = await fetch(
+    `${upstash.url}/get/${encodeURIComponent(UPSTASH_VAULT_REDIS_KEY)}`,
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${upstash.token}`
+      }
+    }
+  );
+  if (!resp.ok) {
+    throw new Error(`Upstash Redis GET failed with HTTP ${resp.status}.`);
+  }
+  const body = await resp.json();
+  if (body?.error) {
+    throw new Error(`Upstash Redis error: ${body.error}`);
+  }
+  if (!body?.result || typeof body.result !== "string") {
+    return { found: false };
+  }
+  const wrapper = JSON.parse(body.result);
+  if (!wrapper?.iv || !wrapper?.tag || !wrapper?.ciphertext) {
+    throw new Error("Malformed encrypted vault payload in Upstash Redis.");
+  }
+  const decrypted = decryptVaultWrapper(wrapper);
+  return { found: true, vault: decrypted };
+}
 async function syncVaultFromRemote(force = false) {
   const upstash = getUpstashConfig();
   if (!upstash.configured) return;
+  if (pendingRemoteWrites.length > 0) {
+    await flushRemoteVaultWrites();
+  }
   const now = Date.now();
   if (!force && inMemoryFallbackVault && now - lastRemoteSyncAt < REMOTE_SYNC_TTL_MS) {
     return;
@@ -326,36 +462,49 @@ async function syncVaultFromRemote(force = false) {
   }
   const run = (async () => {
     try {
-      const resp = await fetch(
-        `${upstash.url}/get/${encodeURIComponent(UPSTASH_VAULT_REDIS_KEY)}`,
-        {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${upstash.token}`
-          }
-        }
-      );
-      if (!resp.ok) return;
-      const body = await resp.json();
-      if (!body?.result || typeof body.result !== "string") {
+      const remote = await fetchRemoteUpstashVault(upstash);
+      if (!remote.found) {
         if (!inMemoryFallbackVault) {
           inMemoryFallbackVault = createDefaultVaultData();
         }
+        lastRemoteSyncError = void 0;
+        lastDecryptionError = void 0;
         lastRemoteSyncAt = Date.now();
+        lastSuccessfulRemoteSyncAt = Date.now();
         return;
       }
-      const wrapper = JSON.parse(body.result);
-      if (wrapper?.iv && wrapper?.tag && wrapper?.ciphertext) {
-        inMemoryFallbackVault = decryptVaultWrapper(wrapper);
+      if (remote.vault) {
+        inMemoryFallbackVault = remote.vault;
+        lastRemoteSyncError = void 0;
+        lastDecryptionError = void 0;
         lastRemoteSyncAt = Date.now();
+        lastSuccessfulRemoteSyncAt = Date.now();
       }
-    } catch {
+    } catch (err) {
+      const msg = scrubSecretText(String(err?.message || "Failed to sync encrypted AI Vault from Upstash Redis."));
+      if (msg.toLowerCase().includes("authenticate") || msg.toLowerCase().includes("unsupported state") || msg.toLowerCase().includes("malformed encrypted vault") || msg.toLowerCase().includes("json")) {
+        lastDecryptionError = "Encrypted Upstash vault could not be decrypted with current AI_VAULT_SECRET.";
+        lastRemoteSyncError = void 0;
+      } else {
+        lastRemoteSyncError = msg;
+      }
     } finally {
       inFlightRemoteSync = null;
     }
   })();
   inFlightRemoteSync = run;
   return run;
+}
+async function flushRemoteVaultWrites(options) {
+  if (pendingRemoteWrites.length === 0) return;
+  const batch = pendingRemoteWrites.splice(0, pendingRemoteWrites.length);
+  const results = await Promise.allSettled(batch.map((w) => w.promise));
+  if (options?.throwOnError) {
+    const firstRejected = results.find((r) => r.status === "rejected");
+    if (firstRejected) {
+      throw firstRejected.reason instanceof Error ? firstRejected.reason : new Error(String(firstRejected.reason || "Failed to persist AI Vault to Upstash Redis."));
+    }
+  }
 }
 function readVaultData() {
   const upstash = getUpstashConfig();
@@ -375,6 +524,12 @@ function readVaultData() {
     return inMemoryFallbackVault || createDefaultVaultData();
   }
 }
+function maskSecretValue(raw) {
+  const clean = (raw || "").trim();
+  if (!clean) return "Not Set";
+  if (clean.length <= 8) return "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022";
+  return `\u2022\u2022\u2022\u2022\u2022\u2022${clean.slice(-4)}`;
+}
 var ENV_KEY_SLOT_NAMES = [
   { id: "env_GEMINI_API_KEY", envVarName: "GEMINI_API_KEY", label: "Server Runtime Secret (GEMINI_API_KEY)", defaultPriority: 10, slotIndex: 0 },
   { id: "env_GEMINI_API_KEY_1", envVarName: "GEMINI_API_KEY_1", label: "Server Secret Slot 1 (GEMINI_API_KEY_1)", defaultPriority: 11, slotIndex: 1 },
@@ -386,13 +541,29 @@ var ENV_KEY_SLOT_NAMES = [
   { id: "env_GEMINI_API_KEY_7", envVarName: "GEMINI_API_KEY_7", label: "Server Secret Slot 7 (GEMINI_API_KEY_7)", defaultPriority: 17, slotIndex: 7 },
   { id: "env_GEMINI_API_KEY_8", envVarName: "GEMINI_API_KEY_8", label: "Server Secret Slot 8 (GEMINI_API_KEY_8)", defaultPriority: 18, slotIndex: 8 }
 ];
+var FAL_ENV_KEY_SLOT_NAMES = [
+  { id: "env_FAL_KEY", envVarName: "FAL_KEY", label: "Server Runtime Secret (FAL_KEY)", defaultPriority: 10 },
+  { id: "env_FAL_KEY_1", envVarName: "FAL_KEY_1", label: "Server fal.ai Slot 1 (FAL_KEY_1)", defaultPriority: 11 },
+  { id: "env_FAL_KEY_2", envVarName: "FAL_KEY_2", label: "Server fal.ai Slot 2 (FAL_KEY_2)", defaultPriority: 12 },
+  { id: "env_FAL_KEY_3", envVarName: "FAL_KEY_3", label: "Server fal.ai Slot 3 (FAL_KEY_3)", defaultPriority: 13 }
+];
 function scrubSecretText(text) {
   let sanitized = String(text || "");
   sanitized = sanitized.replace(/AIza[0-9A-Za-z_-]{20,}/g, "[REDACTED_API_KEY]");
+  sanitized = sanitized.replace(/\bfal_[0-9A-Za-z_-]{16,}/g, "[REDACTED_FAL_KEY]");
+  sanitized = sanitized.replace(/(Authorization:\s*Key\s+)[^\s"']+/gi, "$1[REDACTED_FAL_KEY]");
   const vault = readVaultData();
   const rawKeys = [
     ...ENV_KEY_SLOT_NAMES.map((slot) => process.env[slot.envVarName]),
+    ...FAL_ENV_KEY_SLOT_NAMES.map((slot) => process.env[slot.envVarName]),
     ...vault.keys.map((k) => {
+      try {
+        return decryptText(k.encryptedKey);
+      } catch {
+        return "";
+      }
+    }),
+    ...vault.falKeys.map((k) => {
       try {
         return decryptText(k.encryptedKey);
       } catch {
@@ -533,6 +704,90 @@ function listResolvedKeys() {
 function getModelConfig() {
   return readVaultData().modelConfig;
 }
+function getRuntimeFalEnvKeys() {
+  const seenValues = /* @__PURE__ */ new Set();
+  const active = [];
+  for (const item of FAL_ENV_KEY_SLOT_NAMES) {
+    const val = (process.env[item.envVarName] || "").trim();
+    if (!val || seenValues.has(val)) continue;
+    seenValues.add(val);
+    active.push({
+      id: item.id,
+      envVarName: item.envVarName,
+      label: item.label,
+      rawKey: val,
+      defaultPriority: item.defaultPriority
+    });
+  }
+  return active;
+}
+function getFalConfig() {
+  return readVaultData().falConfig;
+}
+function listSafeFalKeySummaries() {
+  const vault = readVaultData();
+  const now = Date.now();
+  const summaries = [];
+  for (const rec of vault.falKeys) {
+    let raw = "";
+    try {
+      raw = decryptText(rec.encryptedKey).trim();
+    } catch {
+      raw = "";
+    }
+    const isCooldownExpired = rec.cooldownUntil && rec.cooldownUntil <= now;
+    const status = !rec.enabled ? "disabled" : (rec.status === "quota_exhausted" || rec.status === "error") && isCooldownExpired ? "ready" : rec.status;
+    summaries.push({
+      id: rec.id,
+      label: rec.label,
+      maskedKey: raw ? maskSecretValue(raw) : "Decrypt Error",
+      source: "admin_vault",
+      enabled: rec.enabled,
+      priority: rec.priority,
+      status,
+      quotaScope: isCooldownExpired && rec.status === "quota_exhausted" ? void 0 : rec.quotaScope,
+      failureCount: rec.failureCount || 0,
+      consecutiveFailures: rec.consecutiveFailures || 0,
+      lastError: rec.lastError,
+      lastTestedAt: rec.lastTestedAt,
+      cooldownUntil: isCooldownExpired ? void 0 : rec.cooldownUntil
+    });
+  }
+  for (const envItem of getRuntimeFalEnvKeys()) {
+    const ov = vault.falEnvOverrides[envItem.id];
+    const enabled = ov ? ov.enabled : true;
+    const isCooldownExpired = ov?.cooldownUntil && ov.cooldownUntil <= now;
+    const rawStatus = ov?.status || "ready";
+    const status = !enabled ? "disabled" : (rawStatus === "quota_exhausted" || rawStatus === "error") && isCooldownExpired ? "ready" : rawStatus;
+    summaries.push({
+      id: envItem.id,
+      label: envItem.label,
+      maskedKey: maskSecretValue(envItem.rawKey),
+      source: "runtime_env",
+      envVarName: envItem.envVarName,
+      enabled,
+      priority: ov?.priority ?? envItem.defaultPriority,
+      status,
+      quotaScope: isCooldownExpired && rawStatus === "quota_exhausted" ? void 0 : ov?.quotaScope,
+      failureCount: ov?.failureCount || 0,
+      consecutiveFailures: ov?.consecutiveFailures || 0,
+      lastError: ov?.lastError,
+      lastTestedAt: ov?.lastTestedAt,
+      cooldownUntil: isCooldownExpired ? void 0 : ov?.cooldownUntil
+    });
+  }
+  return summaries.sort((a, b) => a.priority - b.priority);
+}
+function listFalModelHealthSummaries() {
+  const vault = readVaultData();
+  const now = Date.now();
+  return Object.values(vault.falModelHealth || {}).map((rec) => {
+    if (rec.status === "error" && rec.cooldownUntil && rec.cooldownUntil <= now) {
+      return { ...rec, status: "ready", cooldownUntil: void 0 };
+    }
+    return rec;
+  }).sort((a, b) => a.modelId.localeCompare(b.modelId));
+}
 
 // server/aiStatus.ts
 function getBackendHost() {
@@ -548,10 +803,20 @@ function mapStatusLabel(s) {
 function getPublicAiCapabilityStatus() {
   const keys = listResolvedKeys();
   const modelConfig = getModelConfig();
+  const falKeys = listSafeFalKeySummaries();
+  const falConfig = getFalConfig();
+  const now = Date.now();
   const activeKeys = keys.filter((k) => k.enabled && k.status !== "invalid");
   const healthyKeys = activeKeys.filter(
-    (k) => k.status === "ready" && (!k.cooldownUntil || k.cooldownUntil <= Date.now())
+    (k) => k.status === "ready" && (!k.cooldownUntil || k.cooldownUntil <= now)
   );
+  const falActiveKeys = falKeys.filter((k) => k.enabled && k.status !== "invalid");
+  const falHealthyKeys = falActiveKeys.filter(
+    (k) => k.status === "ready" && (!k.cooldownUntil || k.cooldownUntil <= now)
+  );
+  const falConfigured = falActiveKeys.length > 0;
+  const falImageSupported = falConfigured && falConfig.enableFalImageFallback;
+  const falVideoSupported = falConfigured && (falConfig.enableFalVideoFallback || falConfig.preferFalForVideo);
   const verifiedModels = VERIFIED_GEMINI_MODELS.map((spec) => ({
     ...spec,
     enabled: Boolean(modelConfig.enabledModels[spec.id]),
@@ -563,8 +828,10 @@ function getPublicAiCapabilityStatus() {
   const primaryImageModel = enabledImageModels.find((m) => m.id === modelConfig.primaryImageModel)?.id || enabledImageModels[0]?.id || "gemini-3.1-flash-lite-image";
   const primaryTextModel = enabledTextModels.find((m) => m.id === modelConfig.primaryTextModel)?.id || enabledTextModels[0]?.id || "gemini-3.1-pro-preview";
   const primaryVideoModel = enabledVideoModels.find((m) => m.id === modelConfig.primaryVideoModel)?.id || enabledVideoModels[0]?.id || "gemini-omni-1.2-flash";
-  const configured = activeKeys.length > 0;
-  const videoSupported = configured && enabledVideoModels.length > 0;
+  const geminiConfigured = activeKeys.length > 0;
+  const configured = geminiConfigured || falConfigured;
+  const geminiVideoSupported = geminiConfigured && enabledVideoModels.length > 0;
+  const videoSupported = geminiVideoSupported || falVideoSupported;
   return {
     ok: true,
     configured,
@@ -572,12 +839,15 @@ function getPublicAiCapabilityStatus() {
     backendHost: getBackendHost(),
     autoRoutingEnabled: modelConfig.enableAutoRouting,
     imageSelectionPolicy: modelConfig.imageSelectionPolicy,
-    photoSupported: configured && enabledImageModels.length > 0,
-    textSupported: configured && enabledTextModels.length > 0,
+    photoSupported: geminiConfigured && enabledImageModels.length > 0 || falImageSupported,
+    textSupported: geminiConfigured && enabledTextModels.length > 0,
     photoModel: primaryImageModel,
     textModel: primaryTextModel,
-    videoModel: primaryVideoModel,
-    supportedModels: enabledImageModels.map((m) => m.id),
+    videoModel: falVideoSupported && !geminiVideoSupported ? falConfig.primaryFalVideoModel : primaryVideoModel,
+    supportedModels: [
+      ...enabledImageModels.map((m) => m.id),
+      ...falImageSupported ? VERIFIED_FAL_MODELS.filter((m) => m.capability === "image" || m.capability === "image_edit").map((m) => m.id) : []
+    ],
     verifiedModels,
     routingArchitecture: {
       assistantPreferred: primaryTextModel,
@@ -586,10 +856,10 @@ function getPublicAiCapabilityStatus() {
         standard: enabledImageModels.find((m) => m.qualityTier === "standard")?.id || null,
         pro: enabledImageModels.find((m) => m.qualityTier === "pro")?.id || null
       },
-      videoExclusive: enabledVideoModels[0]?.id || null
+      videoExclusive: enabledVideoModels[0]?.id || (falVideoSupported ? falConfig.primaryFalVideoModel : null)
     },
     videoSupported,
-    videoReason: videoSupported ? `Gemini Omni (${primaryVideoModel}) is configured for video routing via /api/ai/route. Interactive timeline editing tools (Trim, Filters, Music, Text) are available in Post Editor.` : "Video AI requires an active paid-tier Gemini API key and an enabled Gemini Omni model in Admin Panel \u2192 AI Model Manager.",
+    videoReason: geminiVideoSupported ? `Gemini Omni (${primaryVideoModel}) is configured for video routing via /api/ai/route${falVideoSupported ? ` (with fal.ai ${falConfig.primaryFalVideoModel} failover ready)` : ""}. Interactive timeline editing tools (Trim, Filters, Music, Text) are available in Post Editor.` : falVideoSupported ? `fal.ai (${falConfig.primaryFalVideoModel}) is configured for video routing via /api/ai/route.` : "Video AI requires an active Gemini API key with Gemini Omni or an active fal.ai API key in Admin Panel \u2192 AI Model Manager.",
     missingEnv: configured ? [] : ["ADMIN_VAULT_OR_SERVER_KEY"],
     activeKeyCount: activeKeys.length,
     healthyKeyCount: healthyKeys.length,
@@ -604,7 +874,22 @@ function getPublicAiCapabilityStatus() {
       status: mapStatusLabel(k.status),
       quotaScope: k.quotaScope
     })),
-    projects: listProjectHealthSummaries()
+    projects: listProjectHealthSummaries(),
+    falConfigured,
+    falImageSupported,
+    falVideoSupported,
+    falActiveKeyCount: falActiveKeys.length,
+    falHealthyKeyCount: falHealthyKeys.length,
+    falKeyStatuses: falKeys.map((k, idx) => ({
+      keyIndex: idx + 1,
+      id: k.id,
+      label: k.source === "admin_vault" ? `fal.ai Slot ${idx + 1}` : `Server fal.ai Key ${idx + 1}`,
+      enabled: k.enabled,
+      source: k.source,
+      status: mapStatusLabel(k.status),
+      quotaScope: k.quotaScope
+    })),
+    falModelHealth: listFalModelHealthSummaries()
   };
 }
 async function getPublicAiCapabilityStatusAsync() {

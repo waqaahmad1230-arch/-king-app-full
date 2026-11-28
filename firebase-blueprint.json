@@ -14,25 +14,43 @@
         "consentedAt": { "type": "string" },
         "createdAt": { "type": "string" },
         "lastLogin": { "type": "string" },
-        "statusPrivacy": { "type": "object" }
+        "statusPrivacy": { "type": "object" },
+        "_socialSyncUid": { "type": "string" }
       },
       "required": ["uid"]
     },
     "PublicProfile": {
       "title": "PublicProfile",
-      "description": "Public profile details of a KING channel creator, including name, photo, and social links",
+      "description": "Public profile details of a KING channel creator, including username, follow counters, photo, and social links",
       "type": "object",
       "properties": {
         "uid": { "type": "string" },
         "displayName": { "type": "string" },
         "name": { "type": "string" },
+        "displayNameLower": { "type": "string" },
+        "username": { "type": "string" },
+        "usernameLower": { "type": "string" },
         "photoURL": { "type": "string" },
         "bio": { "type": "string" },
-        "subscribersCount": { "type": "number" },
+        "followersCount": { "type": "number" },
+        "followingCount": { "type": "number" },
+        "isVerified": { "type": "boolean" },
         "socialLinks": { "type": "object" },
+        "createdAt": { "type": "string" },
         "updatedAt": { "type": "string" }
       },
       "required": ["uid"]
+    },
+    "UsernameClaim": {
+      "title": "UsernameClaim",
+      "description": "Unique lowercase username reservation mapped to a single owner UID",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "username": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["uid", "username"]
     },
     "Download": {
       "title": "Download",
@@ -297,7 +315,7 @@
     },
     "Notification": {
       "title": "Notification",
-      "description": "Social & Status reaction/reply notifications for users",
+      "description": "User notifications for new followers, status reactions, and status replies",
       "type": "object",
       "properties": {
         "recipientUid": { "type": "string" },
@@ -362,6 +380,65 @@
         "createdAt": { "type": "string" }
       },
       "required": ["authorUid", "text", "createdAt"]
+    },
+    "KingShopOrder": {
+      "title": "KingShopOrder",
+      "description": "Server-managed WhatsApp checkout order with manual admin payment/delivery verification state",
+      "type": "object",
+      "properties": {
+        "orderRef": { "type": "string" },
+        "uid": { "type": "string" },
+        "subtotal": { "type": "number" },
+        "discountAmount": { "type": "number" },
+        "finalTotal": { "type": "number" },
+        "status": { "type": "string" },
+        "paymentStatus": { "type": "string" },
+        "verificationMethod": { "type": "string" },
+        "vipCounted": { "type": "boolean" },
+        "vipCountedAmount": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["orderRef", "uid", "finalTotal", "status", "paymentStatus", "createdAt"]
+    },
+    "KingShopVipProfile": {
+      "title": "KingShopVipProfile",
+      "description": "Server-managed VIP loyalty profile computed exclusively from manually verified order spend",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "verifiedSpendTotal": { "type": "number" },
+        "verifiedOrderCount": { "type": "number" },
+        "tier": { "type": "string" },
+        "lifetimePeakTier": { "type": "string" },
+        "manualOverrideTier": { "type": "string" },
+        "vipScore": { "type": "number" }
+      },
+      "required": ["uid", "verifiedSpendTotal", "tier"]
+    },
+    "KingShopAchievement": {
+      "title": "KingShopAchievement",
+      "description": "Idempotent one-time achievement claim record keyed by uid_achievementId",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "achievementId": { "type": "string" },
+        "coins": { "type": "number" },
+        "claimedAt": { "type": "string" }
+      },
+      "required": ["uid", "achievementId", "coins", "claimedAt"]
+    },
+    "KingShopAdminAudit": {
+      "title": "KingShopAdminAudit",
+      "description": "Immutable Super Admin audit log for order verifications, wallet adjustments, and VIP overrides",
+      "type": "object",
+      "properties": {
+        "action": { "type": "string" },
+        "targetType": { "type": "string" },
+        "targetId": { "type": "string" },
+        "actorUid": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["action", "targetType", "targetId", "actorUid", "createdAt"]
     }
   },
   "firestore": {
@@ -371,7 +448,11 @@
     },
     "/publicProfiles/{userId}": {
       "schema": "PublicProfile",
-      "description": "Public channel profile and social catalog links for a user"
+      "description": "Public channel profile, username, follow counters, and social links for a user"
+    },
+    "/usernames/{username}": {
+      "schema": "UsernameClaim",
+      "description": "Unique lowercase username reservation mapped to owner UID"
     },
     "/users/{userId}/downloads/{downloadId}": {
       "schema": "Download",
@@ -451,7 +532,23 @@
     },
     "/notifications/{notificationId}": {
       "schema": "Notification",
-      "description": "User notifications for status reactions and replies"
+      "description": "User notifications for new followers, status reactions, and status replies"
+    },
+    "/king_shop_orders/{orderRef}": {
+      "schema": "KingShopOrder",
+      "description": "Server-only WhatsApp checkout order records"
+    },
+    "/king_shop_vip_profiles/{uid}": {
+      "schema": "KingShopVipProfile",
+      "description": "Server-only VIP tier and verified spend loyalty profiles"
+    },
+    "/king_shop_achievements/{achievementKey}": {
+      "schema": "KingShopAchievement",
+      "description": "Server-only one-time achievement claim records"
+    },
+    "/king_shop_admin_audit/{auditId}": {
+      "schema": "KingShopAdminAudit",
+      "description": "Server-only Super Admin audit logs for orders, wallet adjustments, and VIP overrides"
     }
   }
 }

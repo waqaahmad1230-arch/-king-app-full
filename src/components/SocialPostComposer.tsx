@@ -1,7 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Camera, Film, ImagePlus, Loader2, Send, X, AlertCircle } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { publishGalleryMediaPost, validateGalleryMediaFile } from '../services/centralContentService';
+import {
+  normalizeSelectedMediaFile,
+  publishGalleryMediaPost,
+  validateGalleryMediaFile,
+} from '../services/centralContentService';
 import { FeedContentType } from '../types/content';
 import StatusEditorModal from './StatusEditorModal';
 
@@ -18,10 +22,13 @@ export default function SocialPostComposer({ isOpen, onClose, onPublished }: Soc
   const videoCameraInputRef = useRef<HTMLInputElement>(null);
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [mediaType, setMediaType] = useState<FeedContentType | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [isStatusEditorOpen, setIsStatusEditorOpen] = useState(false);
   const [caption, setCaption] = useState('');
+  const [location, setLocation] = useState('');
+  const [privacy, setPrivacy] = useState<'public' | 'friends' | 'private'>('public');
   const [isPublishing, setIsPublishing] = useState(false);
   const [progress, setProgress] = useState(0);
   const [statusLabel, setStatusLabel] = useState('');
@@ -36,10 +43,13 @@ export default function SocialPostComposer({ isOpen, onClose, onPublished }: Soc
   const clearSelection = () => {
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     setSelectedFile(null);
+    setSelectedFiles([]);
     setMediaType(null);
     setPreviewUrl(null);
     setIsStatusEditorOpen(false);
     setCaption('');
+    setLocation('');
+    setPrivacy('public');
     setProgress(0);
     setStatusLabel('');
     setErrorMsg(null);
@@ -82,22 +92,43 @@ export default function SocialPostComposer({ isOpen, onClose, onPublished }: Soc
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+    const rawFiles = e.target.files;
     e.target.value = '';
-    if (!file) return;
+    if (!rawFiles || rawFiles.length === 0) return;
 
-    const validation = validateGalleryMediaFile(file);
-    if (!validation.valid || !validation.mediaType) {
-      setErrorMsg(validation.error || 'Unsupported file.');
-      return;
+    const filesArray = Array.from(rawFiles);
+    if (filesArray.length > 1) {
+      const validPhotos: File[] = [];
+      for (const f of filesArray) {
+        const val = normalizeSelectedMediaFile(f, 'photo');
+        if (val.valid && val.file) {
+          validPhotos.push(val.file);
+        }
+      }
+      if (validPhotos.length === 0) {
+        setErrorMsg('Please select valid photos.');
+        return;
+      }
+      setSelectedFiles(validPhotos);
+      setSelectedFile(validPhotos[0]);
+      setMediaType('photo');
+      setPreviewUrl(URL.createObjectURL(validPhotos[0]));
+      setErrorMsg(null);
+      setIsStatusEditorOpen(true);
+    } else {
+      const file = filesArray[0];
+      const validation = normalizeSelectedMediaFile(file);
+      if (!validation.valid || !validation.mediaType || !validation.file) {
+        setErrorMsg(validation.error || 'Unsupported file.');
+        return;
+      }
+      setSelectedFiles([validation.file]);
+      setSelectedFile(validation.file);
+      setMediaType(validation.mediaType);
+      setPreviewUrl(URL.createObjectURL(validation.file));
+      setErrorMsg(null);
+      setIsStatusEditorOpen(true);
     }
-
-    if (previewUrl) URL.revokeObjectURL(previewUrl);
-    setSelectedFile(file);
-    setMediaType(validation.mediaType);
-    setPreviewUrl(URL.createObjectURL(file));
-    setErrorMsg(null);
-    setIsStatusEditorOpen(true);
   };
 
   const handlePublish = async (e: React.FormEvent) => {
@@ -106,7 +137,8 @@ export default function SocialPostComposer({ isOpen, onClose, onPublished }: Soc
       openAuthModal('login');
       return;
     }
-    if (!selectedFile) {
+    const filesToPublish = selectedFiles.length > 0 ? selectedFiles : selectedFile ? [selectedFile] : [];
+    if (filesToPublish.length === 0) {
       setErrorMsg('Please select or capture a photo or video first.');
       return;
     }
@@ -118,7 +150,7 @@ export default function SocialPostComposer({ isOpen, onClose, onPublished }: Soc
 
     try {
       const result = await publishGalleryMediaPost(
-        selectedFile,
+        filesToPublish.length > 1 ? filesToPublish : filesToPublish[0],
         caption,
         {
           uid: user.uid,
@@ -129,7 +161,8 @@ export default function SocialPostComposer({ isOpen, onClose, onPublished }: Soc
         (pct, text) => {
           setProgress(pct);
           setStatusLabel(text);
-        }
+        },
+        { location, privacy }
       );
 
       clearSelection();
@@ -162,6 +195,7 @@ export default function SocialPostComposer({ isOpen, onClose, onPublished }: Soc
           ref={galleryInputRef}
           type="file"
           accept="image/*,video/*"
+          multiple
           onChange={handleFileChange}
           className="hidden"
         />

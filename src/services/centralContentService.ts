@@ -277,25 +277,31 @@ export function deriveVideoThumbnail(videoUrl: string, explicitThumb?: string): 
  */
 export function mergeHomeSocialFeed(posts: UserPost[], videos: any[]): CentralFeedItem[] {
   const normalizedPosts: CentralFeedItem[] = posts
-    .filter((p) => p.publicationStatus === 'published' && p.mediaUrl)
-    .map((p) => ({
-      id: p.id,
-      sourceCollection: 'user_posts',
-      contentType: p.contentType || 'photo',
-      publicationStatus: p.publicationStatus,
-      authorUid: p.authorUid,
-      authorName: p.authorName || 'KING User',
-      authorPhoto: p.authorPhoto || '',
-      title: p.caption || (p.contentType === 'video' ? 'KING Video' : 'KING Photo'),
-      caption: p.caption || '',
-      mediaUrl: p.mediaUrl,
-      thumbnailUrl: p.thumbnailUrl || p.mediaUrl,
-      likesCount: parseNumericCount(p.likesCount),
-      viewsCount: 0,
-      commentsCount: parseNumericCount(p.commentsCount),
-      createdAt: p.createdAt,
-      createdAtMs: resolveTimestampMs(p.createdAt),
-    }));
+    .filter((p) => p.publicationStatus === 'published' && (p.mediaUrl || (Array.isArray(p.imageUrls) && p.imageUrls.length > 0)))
+    .map((p) => {
+      const primaryUrl = p.mediaUrl || (Array.isArray(p.imageUrls) ? p.imageUrls[0] : '') || '';
+      return {
+        id: p.id,
+        sourceCollection: 'user_posts',
+        contentType: p.contentType || 'photo',
+        publicationStatus: p.publicationStatus,
+        authorUid: p.authorUid,
+        authorName: p.authorName || 'KING User',
+        authorPhoto: p.authorPhoto || '',
+        title: p.caption || (p.contentType === 'video' ? 'KING Video' : 'KING Photo'),
+        caption: p.caption || '',
+        mediaUrl: primaryUrl,
+        thumbnailUrl: p.thumbnailUrl || primaryUrl,
+        imageUrls: Array.isArray(p.imageUrls) && p.imageUrls.length > 0 ? p.imageUrls : [primaryUrl].filter(Boolean),
+        location: p.location || '',
+        privacy: p.privacy || 'public',
+        likesCount: parseNumericCount(p.likesCount),
+        viewsCount: 0,
+        commentsCount: parseNumericCount(p.commentsCount),
+        createdAt: p.createdAt,
+        createdAtMs: resolveTimestampMs(p.createdAt),
+      };
+    });
 
   const normalizedVideos: CentralFeedItem[] = videos
     .filter(isVideoPublished)
@@ -434,14 +440,18 @@ export interface PublishMediaOptions {
   rawDurationSec?: number;
   muted?: boolean;
   durationLabel?: string;
+  location?: string;
+  privacy?: string;
+  thumbnailUrl?: string;
+  isStory?: boolean;
 }
 
 /**
- * Publish a photo (to `user_posts`) or video (to `videos`) directly from gallery/editor selection.
+ * Publish photo(s) (to `user_posts`) or video (to `videos`) directly from gallery/editor selection.
  * Requires authenticated Firebase user.
  */
 export async function publishGalleryMediaPost(
-  file: File,
+  fileOrFiles: File | File[],
   caption: string,
   user: { uid: string; displayName?: string | null; photoURL?: string | null; email?: string | null },
   onProgress?: (percent: number, statusText: string) => void,
@@ -451,58 +461,90 @@ export async function publishGalleryMediaPost(
     throw new Error('Authentication required. Please sign in before uploading.');
   }
 
-  const validation = validateGalleryMediaFile(file);
-  if (!validation.valid || !validation.mediaType) {
-    throw new Error(validation.error || 'Invalid media file.');
+  const files = Array.isArray(fileOrFiles) ? fileOrFiles : [fileOrFiles];
+  if (files.length === 0) {
+    throw new Error('Please choose a photo or video from your gallery.');
   }
 
-  const mediaType = validation.mediaType;
-  const resourceType = mediaType === 'photo' ? 'image' : 'video';
-  const cleanCaption = (caption || '').trim().slice(0, 500);
+  const rawCaption = (caption || '').trim();
+  const location = (options?.location || '').trim().slice(0, 100);
+  const combinedCaption =
+    location && !rawCaption.toLowerCase().includes(location.toLowerCase())
+      ? [rawCaption, `📍 ${location}`].filter(Boolean).join(' • ')
+      : rawCaption;
+  const cleanCaption = combinedCaption.slice(0, 500);
   const authorName =
     (user.displayName || user.email?.split('@')[0] || 'KING Creator').trim().slice(0, 100) ||
     'KING Creator';
   const authorPhoto = (user.photoURL || '').trim().slice(0, 1000);
 
-  if (onProgress) onProgress(5, `Uploading ${mediaType} to cloud storage...`);
-  const secureUrl = await uploadFileToCloudinary(file, resourceType, (pct, msg) => {
-    if (onProgress) onProgress(Math.min(88, Math.max(5, Math.round(pct * 0.85))), msg);
-  });
+  if (files.length > 1 || files[0].type.startsWith('image/') || files[0].name.match(/\.(jpg|jpeg|png|webp|gif|avif)$/i)) {
+    const imageUrls: string[] = [];
+    const total = files.length;
+    for (let i = 0; i < total; i++) {
+      const f = files[i];
+      const val = validateGalleryMediaFile(f, 'photo');
+      if (!val.valid) throw new Error(val.error || `Invalid photo at index ${i}`);
+      const pctBase = Math.round((i / total) * 75);
+      if (onProgress) onProgress(pctBase + 5, `Uploading photo ${i + 1} of ${total}...`);
+      const url = await uploadFileToCloudinary(f, 'image', (p) => {
+        if (onProgress) onProgress(pctBase + Math.round((p / 100) * (75 / total)), `Uploading photo ${i + 1}...`);
+      });
+      imageUrls.push(url);
+    }
 
-  if (onProgress) onProgress(92, 'Publishing to KING feed...');
-
-  if (mediaType === 'photo') {
-    const payload = {
-      contentType: 'photo' as const,
-      publicationStatus: 'published' as const,
-      authorUid: user.uid,
-      authorName,
-      authorPhoto,
-      mediaUrl: secureUrl,
-      thumbnailUrl: secureUrl,
-      caption: cleanCaption,
-      likesCount: 0,
-      commentsCount: 0,
-      source: 'home_composer' as const,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    };
+    if (onProgress) onProgress(90, 'Publishing photo post to KING feed...');
 
     try {
-      const ref = await addDoc(collection(db, 'user_posts'), payload);
-      if (onProgress) onProgress(100, 'Photo published to Home Feed!');
+      let primaryPostId = '';
+      const primaryUrl = imageUrls[0] || '';
+      for (let i = 0; i < imageUrls.length; i++) {
+        const mediaUrl = imageUrls[i];
+        const payload = {
+          contentType: 'photo' as const,
+          publicationStatus: 'published' as const,
+          authorUid: user.uid,
+          authorName,
+          authorPhoto,
+          mediaUrl,
+          thumbnailUrl: mediaUrl.slice(0, 2000),
+          caption: i === 0 ? cleanCaption : cleanCaption ? `${cleanCaption} (${i + 1}/${imageUrls.length})` : '',
+          likesCount: 0,
+          commentsCount: 0,
+          source: 'home_composer' as const,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        };
+        const ref = await addDoc(collection(db, 'user_posts'), payload);
+        if (i === 0) primaryPostId = ref.id;
+      }
+
+      if (onProgress) onProgress(100, 'Photos published to Home Feed!');
       return {
-        id: ref.id,
+        id: primaryPostId,
         contentType: 'photo',
         collectionName: 'user_posts',
-        mediaUrl: secureUrl,
+        mediaUrl: primaryUrl,
       };
     } catch (error) {
       handleFirestoreError(error, OperationType.CREATE, 'user_posts');
     }
   }
 
-  // Video post -> saved to canonical `videos` collection so it auto-syncs to BOTH Home Feed AND Videos Section
+  // Single video upload
+  const file = files[0];
+  const validation = validateGalleryMediaFile(file, 'video');
+  if (!validation.valid || !validation.mediaType) {
+    throw new Error(validation.error || 'Invalid video file.');
+  }
+
+  if (onProgress) onProgress(5, 'Uploading video to cloud storage...');
+  const secureUrl = await uploadFileToCloudinary(file, 'video', (pct, msg) => {
+    if (onProgress) onProgress(Math.min(88, Math.max(5, Math.round(pct * 0.85))), msg);
+  });
+
+  if (onProgress) onProgress(92, 'Publishing video to KING feed...');
+
   const hasTrim =
     typeof options?.trimStartSec === 'number' &&
     typeof options?.trimEndSec === 'number' &&
@@ -531,8 +573,15 @@ export async function publishGalleryMediaPost(
     );
   }
 
-  let derivedThumb = deriveVideoThumbnail(secureUrl);
-  if (hasTrim && options?.trimStartSec && options.trimStartSec > 0.1 && derivedThumb.includes('/video/upload/')) {
+  const safeExplicitThumb =
+    options?.thumbnailUrl &&
+    !options.thumbnailUrl.startsWith('data:') &&
+    options.thumbnailUrl.length <= 2000
+      ? options.thumbnailUrl
+      : '';
+
+  let derivedThumb = safeExplicitThumb || deriveVideoThumbnail(secureUrl);
+  if (!safeExplicitThumb && hasTrim && options?.trimStartSec && options.trimStartSec > 0.1 && derivedThumb.includes('/video/upload/')) {
     derivedThumb = derivedThumb.replace(
       '/video/upload/',
       `/video/upload/so_${options.trimStartSec.toFixed(1)}/`
@@ -580,6 +629,7 @@ export async function publishGalleryMediaPost(
     handleFirestoreError(error, OperationType.CREATE, 'videos');
   }
 }
+
 
 /**
  * Subscribe to published user photo/social posts from `user_posts`.

@@ -1,0 +1,49 @@
+{
+  "firestore": {
+    "database": "ai-studio-king-4e115b8f-6ca5-4501-8ff0-73c2c7c21a47",
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
+  "emulators": {
+    "firestore": {
+      "host": "127.0.0.1",
+      "port": 8088
+    },
+    "singleProjectMode": true
+  },
+  "hosting": {
+    "public": "dist",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "rewrites": [
+      {
+        "source": "/api/**",
+        "run": {
+          "serviceId": "king-app-server",
+          "region": "asia-east1"
+        }
+      },
+      {
+        "source": "/watch/**",
+        "run": {
+          "serviceId": "king-app-server",
+          "region": "asia-east1"
+        }
+      },
+      {
+        "source": "/ads.txt",
+        "run": {
+          "serviceId": "king-app-server",
+          "region": "asia-east1"
+        }
+      },
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ]
+  }
+}

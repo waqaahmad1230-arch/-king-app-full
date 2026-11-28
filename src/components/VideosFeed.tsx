@@ -1364,6 +1364,7 @@ export default function VideosFeed({
         videoId={activeVideo?.id || null}
         videoTitle={activeVideo?.title || "KING Video"}
         totalLikesCount={activeVideoLikesCount}
+        onOpenCreatorProfile={onOpenCreatorProfile}
       />
 
       {/* Copied Link Toast */}

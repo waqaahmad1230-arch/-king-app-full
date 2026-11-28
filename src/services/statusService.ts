@@ -3,7 +3,9 @@ import {
   deleteDoc,
   doc,
   getDocs,
+  limit,
   onSnapshot,
+  orderBy,
   query,
   runTransaction,
   serverTimestamp,
@@ -820,38 +822,63 @@ export function subscribeMyNotifications(
     return () => {};
   }
 
-  const q = query(collection(db, 'notifications'), where('recipientUid', '==', safeUid));
-  return onSnapshot(
-    q,
-    (snap) => {
-      const nowMs = Date.now();
-      const items: AppNotificationRecord[] = [];
-      snap.forEach((d) => {
-        const data = d.data();
-        const expMs = toMillis(data.expiresAt);
-        if (expMs > 0 && expMs <= nowMs) return;
-        items.push({
-          id: d.id,
-          recipientUid: String(data.recipientUid || safeUid),
-          actorUid: String(data.actorUid || ''),
-          actorName: String(data.actorName || 'KING Member'),
-          actorPhoto: String(data.actorPhoto || ''),
-          type: data.type || 'status_reaction',
-          statusId: String(data.statusId || ''),
-          title: String(data.title || 'New Notification'),
-          body: String(data.body || ''),
-          emoji: data.emoji,
-          read: Boolean(data.read),
-          createdAtMs: toMillis(data.createdAt),
+  let active = true;
+  let unsub: () => void = () => {};
+
+  const start = (ordered: boolean) => {
+    if (!active) return;
+    const q = ordered
+      ? query(
+          collection(db, 'notifications'),
+          where('recipientUid', '==', safeUid),
+          orderBy('createdAt', 'desc'),
+          limit(80)
+        )
+      : query(collection(db, 'notifications'), where('recipientUid', '==', safeUid), limit(80));
+
+    unsub = onSnapshot(
+      q,
+      (snap) => {
+        const nowMs = Date.now();
+        const items: AppNotificationRecord[] = [];
+        snap.forEach((d) => {
+          const data = d.data();
+          const expMs = toMillis(data.expiresAt);
+          if (expMs > 0 && expMs <= nowMs) return;
+          items.push({
+            id: d.id,
+            recipientUid: String(data.recipientUid || safeUid),
+            actorUid: String(data.actorUid || ''),
+            actorName: String(data.actorName || 'KING Member'),
+            actorPhoto: String(data.actorPhoto || ''),
+            type: data.type || 'status_reaction',
+            statusId: data.statusId ? String(data.statusId) : undefined,
+            title: String(data.title || 'New Notification'),
+            body: String(data.body || ''),
+            emoji: data.emoji,
+            read: Boolean(data.read),
+            createdAtMs: toMillis(data.createdAt),
+          });
         });
-      });
-      items.sort((a, b) => b.createdAtMs - a.createdAtMs);
-      onChange(items);
-    },
-    (err) => {
-      console.warn('[statusService] subscribeMyNotifications notice:', err);
-    }
-  );
+        items.sort((a, b) => b.createdAtMs - a.createdAtMs);
+        onChange(items);
+      },
+      (err: any) => {
+        if (ordered && err?.code === 'failed-precondition') {
+          unsub();
+          start(false);
+          return;
+        }
+        console.warn('[statusService] subscribeMyNotifications notice:', err);
+      }
+    );
+  };
+
+  start(true);
+  return () => {
+    active = false;
+    unsub();
+  };
 }
 
 export async function markNotificationRead(notificationId: string): Promise<void> {

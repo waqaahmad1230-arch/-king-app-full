@@ -86,7 +86,65 @@ export interface VaultPersistenceInfo {
   vaultPath: string;
   encryptionKeyPersistent: boolean;
   multiInstanceSafe: boolean;
+  remoteSyncStatus?: 'ok' | 'unconfigured' | 'error';
+  remoteError?: string;
+  decryptionError?: string;
+  lastSyncedAt?: string;
   warning?: string;
+}
+
+export type FalQuotaScope = 'rpm_throttle' | 'concurrency_limit' | 'queue_limit';
+
+export interface FalModelHealthRecord {
+  modelId: string;
+  status: 'ready' | 'error';
+  failureCount: number;
+  cooldownUntil?: number;
+  lastError?: string;
+  updatedAt: string;
+}
+
+export interface VerifiedFalModelSpec {
+  id: string;
+  displayName: string;
+  capability: 'image' | 'image_edit' | 'video' | 'image_to_video';
+  description: string;
+  defaultEnabled: boolean;
+  maxInputImageMb?: number;
+  supportedAspectRatios?: Array<'1:1' | '16:9' | '9:16' | '4:3' | '3:4'>;
+  supportedDurations?: string[];
+  requiresSourceImage?: boolean;
+}
+
+export interface FalAiConfigState {
+  enableFalKeyFallback: boolean;
+  enableFalImageFallback: boolean;
+  enableFalVideoFallback: boolean;
+  preferFalForVideo: boolean;
+  maxConcurrentPerKey?: number;
+  requestTimeoutSec?: number;
+  maxQueueWaitSec?: number;
+  primaryFalImageModel: string;
+  primaryFalImageEditModel: string;
+  primaryFalVideoModel: string;
+  primaryFalImageToVideoModel: string;
+}
+
+export interface SafeFalKeySummary {
+  id: string;
+  label: string;
+  maskedKey: string;
+  source: 'admin_vault' | 'runtime_env';
+  envVarName?: string;
+  enabled: boolean;
+  priority: number;
+  status: KeyHealthStatus;
+  quotaScope?: FalQuotaScope;
+  failureCount: number;
+  consecutiveFailures: number;
+  lastError?: string;
+  lastTestedAt?: string;
+  cooldownUntil?: number;
 }
 
 export interface AdminAiManagerState {
@@ -98,6 +156,14 @@ export interface AdminAiManagerState {
   modelConfig: AiModelConfigState;
   keys: SafeAdminKeySummary[];
   projects?: ProjectHealthRecord[];
+  falKeys?: SafeFalKeySummary[];
+  falConfig?: FalAiConfigState;
+  falModels?: VerifiedFalModelSpec[];
+  falModelHealth?: FalModelHealthRecord[];
+  falRuntimeMetrics?: {
+    activeInFlightByKey: Record<string, number>;
+    pendingQueueJobsByKey: Record<string, number>;
+  };
 }
 
 export type AiBackendHealthState = 'healthy' | 'zero_keys' | 'server_error' | 'unavailable';
@@ -135,6 +201,11 @@ export interface PostAiCapabilityResponse {
   healthyKeyCount?: number;
   keyStatuses?: KeyDiagnosticStatus[];
   projects?: ProjectHealthRecord[];
+  falConfigured?: boolean;
+  falImageSupported?: boolean;
+  falVideoSupported?: boolean;
+  falActiveKeyCount?: number;
+  falHealthyKeyCount?: number;
 }
 
 export interface AiRoutingMetadata {
@@ -686,4 +757,69 @@ export async function testAdminAiModel(params: {
     body: JSON.stringify(params),
   });
   return parseSafeApiJson(res, 'Admin model test endpoint');
+}
+
+// --- ADMIN fal.ai KEY VAULT & TECHNICAL FAILOVER CLIENT CALLS ---
+
+export async function updateAdminFalConfig(
+  patch: Partial<FalAiConfigState>
+): Promise<{ ok: boolean; falConfig: FalAiConfigState; state: AdminAiManagerState }> {
+  return adminFetch('/api/admin/ai/fal/config', {
+    method: 'POST',
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function addAdminFalKey(params: {
+  label: string;
+  apiKey: string;
+  priority?: number;
+}): Promise<{ ok: boolean; key: SafeFalKeySummary; state: AdminAiManagerState }> {
+  return adminFetch('/api/admin/ai/fal/keys', {
+    method: 'POST',
+    body: JSON.stringify(params),
+  });
+}
+
+export async function updateAdminFalKey(
+  keyId: string,
+  patch: {
+    label?: string;
+    apiKey?: string;
+    enabled?: boolean;
+    priority?: number;
+    resetHealth?: boolean;
+  }
+): Promise<{ ok: boolean; key: SafeFalKeySummary; state: AdminAiManagerState }> {
+  return adminFetch(`/api/admin/ai/fal/keys/${encodeURIComponent(keyId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function deleteAdminFalKey(
+  keyId: string
+): Promise<{ ok: boolean; state: AdminAiManagerState }> {
+  return adminFetch(`/api/admin/ai/fal/keys/${encodeURIComponent(keyId)}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function testAdminFalKey(keyId: string): Promise<{
+  ok: boolean;
+  keyId?: string;
+  latencyMs?: number;
+  quotaScope?: FalQuotaScope;
+  code?: string;
+  message?: string;
+  error?: string;
+  state: AdminAiManagerState;
+}> {
+  const headers = await getAuthHeaders();
+  const res = await fetch('/api/admin/ai/fal/test-key', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ keyId }),
+  });
+  return parseSafeApiJson(res, 'Admin fal.ai key test endpoint');
 }

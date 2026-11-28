@@ -14,11 +14,18 @@ export interface BrushStroke {
 export interface PhotoEditState {
   aspect: EditorAspectPreset;
   rotation: 0 | 90 | 180 | 270;
+  flipX?: boolean;
+  flipY?: boolean;
   zoom: number;
   panX: number; // normalized -0.5..0.5
   panY: number; // normalized -0.5..0.5
   bgColor: string;
   filterCss?: string;
+  brightness?: number;
+  contrast?: number;
+  saturation?: number;
+  exposure?: number;
+  blur?: number;
   strokes: BrushStroke[];
   overlays: StatusMediaOverlay[];
 }
@@ -208,17 +215,76 @@ export function drawPhotoCanvasFrame(
   ctx.save();
   ctx.translate(width / 2 + state.panX * width, height / 2 + state.panY * height);
   ctx.rotate((state.rotation * Math.PI) / 180);
+  if (state.flipX || state.flipY) {
+    ctx.scale(state.flipX ? -1 : 1, state.flipY ? -1 : 1);
+  }
+  const filters: string[] = [];
   if (state.filterCss && state.filterCss !== 'none') {
+    filters.push(state.filterCss);
+  }
+  const b = typeof state.brightness === 'number' ? state.brightness : 1;
+  const c = typeof state.contrast === 'number' ? state.contrast : 1;
+  const s = typeof state.saturation === 'number' ? state.saturation : 1;
+  const exp = typeof state.exposure === 'number' ? state.exposure : 1;
+  const blurVal = typeof state.blur === 'number' ? state.blur : 0;
+
+  if (b !== 1) filters.push(`brightness(${b})`);
+  if (c !== 1) filters.push(`contrast(${c})`);
+  if (s !== 1) filters.push(`saturate(${s})`);
+  if (exp !== 1) filters.push(`brightness(${exp})`);
+  if (blurVal > 0) filters.push(`blur(${blurVal}px)`);
+
+  let usedCanvasFilter = false;
+  if (filters.length > 0) {
     try {
-      ctx.filter = state.filterCss;
+      if ('filter' in ctx) {
+        ctx.filter = filters.join(' ');
+        usedCanvasFilter = ctx.filter !== 'none' && ctx.filter !== '';
+      }
     } catch {
-      // ignore
+      usedCanvasFilter = false;
     }
   }
   const drawW = naturalW * finalScale;
   const drawH = naturalH * finalScale;
   ctx.drawImage(img, -drawW / 2, -drawH / 2, drawW, drawH);
   ctx.restore();
+
+  // Lightweight fallback when browser lacks CanvasRenderingContext2D.filter support
+  if (filters.length > 0 && !usedCanvasFilter) {
+    try {
+      const imgData = ctx.getImageData(0, 0, width, height);
+      const data = imgData.data;
+      const brightMul = b * exp;
+      for (let i = 0; i < data.length; i += 4) {
+        let r = data[i];
+        let g = data[i + 1];
+        let bl = data[i + 2];
+        if (brightMul !== 1) {
+          r *= brightMul;
+          g *= brightMul;
+          bl *= brightMul;
+        }
+        if (c !== 1) {
+          r = (r - 128) * c + 128;
+          g = (g - 128) * c + 128;
+          bl = (bl - 128) * c + 128;
+        }
+        if (s !== 1) {
+          const lum = 0.2126 * r + 0.7152 * g + 0.0722 * bl;
+          r = lum + (r - lum) * s;
+          g = lum + (g - lum) * s;
+          bl = lum + (bl - lum) * s;
+        }
+        data[i] = Math.max(0, Math.min(255, r));
+        data[i + 1] = Math.max(0, Math.min(255, g));
+        data[i + 2] = Math.max(0, Math.min(255, bl));
+      }
+      ctx.putImageData(imgData, 0, 0);
+    } catch {
+      // Ignore tainted canvas
+    }
+  }
 
   if (!includeOverlaysAndStrokes) {
     ctx.restore();

@@ -18,12 +18,28 @@ import {
   Image as ImageIcon,
   Loader2,
   ArrowLeft,
-  ShieldCheck
+  ShieldCheck,
+  Ticket,
+  Minus,
+  Plus,
+  AlertCircle,
+  RotateCcw
 } from 'lucide-react';
 import { Html5Qrcode } from 'html5-qrcode';
 import kingLogo from '../assets/king-logo.png';
 import { CatalogProduct } from '../types/catalog';
 import { subscribeCatalogProducts, orderOnWhatsApp, markCatalogAsSeen } from '../services/catalogService';
+import {
+  trackMissionActivity,
+  fetchKingWallet,
+  validateCheckoutCoupon,
+  createVerifiedWhatsAppCheckout,
+  releaseWhatsAppCheckoutReservation,
+  type KingShopCoupon,
+  type CouponValidationResponse,
+} from '../services/kingShopFrontendService';
+import { useAuth } from '../context/AuthContext';
+import KingShopRewardsSection from './KingShopRewardsSection';
 
 interface CatalogViewProps {
   onBackToHome?: () => void;
@@ -31,11 +47,29 @@ interface CatalogViewProps {
 }
 
 export default function CatalogView({ onBackToHome, onOpenSecretAdminTrigger }: CatalogViewProps) {
+  const { user, openAuthModal } = useAuth();
   const [products, setProducts] = useState<CatalogProduct[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
   const [selectedProduct, setSelectedProduct] = useState<CatalogProduct | null>(null);
+  const [rewardsRefreshTrigger, setRewardsRefreshTrigger] = useState(0);
+
+  // Verified WhatsApp Checkout & Coupon State
+  const [orderQty, setOrderQty] = useState<number>(1);
+  const [couponInput, setCouponInput] = useState<string>('');
+  const [appliedQuote, setAppliedQuote] = useState<CouponValidationResponse | null>(null);
+  const [couponError, setCouponError] = useState<string | null>(null);
+  const [isValidatingCoupon, setIsValidatingCoupon] = useState(false);
+  const [isCheckingOut, setIsCheckingOut] = useState(false);
+  const [availableCoupons, setAvailableCoupons] = useState<KingShopCoupon[]>([]);
+  const [checkoutIdempKey, setCheckoutIdempKey] = useState<string>('');
+  const [pendingReservation, setPendingReservation] = useState<{
+    orderRef: string;
+    couponCode: string;
+    reservationExpiresAt: string;
+    finalTotal: number;
+  } | null>(null);
 
   // Smart Scanner Search Modal State
   const [isSearchModalOpen, setIsSearchModalOpen] = useState(false);
@@ -102,6 +136,27 @@ export default function CatalogView({ onBackToHome, onOpenSecretAdminTrigger }: 
 
     return () => clearTimeout(timer);
   }, []);
+
+  // Load signed-in customer's active KING SHOP vouchers for quick checkout selection
+  useEffect(() => {
+    if (!user) {
+      setAvailableCoupons([]);
+      return;
+    }
+    let cancelled = false;
+    void fetchKingWallet()
+      .then((wallet) => {
+        if (!cancelled) {
+          setAvailableCoupons((wallet.coupons || []).filter((c) => c.status === 'active'));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setAvailableCoupons([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user, rewardsRefreshTrigger]);
 
   const stopQrCamera = async () => {
     if (html5QrRef.current) {
@@ -327,16 +382,123 @@ export default function CatalogView({ onBackToHome, onOpenSecretAdminTrigger }: 
     return matchesSearch && matchesCategory;
   });
 
-  // When selecting a product, reset active media view to 1st photo
+  // When selecting a product, reset active media view and checkout state
   const handleSelectProduct = (product: CatalogProduct) => {
     setSelectedProduct(product);
     setActiveMediaType('photo');
     setActiveMediaIndex(0);
+    setOrderQty(1);
+    setCouponInput('');
+    setAppliedQuote(null);
+    setCouponError(null);
+    setCheckoutIdempKey('');
     window.scrollTo({ top: 0, behavior: 'smooth' });
+    void trackMissionActivity('browse_products', product.id)
+      .then((res) => {
+        if (res.verified) setRewardsRefreshTrigger((prev) => prev + 1);
+      })
+      .catch(() => {});
   };
 
   const handleBackToListing = () => {
     setSelectedProduct(null);
+    setOrderQty(1);
+    setCouponInput('');
+    setAppliedQuote(null);
+    setCouponError(null);
+    setCheckoutIdempKey('');
+  };
+
+  const handleApplyCoupon = async (overrideCode?: string) => {
+    if (!selectedProduct || isValidatingCoupon) return;
+    const code = (overrideCode ?? couponInput).trim().toUpperCase();
+    setCouponError(null);
+    setCheckoutIdempKey('');
+
+    if (!code) {
+      setAppliedQuote(null);
+      return;
+    }
+    if (!user) {
+      setCouponError('Please sign in to validate and apply KING SHOP vouchers.');
+      openAuthModal('login');
+      return;
+    }
+
+    setIsValidatingCoupon(true);
+    try {
+      const quote = await validateCheckoutCoupon(code, [
+        { productId: selectedProduct.id, quantity: orderQty },
+      ]);
+      setCouponInput(quote.coupon.code);
+      setAppliedQuote(quote);
+    } catch (err: any) {
+      setAppliedQuote(null);
+      setCouponError(err?.message || 'Unable to validate coupon for this item.');
+    } finally {
+      setIsValidatingCoupon(false);
+    }
+  };
+
+  const handleWhatsAppOrder = async () => {
+    if (!selectedProduct || isCheckingOut || selectedProduct.stock <= 0) return;
+    const codeToApply = (appliedQuote?.coupon.code || couponInput).trim().toUpperCase();
+
+    // Preserve seamless non-coupon WhatsApp ordering for guests and plain orders
+    if (!codeToApply) {
+      orderOnWhatsApp(selectedProduct, undefined, orderQty);
+      return;
+    }
+
+    if (!user) {
+      setCouponError('Please sign in to checkout with a KING SHOP voucher.');
+      openAuthModal('login');
+      return;
+    }
+
+    setIsCheckingOut(true);
+    setCouponError(null);
+    try {
+      const key =
+        checkoutIdempKey || `wa_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      if (!checkoutIdempKey) setCheckoutIdempKey(key);
+
+      const res = await createVerifiedWhatsAppCheckout({
+        items: [{ productId: selectedProduct.id, quantity: orderQty }],
+        couponCode: codeToApply,
+        idempotencyKey: key,
+      });
+
+      setPendingReservation({
+        orderRef: res.orderRef,
+        couponCode: res.couponCode,
+        reservationExpiresAt: res.reservationExpiresAt,
+        finalTotal: res.finalTotal,
+      });
+      setAppliedQuote(null);
+      setRewardsRefreshTrigger((prev) => prev + 1);
+      window.location.href = res.whatsappUrl;
+    } catch (err: any) {
+      setCouponError(err?.message || 'Failed to verify voucher for WhatsApp checkout.');
+    } finally {
+      setIsCheckingOut(false);
+    }
+  };
+
+  const handleReleasePendingReservation = async () => {
+    if (!pendingReservation) return;
+    try {
+      await releaseWhatsAppCheckoutReservation({
+        orderRef: pendingReservation.orderRef,
+        couponCode: pendingReservation.couponCode,
+      });
+      setPendingReservation(null);
+      setCouponError(null);
+      setCheckoutIdempKey('');
+      setRewardsRefreshTrigger((prev) => prev + 1);
+    } catch (err: any) {
+      setCouponError(err?.message || 'Could not release reservation.');
+    }
   };
 
   // Helper for pricing math
@@ -451,6 +613,13 @@ export default function CatalogView({ onBackToHome, onOpenSecretAdminTrigger }: 
                     src={selectedProduct.videoUrls[activeMediaIndex]}
                     controls
                     playsInline
+                    onPlay={() => {
+                      void trackMissionActivity('watch_video', `${selectedProduct.id}_v${activeMediaIndex}`)
+                        .then((res) => {
+                          if (res.verified) setRewardsRefreshTrigger((prev) => prev + 1);
+                        })
+                        .catch(() => {});
+                    }}
                     className="w-full h-full object-contain bg-black"
                   />
                 )}
@@ -524,6 +693,11 @@ export default function CatalogView({ onBackToHome, onOpenSecretAdminTrigger }: 
                       onClick={() => {
                         setActiveMediaType('video');
                         setActiveMediaIndex(idx);
+                        void trackMissionActivity('watch_video', `${selectedProduct.id}_v${idx}`)
+                          .then((res) => {
+                            if (res.verified) setRewardsRefreshTrigger((prev) => prev + 1);
+                          })
+                          .catch(() => {});
                       }}
                       className={`relative w-14 h-14 shrink-0 rounded-xl overflow-hidden border-2 transition-all cursor-pointer bg-slate-950 flex items-center justify-center ${
                         isSelected 
@@ -602,15 +776,192 @@ export default function CatalogView({ onBackToHome, onOpenSecretAdminTrigger }: 
                 </p>
               </div>
 
-              {/* Direct WhatsApp Order Action */}
-              <div className="pt-2 space-y-1.5">
+              {/* Quantity, Voucher Validation & Verified WhatsApp Checkout */}
+              <div className="pt-2 space-y-3 border-t border-neutral-800/80">
+                {/* Quantity Selector */}
+                <div className="flex items-center justify-between bg-[#060a14] border border-slate-800 rounded-2xl px-3 py-2">
+                  <div>
+                    <div className="text-[11px] font-black text-white">Order Quantity</div>
+                    <div className="text-[10px] text-slate-400">
+                      Subtotal: Rs.{' '}
+                      {(
+                        (selectedProduct.discountPrice || selectedProduct.originalPrice) * orderQty
+                      ).toLocaleString()}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      aria-label="Decrease quantity"
+                      disabled={orderQty <= 1}
+                      onClick={() => {
+                        setOrderQty((q) => Math.max(1, q - 1));
+                        setAppliedQuote(null);
+                        setCheckoutIdempKey('');
+                      }}
+                      className="w-7 h-7 rounded-lg bg-[#141414] border border-slate-700 flex items-center justify-center text-white disabled:opacity-40 cursor-pointer"
+                    >
+                      <Minus className="w-3.5 h-3.5" />
+                    </button>
+                    <span className="w-6 text-center text-xs font-black text-amber-300">{orderQty}</span>
+                    <button
+                      type="button"
+                      aria-label="Increase quantity"
+                      disabled={orderQty >= Math.min(20, Math.max(1, selectedProduct.stock || 1))}
+                      onClick={() => {
+                        setOrderQty((q) =>
+                          Math.min(20, Math.max(1, selectedProduct.stock || 1), q + 1)
+                        );
+                        setAppliedQuote(null);
+                        setCheckoutIdempKey('');
+                      }}
+                      className="w-7 h-7 rounded-lg bg-[#141414] border border-slate-700 flex items-center justify-center text-white disabled:opacity-40 cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Voucher / Promo Code Box */}
+                <div className="p-3 rounded-2xl bg-[#060a14] border border-amber-500/25 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-black text-amber-300 uppercase tracking-wider flex items-center gap-1.5">
+                      <Ticket className="w-3.5 h-3.5 text-amber-400" />
+                      KING Voucher Code (Optional)
+                    </span>
+                    {appliedQuote && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCouponInput('');
+                          setAppliedQuote(null);
+                          setCouponError(null);
+                          setCheckoutIdempKey('');
+                        }}
+                        className="text-[10px] font-bold text-slate-400 hover:text-white cursor-pointer"
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="text"
+                      value={couponInput}
+                      onChange={(e) => {
+                        setCouponInput(e.target.value.toUpperCase());
+                        setAppliedQuote(null);
+                        setCouponError(null);
+                        setCheckoutIdempKey('');
+                      }}
+                      placeholder="Enter voucher code (e.g. KING-...)"
+                      className="flex-1 min-w-0 bg-[#121212] border border-slate-700 focus:border-amber-400 rounded-xl px-2.5 py-2 text-xs font-mono text-white focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      disabled={isValidatingCoupon || !couponInput.trim()}
+                      onClick={() => void handleApplyCoupon()}
+                      className="px-3 py-2 rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500 hover:text-slate-950 font-black text-xs transition shrink-0 disabled:opacity-40 cursor-pointer"
+                    >
+                      {isValidatingCoupon ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : 'Apply'}
+                    </button>
+                  </div>
+
+                  {/* Active User Voucher Quick-Select Chips */}
+                  {availableCoupons.length > 0 && (
+                    <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 scrollbar-none">
+                      {availableCoupons.map((c) => (
+                        <button
+                          key={c.id}
+                          type="button"
+                          onClick={() => {
+                            setCouponInput(c.code);
+                            void handleApplyCoupon(c.code);
+                          }}
+                          className={`px-2 py-1 rounded-lg border text-[10px] font-mono font-bold shrink-0 cursor-pointer transition ${
+                            appliedQuote?.coupon.code === c.code
+                              ? 'bg-emerald-500/20 border-emerald-400 text-emerald-300'
+                              : 'bg-[#141414] border-slate-700 text-amber-300 hover:border-amber-400'
+                          }`}
+                        >
+                          {c.title} ({c.code})
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {couponError && (
+                    <div className="p-2 rounded-xl bg-rose-950/60 border border-rose-500/40 text-[11px] text-rose-200 flex items-center gap-1.5">
+                      <AlertCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                      <span>{couponError}</span>
+                    </div>
+                  )}
+
+                  {appliedQuote && (
+                    <div className="p-2.5 rounded-xl bg-emerald-950/40 border border-emerald-500/40 space-y-1 text-[11px]">
+                      <div className="flex items-center justify-between text-slate-300">
+                        <span>Server Subtotal</span>
+                        <span className="font-bold">Rs. {appliedQuote.subtotal.toLocaleString()}</span>
+                      </div>
+                      <div className="flex items-center justify-between text-emerald-300">
+                        <span>{appliedQuote.freeDelivery ? 'Voucher Benefit' : 'Verified Discount'}</span>
+                        <span className="font-black">
+                          {appliedQuote.freeDelivery
+                            ? 'FREE DELIVERY'
+                            : `- Rs. ${appliedQuote.discountAmount.toLocaleString()}`}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between pt-1 border-t border-emerald-500/30 text-white font-black text-xs">
+                        <span>Final Payable</span>
+                        <span className="text-amber-300">Rs. {appliedQuote.finalTotal.toLocaleString()}</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {pendingReservation && (
+                  <div className="p-2.5 rounded-xl bg-amber-950/40 border border-amber-500/40 flex items-center justify-between gap-2 text-[11px]">
+                    <div className="min-w-0">
+                      <div className="font-black text-amber-300 truncate">
+                        Voucher Held for {pendingReservation.orderRef}
+                      </div>
+                      <div className="text-[10px] text-slate-300 truncate">
+                        Code {pendingReservation.couponCode} • Final Rs.{' '}
+                        {pendingReservation.finalTotal.toLocaleString()}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void handleReleasePendingReservation()}
+                      className="px-2.5 py-1.5 rounded-lg bg-neutral-900 border border-amber-500/40 text-amber-200 hover:bg-neutral-800 font-bold text-[10px] flex items-center gap-1 shrink-0 cursor-pointer"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      Release
+                    </button>
+                  </div>
+                )}
+
                 <button
                   type="button"
-                  onClick={() => orderOnWhatsApp(selectedProduct)}
-                  className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-emerald-600 via-emerald-500 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-black text-sm uppercase tracking-wider shadow-lg shadow-emerald-900/40 flex items-center justify-center gap-2 active:scale-95 transition cursor-pointer"
+                  disabled={isCheckingOut || selectedProduct.stock <= 0}
+                  onClick={() => void handleWhatsAppOrder()}
+                  className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-emerald-600 via-emerald-500 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-black text-sm uppercase tracking-wider shadow-lg shadow-emerald-900/40 flex items-center justify-center gap-2 active:scale-95 transition cursor-pointer disabled:opacity-50"
                 >
-                  <MessageCircle className="w-5 h-5 fill-white text-emerald-600 shrink-0" />
-                  <span>Order via WhatsApp Now</span>
+                  {isCheckingOut ? (
+                    <Loader2 className="w-5 h-5 animate-spin shrink-0" />
+                  ) : (
+                    <MessageCircle className="w-5 h-5 fill-white text-emerald-600 shrink-0" />
+                  )}
+                  <span>
+                    {selectedProduct.stock <= 0
+                      ? 'Out of Stock'
+                      : appliedQuote
+                        ? `Order on WhatsApp • Rs. ${appliedQuote.finalTotal.toLocaleString()}`
+                        : couponInput.trim()
+                          ? 'Verify Voucher & Order on WhatsApp'
+                          : 'Order via WhatsApp Now'}
+                  </span>
                 </button>
                 <p className="text-[10px] font-bold text-slate-400 text-center">
                   ⚡ Opens native WhatsApp chat directly with owner <span className="font-mono text-emerald-400">(923258448284)</span>
@@ -624,6 +975,9 @@ export default function CatalogView({ onBackToHome, onOpenSecretAdminTrigger }: 
           /* PAGE 1: PRODUCT LISTING CATALOG VIEW */
           <div className="space-y-4 animate-in fade-in duration-200">
             
+            {/* KING Shop Rewards & Wallet Hub */}
+            <KingShopRewardsSection refreshTrigger={rewardsRefreshTrigger} />
+
             {/* Sticky Category Filters Row + 42x42px Smart Search Icon Box right below 56px TopHeader */}
             <div className="sticky top-[56px] z-[90] -mx-3 px-3 py-2 mt-0 bg-[#0A0A0A]/95 backdrop-blur-md border-b border-neutral-900 space-y-2">
               <div className="flex items-center gap-2">

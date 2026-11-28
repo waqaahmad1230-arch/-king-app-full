@@ -219,6 +219,169 @@ export interface AiModelConfigState {
   enableModelFallback: boolean;
 }
 
+export type FalQuotaScope = 'rpm_throttle' | 'concurrency_limit' | 'queue_limit';
+
+export interface FalModelHealthRecord {
+  modelId: string;
+  status: 'ready' | 'error';
+  failureCount: number;
+  cooldownUntil?: number;
+  lastError?: string;
+  updatedAt: string;
+}
+
+export interface StoredFalVaultKeyRecord {
+  id: string;
+  label: string;
+  encryptedKey: string;
+  enabled: boolean;
+  priority: number;
+  status: KeyHealthStatus;
+  quotaScope?: FalQuotaScope;
+  failureCount?: number;
+  consecutiveFailures?: number;
+  lastError?: string;
+  lastTestedAt?: string;
+  cooldownUntil?: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FalEnvKeyOverrideRecord {
+  enabled: boolean;
+  priority: number;
+  status: KeyHealthStatus;
+  quotaScope?: FalQuotaScope;
+  failureCount?: number;
+  consecutiveFailures?: number;
+  lastError?: string;
+  lastTestedAt?: string;
+  cooldownUntil?: number;
+}
+
+export interface VerifiedFalModelSpec {
+  id: string;
+  displayName: string;
+  capability: 'image' | 'image_edit' | 'video' | 'image_to_video';
+  description: string;
+  defaultEnabled: boolean;
+  maxInputImageMb?: number;
+  supportedAspectRatios?: Array<'1:1' | '16:9' | '9:16' | '4:3' | '3:4'>;
+  supportedDurations?: string[];
+  requiresSourceImage?: boolean;
+}
+
+export const VERIFIED_FAL_MODELS: VerifiedFalModelSpec[] = [
+  {
+    id: 'fal-ai/flux/schnell',
+    displayName: 'FLUX.1 Schnell (Fast Image)',
+    capability: 'image',
+    description: 'Ultra-fast 4-step text-to-image generation on fal.ai.',
+    defaultEnabled: true,
+    supportedAspectRatios: ['1:1', '16:9', '9:16', '4:3', '3:4'],
+  },
+  {
+    id: 'fal-ai/flux/dev',
+    displayName: 'FLUX.1 Dev (High Quality)',
+    capability: 'image',
+    description: 'High-detail image generation fallback on fal.ai.',
+    defaultEnabled: true,
+    supportedAspectRatios: ['1:1', '16:9', '9:16', '4:3', '3:4'],
+  },
+  {
+    id: 'fal-ai/flux/dev/image-to-image',
+    displayName: 'FLUX.1 Dev (Image-to-Image Edit)',
+    capability: 'image_edit',
+    description: 'Restyle & image-to-image editing with uploaded source photos.',
+    defaultEnabled: true,
+    maxInputImageMb: 10,
+    requiresSourceImage: true,
+    supportedAspectRatios: ['1:1', '16:9', '9:16', '4:3', '3:4'],
+  },
+  {
+    id: 'fal-ai/flux-kontext/pro',
+    displayName: 'FLUX Kontext Pro (Instruction Edit)',
+    capability: 'image_edit',
+    description: 'Instruction-guided precision photo editing on fal.ai.',
+    defaultEnabled: true,
+    maxInputImageMb: 10,
+    requiresSourceImage: true,
+    supportedAspectRatios: ['1:1', '16:9', '9:16', '4:3', '3:4'],
+  },
+  {
+    id: 'fal-ai/wan/v2.1/1.3b/text-to-video',
+    displayName: 'Wan 2.1 Fast Text-to-Video',
+    capability: 'video',
+    description: 'Fast text-to-video generation on fal.ai queue.',
+    defaultEnabled: true,
+    supportedAspectRatios: ['16:9', '9:16'],
+    supportedDurations: ['5s'],
+  },
+  {
+    id: 'fal-ai/kling-video/v2.1/standard/text-to-video',
+    displayName: 'Kling 2.1 Text-to-Video',
+    capability: 'video',
+    description: 'Cinematic text-to-video fallback on fal.ai.',
+    defaultEnabled: true,
+    supportedAspectRatios: ['16:9', '9:16'],
+    supportedDurations: ['5s', '10s'],
+  },
+  {
+    id: 'fal-ai/kling-video/v2.1/standard/image-to-video',
+    displayName: 'Kling 2.1 Image-to-Video',
+    capability: 'image_to_video',
+    description: 'Animate a source still photo into video via fal.ai.',
+    defaultEnabled: true,
+    maxInputImageMb: 10,
+    requiresSourceImage: true,
+    supportedAspectRatios: ['16:9', '9:16'],
+    supportedDurations: ['5s', '10s'],
+  },
+];
+
+export interface FalAiConfigState {
+  enableFalKeyFallback: boolean;
+  enableFalImageFallback: boolean;
+  enableFalVideoFallback: boolean;
+  preferFalForVideo: boolean;
+  maxConcurrentPerKey: number;
+  requestTimeoutSec: number;
+  maxQueueWaitSec: number;
+  primaryFalImageModel: string;
+  primaryFalImageEditModel: string;
+  primaryFalVideoModel: string;
+  primaryFalImageToVideoModel: string;
+}
+
+export interface SafeFalKeySummary {
+  id: string;
+  label: string;
+  maskedKey: string;
+  source: 'admin_vault' | 'runtime_env';
+  envVarName?: string;
+  enabled: boolean;
+  priority: number;
+  status: KeyHealthStatus;
+  quotaScope?: FalQuotaScope;
+  failureCount: number;
+  consecutiveFailures: number;
+  lastError?: string;
+  lastTestedAt?: string;
+  cooldownUntil?: number;
+}
+
+export interface ResolvedExecutableFalKey {
+  id: string;
+  label: string;
+  rawKey: string;
+  source: 'admin_vault' | 'runtime_env';
+  enabled: boolean;
+  priority: number;
+  status: KeyHealthStatus;
+  quotaScope?: FalQuotaScope;
+  cooldownUntil?: number;
+}
+
 interface EncryptedVaultFilePayload {
   version: 1;
   iv: string;
@@ -231,6 +394,10 @@ interface PlainVaultData {
   envOverrides: Record<string, EnvKeyOverrideRecord>;
   projectHealth: Record<string, ProjectHealthRecord>;
   modelConfig: AiModelConfigState;
+  falKeys: StoredFalVaultKeyRecord[];
+  falEnvOverrides: Record<string, FalEnvKeyOverrideRecord>;
+  falModelHealth: Record<string, FalModelHealthRecord>;
+  falConfig: FalAiConfigState;
 }
 
 export interface SafeKeySummary {
@@ -286,14 +453,32 @@ const DEFAULT_MODEL_CONFIG: AiModelConfigState = {
   enableModelFallback: true,
 };
 
+const DEFAULT_FAL_CONFIG: FalAiConfigState = {
+  enableFalKeyFallback: true,
+  enableFalImageFallback: true,
+  enableFalVideoFallback: true,
+  preferFalForVideo: false,
+  maxConcurrentPerKey: 2,
+  requestTimeoutSec: 45,
+  maxQueueWaitSec: 45,
+  primaryFalImageModel: 'fal-ai/flux/schnell',
+  primaryFalImageEditModel: 'fal-ai/flux/dev/image-to-image',
+  primaryFalVideoModel: 'fal-ai/wan/v2.1/1.3b/text-to-video',
+  primaryFalImageToVideoModel: 'fal-ai/kling-video/v2.1/standard/image-to-video',
+};
+
 const UPSTASH_VAULT_REDIS_KEY = 'king:ai_vault:v1';
-const REMOTE_SYNC_TTL_MS = 8_000;
+const REMOTE_SYNC_TTL_MS = 2_000;
 
 export interface VaultPersistenceInfo {
   storageScope: 'upstash_redis_encrypted' | 'persistent_volume' | 'ephemeral_container_disk';
   vaultPath: string;
   encryptionKeyPersistent: boolean;
   multiInstanceSafe: boolean;
+  remoteSyncStatus?: 'ok' | 'unconfigured' | 'error';
+  remoteError?: string;
+  decryptionError?: string;
+  lastSyncedAt?: string;
   warning?: string;
 }
 
@@ -313,15 +498,56 @@ export function getVaultPersistenceInfo(): VaultPersistenceInfo {
   const upstash = getUpstashConfig();
   const isVercel = Boolean(process.env.VERCEL);
 
+  // Inspect whether any stored vault keys fail decryption under current secret
+  let perKeyDecryptFailures = 0;
+  try {
+    const vault = readVaultData();
+    for (const rec of [...vault.keys, ...vault.falKeys]) {
+      try {
+        decryptText(rec.encryptedKey);
+      } catch {
+        perKeyDecryptFailures += 1;
+      }
+    }
+  } catch {
+    // ignore read fallback here; whole-vault errors are surfaced in lastDecryptionError
+  }
+
+  const effectiveDecryptError =
+    lastDecryptionError ||
+    (perKeyDecryptFailures > 0
+      ? `${perKeyDecryptFailures} stored API key record(s) failed AES-256-GCM decryption. Check AI_VAULT_SECRET consistency.`
+      : undefined);
+
+  const lastSyncedAt = lastSuccessfulRemoteSyncAt
+    ? new Date(lastSuccessfulRemoteSyncAt).toISOString()
+    : undefined;
+
   if (upstash.configured) {
+    const remoteSyncStatus: 'ok' | 'error' =
+      lastRemoteSyncError || effectiveDecryptError ? 'error' : 'ok';
+    const warnings: string[] = [];
+    if (!hasEnvSecret) {
+      warnings.push(
+        'Set AI_VAULT_SECRET env var so Upstash AES-256-GCM encrypted keys remain decryptable across serverless invocations.'
+      );
+    }
+    if (lastRemoteSyncError) {
+      warnings.push(lastRemoteSyncError);
+    }
+    if (effectiveDecryptError) {
+      warnings.push(effectiveDecryptError);
+    }
     return {
       storageScope: 'upstash_redis_encrypted',
       vaultPath: `upstash-redis://${UPSTASH_VAULT_REDIS_KEY}`,
       encryptionKeyPersistent: hasEnvSecret,
-      multiInstanceSafe: hasEnvSecret,
-      warning: hasEnvSecret
-        ? undefined
-        : 'Set AI_VAULT_SECRET env var so Upstash AES-256-GCM encrypted keys remain decryptable across serverless invocations.',
+      multiInstanceSafe: hasEnvSecret && remoteSyncStatus === 'ok',
+      remoteSyncStatus,
+      remoteError: lastRemoteSyncError,
+      decryptionError: effectiveDecryptError,
+      lastSyncedAt,
+      warning: warnings.length > 0 ? warnings.join(' ') : undefined,
     };
   }
 
@@ -338,12 +564,17 @@ export function getVaultPersistenceInfo(): VaultPersistenceInfo {
         : 'Vault file currently uses local disk (single-instance unless UPSTASH_REDIS_REST_URL or AI_VAULT_DIR is configured; GEMINI_API_KEY env secrets persist automatically).'
     );
   }
+  if (effectiveDecryptError) {
+    warnings.push(effectiveDecryptError);
+  }
 
   return {
     storageScope: hasCustomVolume ? 'persistent_volume' : 'ephemeral_container_disk',
     vaultPath: VAULT_FILE_PATH,
     encryptionKeyPersistent: hasEnvSecret,
     multiInstanceSafe,
+    remoteSyncStatus: 'unconfigured',
+    decryptionError: effectiveDecryptError,
     warning: warnings.length > 0 ? warnings.join(' ') : undefined,
   };
 }
@@ -420,13 +651,36 @@ function createDefaultVaultData(): PlainVaultData {
       ...DEFAULT_MODEL_CONFIG,
       enabledModels: { ...DEFAULT_MODEL_CONFIG.enabledModels },
     },
+    falKeys: [],
+    falEnvOverrides: {},
+    falModelHealth: {},
+    falConfig: { ...DEFAULT_FAL_CONFIG },
   };
 }
 
 let inMemoryFallbackVault: PlainVaultData | null = null;
 let lastRemoteSyncAt = 0;
+let lastSuccessfulRemoteSyncAt: number | undefined;
+let lastRemoteSyncError: string | undefined;
+let lastDecryptionError: string | undefined;
 let inFlightRemoteSync: Promise<void> | null = null;
-let pendingRemoteWrites: Promise<void>[] = [];
+
+interface QueuedRemoteWrite {
+  promise: Promise<void>;
+  strict: boolean;
+}
+let pendingRemoteWrites: QueuedRemoteWrite[] = [];
+
+export function resetVaultRuntimeCacheForTests(): void {
+  inMemoryFallbackVault = null;
+  memoryKeyBuffer = null;
+  lastRemoteSyncAt = 0;
+  lastSuccessfulRemoteSyncAt = undefined;
+  lastRemoteSyncError = undefined;
+  lastDecryptionError = undefined;
+  inFlightRemoteSync = null;
+  pendingRemoteWrites = [];
+}
 
 function normalizePlainVaultData(parsed: Partial<PlainVaultData>): PlainVaultData {
   const defaults = createDefaultVaultData();
@@ -484,6 +738,9 @@ function normalizePlainVaultData(parsed: Partial<PlainVaultData>): PlainVaultDat
       ? rawCfg.imageSelectionPolicy
       : defaults.modelConfig.imageSelectionPolicy;
 
+  const rawFalCfg = parsed.falConfig || ({} as Partial<FalAiConfigState>);
+  const validFalIds = new Set(VERIFIED_FAL_MODELS.map((m) => m.id));
+
   return {
     keys: Array.isArray(parsed.keys) ? parsed.keys : [],
     envOverrides: parsed.envOverrides && typeof parsed.envOverrides === 'object' ? parsed.envOverrides : {},
@@ -507,6 +764,57 @@ function normalizePlainVaultData(parsed: Partial<PlainVaultData>): PlainVaultDat
         typeof rawCfg.enableModelFallback === 'boolean'
           ? rawCfg.enableModelFallback
           : defaults.modelConfig.enableModelFallback,
+    },
+    falKeys: Array.isArray(parsed.falKeys) ? parsed.falKeys : [],
+    falEnvOverrides:
+      parsed.falEnvOverrides && typeof parsed.falEnvOverrides === 'object' ? parsed.falEnvOverrides : {},
+    falModelHealth:
+      parsed.falModelHealth && typeof parsed.falModelHealth === 'object' ? parsed.falModelHealth : {},
+    falConfig: {
+      enableFalKeyFallback:
+        typeof rawFalCfg.enableFalKeyFallback === 'boolean'
+          ? rawFalCfg.enableFalKeyFallback
+          : DEFAULT_FAL_CONFIG.enableFalKeyFallback,
+      enableFalImageFallback:
+        typeof rawFalCfg.enableFalImageFallback === 'boolean'
+          ? rawFalCfg.enableFalImageFallback
+          : DEFAULT_FAL_CONFIG.enableFalImageFallback,
+      enableFalVideoFallback:
+        typeof rawFalCfg.enableFalVideoFallback === 'boolean'
+          ? rawFalCfg.enableFalVideoFallback
+          : DEFAULT_FAL_CONFIG.enableFalVideoFallback,
+      preferFalForVideo:
+        typeof rawFalCfg.preferFalForVideo === 'boolean'
+          ? rawFalCfg.preferFalForVideo
+          : DEFAULT_FAL_CONFIG.preferFalForVideo,
+      maxConcurrentPerKey:
+        typeof rawFalCfg.maxConcurrentPerKey === 'number' && Number.isFinite(rawFalCfg.maxConcurrentPerKey)
+          ? Math.max(1, Math.min(10, Math.round(rawFalCfg.maxConcurrentPerKey)))
+          : DEFAULT_FAL_CONFIG.maxConcurrentPerKey,
+      requestTimeoutSec:
+        typeof rawFalCfg.requestTimeoutSec === 'number' && Number.isFinite(rawFalCfg.requestTimeoutSec)
+          ? Math.max(10, Math.min(180, Math.round(rawFalCfg.requestTimeoutSec)))
+          : DEFAULT_FAL_CONFIG.requestTimeoutSec,
+      maxQueueWaitSec:
+        typeof rawFalCfg.maxQueueWaitSec === 'number' && Number.isFinite(rawFalCfg.maxQueueWaitSec)
+          ? Math.max(15, Math.min(240, Math.round(rawFalCfg.maxQueueWaitSec)))
+          : DEFAULT_FAL_CONFIG.maxQueueWaitSec,
+      primaryFalImageModel:
+        rawFalCfg.primaryFalImageModel && validFalIds.has(rawFalCfg.primaryFalImageModel)
+          ? rawFalCfg.primaryFalImageModel
+          : DEFAULT_FAL_CONFIG.primaryFalImageModel,
+      primaryFalImageEditModel:
+        rawFalCfg.primaryFalImageEditModel && validFalIds.has(rawFalCfg.primaryFalImageEditModel)
+          ? rawFalCfg.primaryFalImageEditModel
+          : DEFAULT_FAL_CONFIG.primaryFalImageEditModel,
+      primaryFalVideoModel:
+        rawFalCfg.primaryFalVideoModel && validFalIds.has(rawFalCfg.primaryFalVideoModel)
+          ? rawFalCfg.primaryFalVideoModel
+          : DEFAULT_FAL_CONFIG.primaryFalVideoModel,
+      primaryFalImageToVideoModel:
+        rawFalCfg.primaryFalImageToVideoModel && validFalIds.has(rawFalCfg.primaryFalImageToVideoModel)
+          ? rawFalCfg.primaryFalImageToVideoModel
+          : DEFAULT_FAL_CONFIG.primaryFalImageToVideoModel,
     },
   };
 }
@@ -541,9 +849,44 @@ function encryptVaultWrapper(data: PlainVaultData): EncryptedVaultFilePayload {
   };
 }
 
+async function fetchRemoteUpstashVault(upstash: { url: string; token: string }): Promise<{
+  found: boolean;
+  vault?: PlainVaultData;
+}> {
+  const resp = await fetch(
+    `${upstash.url}/get/${encodeURIComponent(UPSTASH_VAULT_REDIS_KEY)}`,
+    {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${upstash.token}`,
+      },
+    }
+  );
+  if (!resp.ok) {
+    throw new Error(`Upstash Redis GET failed with HTTP ${resp.status}.`);
+  }
+  const body = (await resp.json()) as { result?: string | null; error?: string };
+  if (body?.error) {
+    throw new Error(`Upstash Redis error: ${body.error}`);
+  }
+  if (!body?.result || typeof body.result !== 'string') {
+    return { found: false };
+  }
+  const wrapper = JSON.parse(body.result) as EncryptedVaultFilePayload;
+  if (!wrapper?.iv || !wrapper?.tag || !wrapper?.ciphertext) {
+    throw new Error('Malformed encrypted vault payload in Upstash Redis.');
+  }
+  const decrypted = decryptVaultWrapper(wrapper);
+  return { found: true, vault: decrypted };
+}
+
 export async function syncVaultFromRemote(force = false): Promise<void> {
   const upstash = getUpstashConfig();
   if (!upstash.configured) return;
+
+  if (pendingRemoteWrites.length > 0) {
+    await flushRemoteVaultWrites();
+  }
 
   const now = Date.now();
   if (!force && inMemoryFallbackVault && now - lastRemoteSyncAt < REMOTE_SYNC_TTL_MS) {
@@ -555,31 +898,38 @@ export async function syncVaultFromRemote(force = false): Promise<void> {
 
   const run = (async () => {
     try {
-      const resp = await fetch(
-        `${upstash.url}/get/${encodeURIComponent(UPSTASH_VAULT_REDIS_KEY)}`,
-        {
-          method: 'GET',
-          headers: {
-            Authorization: `Bearer ${upstash.token}`,
-          },
-        }
-      );
-      if (!resp.ok) return;
-      const body = (await resp.json()) as { result?: string | null };
-      if (!body?.result || typeof body.result !== 'string') {
+      const remote = await fetchRemoteUpstashVault(upstash);
+      if (!remote.found) {
         if (!inMemoryFallbackVault) {
           inMemoryFallbackVault = createDefaultVaultData();
         }
+        lastRemoteSyncError = undefined;
+        lastDecryptionError = undefined;
         lastRemoteSyncAt = Date.now();
+        lastSuccessfulRemoteSyncAt = Date.now();
         return;
       }
-      const wrapper = JSON.parse(body.result) as EncryptedVaultFilePayload;
-      if (wrapper?.iv && wrapper?.tag && wrapper?.ciphertext) {
-        inMemoryFallbackVault = decryptVaultWrapper(wrapper);
+      if (remote.vault) {
+        inMemoryFallbackVault = remote.vault;
+        lastRemoteSyncError = undefined;
+        lastDecryptionError = undefined;
         lastRemoteSyncAt = Date.now();
+        lastSuccessfulRemoteSyncAt = Date.now();
       }
-    } catch {
-      // Preserve in-memory/local state if Upstash read fails transiently or key secret changed
+    } catch (err: any) {
+      const msg = scrubSecretText(String(err?.message || 'Failed to sync encrypted AI Vault from Upstash Redis.'));
+      if (
+        msg.toLowerCase().includes('authenticate') ||
+        msg.toLowerCase().includes('unsupported state') ||
+        msg.toLowerCase().includes('malformed encrypted vault') ||
+        msg.toLowerCase().includes('json')
+      ) {
+        lastDecryptionError =
+          'Encrypted Upstash vault could not be decrypted with current AI_VAULT_SECRET.';
+        lastRemoteSyncError = undefined;
+      } else {
+        lastRemoteSyncError = msg;
+      }
     } finally {
       inFlightRemoteSync = null;
     }
@@ -589,10 +939,146 @@ export async function syncVaultFromRemote(force = false): Promise<void> {
   return run;
 }
 
-export async function flushRemoteVaultWrites(): Promise<void> {
+export async function flushRemoteVaultWrites(options?: { throwOnError?: boolean }): Promise<void> {
   if (pendingRemoteWrites.length === 0) return;
   const batch = pendingRemoteWrites.splice(0, pendingRemoteWrites.length);
-  await Promise.all(batch);
+  const results = await Promise.allSettled(batch.map((w) => w.promise));
+  if (options?.throwOnError) {
+    const firstRejected = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+    if (firstRejected) {
+      throw firstRejected.reason instanceof Error
+        ? firstRejected.reason
+        : new Error(String(firstRejected.reason || 'Failed to persist AI Vault to Upstash Redis.'));
+    }
+  }
+}
+
+interface HealthUpdateDelta {
+  provider?: 'gemini' | 'fal';
+  keyId?: string;
+  projectId?: string;
+  falModelId?: string;
+}
+
+function mergeHealthDeltaIntoRemoteVault(
+  remote: PlainVaultData,
+  local: PlainVaultData,
+  delta: HealthUpdateDelta
+): PlainVaultData {
+  const merged: PlainVaultData = {
+    keys: remote.keys.map((k) => ({ ...k })),
+    envOverrides: { ...remote.envOverrides },
+    projectHealth: { ...remote.projectHealth },
+    modelConfig: remote.modelConfig,
+    falKeys: remote.falKeys.map((k) => ({ ...k })),
+    falEnvOverrides: { ...remote.falEnvOverrides },
+    falModelHealth: { ...remote.falModelHealth },
+    falConfig: remote.falConfig,
+  };
+
+  if (delta.provider === 'fal') {
+    if (delta.keyId) {
+      if (delta.keyId.startsWith('env_')) {
+        const localOv = local.falEnvOverrides[delta.keyId];
+        if (localOv) {
+          const remoteOv = merged.falEnvOverrides[delta.keyId];
+          merged.falEnvOverrides[delta.keyId] = {
+            ...(remoteOv || localOv),
+            status: localOv.status,
+            quotaScope: localOv.quotaScope,
+            failureCount: localOv.failureCount,
+            consecutiveFailures: localOv.consecutiveFailures,
+            lastError: localOv.lastError,
+            lastTestedAt: localOv.lastTestedAt,
+            cooldownUntil: localOv.cooldownUntil,
+          };
+        }
+      } else {
+        const localRec = local.falKeys.find((k) => k.id === delta.keyId);
+        const remoteIdx = merged.falKeys.findIndex((k) => k.id === delta.keyId);
+        if (localRec && remoteIdx !== -1) {
+          const remoteRec = merged.falKeys[remoteIdx];
+          merged.falKeys[remoteIdx] = {
+            ...remoteRec,
+            status: localRec.status,
+            quotaScope: localRec.quotaScope,
+            failureCount: localRec.failureCount,
+            consecutiveFailures: localRec.consecutiveFailures,
+            lastError: localRec.lastError,
+            lastTestedAt: localRec.lastTestedAt,
+            cooldownUntil: localRec.cooldownUntil,
+            updatedAt: localRec.updatedAt,
+          };
+        }
+      }
+    }
+    if (delta.falModelId && local.falModelHealth[delta.falModelId]) {
+      merged.falModelHealth[delta.falModelId] = { ...local.falModelHealth[delta.falModelId] };
+    }
+    return merged;
+  }
+
+  if (delta.keyId) {
+    if (delta.keyId.startsWith('env_')) {
+      const localOv = local.envOverrides[delta.keyId];
+      if (localOv) {
+        const remoteOv = merged.envOverrides[delta.keyId];
+        merged.envOverrides[delta.keyId] = {
+          ...(remoteOv || localOv),
+          status: localOv.status,
+          quotaScope: localOv.quotaScope,
+          lastError: localOv.lastError,
+          lastTestedAt: localOv.lastTestedAt,
+          cooldownUntil: localOv.cooldownUntil,
+        };
+      }
+    } else {
+      const localRec = local.keys.find((k) => k.id === delta.keyId);
+      const remoteIdx = merged.keys.findIndex((k) => k.id === delta.keyId);
+      if (localRec && remoteIdx !== -1) {
+        const remoteRec = merged.keys[remoteIdx];
+        merged.keys[remoteIdx] = {
+          ...remoteRec,
+          status: localRec.status,
+          quotaScope: localRec.quotaScope,
+          lastError: localRec.lastError,
+          lastTestedAt: localRec.lastTestedAt,
+          cooldownUntil: localRec.cooldownUntil,
+          updatedAt: localRec.updatedAt,
+        };
+      }
+    }
+  }
+
+  if (delta.projectId && local.projectHealth[delta.projectId]) {
+    merged.projectHealth[delta.projectId] = { ...local.projectHealth[delta.projectId] };
+  }
+
+  return merged;
+}
+
+async function writeUpstashSet(
+  upstash: { url: string; token: string },
+  serialized: string
+): Promise<void> {
+  const res = await fetch(upstash.url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${upstash.token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(['SET', UPSTASH_VAULT_REDIS_KEY, serialized]),
+  });
+  if (!res.ok) {
+    throw new Error(`Upstash Redis SET failed with HTTP ${res.status}.`);
+  }
+  const data = (await res.json().catch(() => ({}))) as { error?: string };
+  if (data?.error) {
+    throw new Error(`Upstash Redis SET error: ${data.error}`);
+  }
+  lastRemoteSyncAt = Date.now();
+  lastSuccessfulRemoteSyncAt = Date.now();
+  lastRemoteSyncError = undefined;
 }
 
 function readVaultData(): PlainVaultData {
@@ -614,15 +1100,31 @@ function readVaultData(): PlainVaultData {
   }
 }
 
-function writeVaultData(data: PlainVaultData, options?: { strictRemoteSecret?: boolean }): void {
-  inMemoryFallbackVault = data;
+function writeVaultData(
+  data: PlainVaultData,
+  options?: { strictRemoteSecret?: boolean; healthDelta?: HealthUpdateDelta }
+): void {
   const upstash = getUpstashConfig();
   const hasEnvSecret = Boolean((process.env.AI_VAULT_SECRET || process.env.SESSION_SECRET || '').trim());
+  const isVercel = Boolean(process.env.VERCEL);
 
-  if (upstash.configured && options?.strictRemoteSecret && !hasEnvSecret) {
-    throw new Error('AI_VAULT_SECRET environment variable is required to encrypt keys into Upstash Redis.');
+  if (options?.strictRemoteSecret) {
+    if (isVercel && !upstash.configured) {
+      throw new Error(
+        'Persistent serverless vault storage is not configured on Vercel. Add UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN, and AI_VAULT_SECRET in Vercel Environment Variables once so Admin Panel keys persist across instances.'
+      );
+    }
+    if (upstash.configured && !hasEnvSecret) {
+      throw new Error('AI_VAULT_SECRET environment variable is required to encrypt keys into Upstash Redis.');
+    }
+    if (upstash.configured && lastDecryptionError) {
+      throw new Error(
+        'Remote encrypted vault could not be decrypted with current AI_VAULT_SECRET. Restore the original AI_VAULT_SECRET before modifying keys so existing vault data is not overwritten.'
+      );
+    }
   }
 
+  inMemoryFallbackVault = data;
   const payload = encryptVaultWrapper(data);
   const serialized = JSON.stringify(payload);
 
@@ -634,24 +1136,68 @@ function writeVaultData(data: PlainVaultData, options?: { strictRemoteSecret?: b
   }
 
   if (upstash.configured && hasEnvSecret) {
-    const writePromise = fetch(upstash.url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${upstash.token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(['SET', UPSTASH_VAULT_REDIS_KEY, serialized]),
-    })
-      .then((res) => {
-        if (res.ok) {
-          lastRemoteSyncAt = Date.now();
+    const strict = Boolean(options?.strictRemoteSecret);
+    const writePromise = (async () => {
+      try {
+        if (!strict && options?.healthDelta) {
+          // Conflict-safe merge: preserve concurrently added/deleted keys or model config edits
+          if (lastDecryptionError) return;
+          try {
+            const remote = await fetchRemoteUpstashVault(upstash);
+            if (remote.found && remote.vault) {
+              const merged = mergeHealthDeltaIntoRemoteVault(remote.vault, data, options.healthDelta);
+              inMemoryFallbackVault = merged;
+              const mergedSerialized = JSON.stringify(encryptVaultWrapper(merged));
+              await writeUpstashSet(upstash, mergedSerialized);
+              return;
+            }
+          } catch {
+            // Fall back to direct SET if remote read transiently fails
+          }
         }
-      })
-      .catch(() => {
-        // Non-fatal in background health tracking
-      });
-    pendingRemoteWrites.push(writePromise);
+        await writeUpstashSet(upstash, serialized);
+      } catch (err: any) {
+        const msg = scrubSecretText(String(err?.message || 'Failed to persist AI Vault to Upstash Redis.'));
+        lastRemoteSyncError = msg;
+        if (strict) {
+          throw new Error(msg);
+        }
+      }
+    })();
+    pendingRemoteWrites.push({ promise: writePromise, strict });
   }
+}
+
+export function verifyEncryptedVaultPersistence(): {
+  ok: boolean;
+  encryptedKeysCount: number;
+  decryptedKeysCount: number;
+  failedDecryptCount: number;
+  persistence: VaultPersistenceInfo;
+} {
+  const vault = readVaultData();
+  let decryptedKeysCount = 0;
+  let failedDecryptCount = 0;
+
+  for (const rec of [...vault.keys, ...vault.falKeys]) {
+    try {
+      const plain = decryptText(rec.encryptedKey).trim();
+      if (plain) decryptedKeysCount += 1;
+      else failedDecryptCount += 1;
+    } catch {
+      failedDecryptCount += 1;
+    }
+  }
+
+  const persistence = getVaultPersistenceInfo();
+  const ok = failedDecryptCount === 0 && !persistence.decryptionError && persistence.remoteSyncStatus !== 'error';
+  return {
+    ok,
+    encryptedKeysCount: vault.keys.length + vault.falKeys.length,
+    decryptedKeysCount,
+    failedDecryptCount,
+    persistence,
+  };
 }
 
 export function maskSecretValue(raw: string): string {
@@ -673,16 +1219,34 @@ const ENV_KEY_SLOT_NAMES = [
   { id: 'env_GEMINI_API_KEY_8', envVarName: 'GEMINI_API_KEY_8', label: 'Server Secret Slot 8 (GEMINI_API_KEY_8)', defaultPriority: 18, slotIndex: 8 },
 ] as const;
 
+const FAL_ENV_KEY_SLOT_NAMES = [
+  { id: 'env_FAL_KEY', envVarName: 'FAL_KEY', label: 'Server Runtime Secret (FAL_KEY)', defaultPriority: 10 },
+  { id: 'env_FAL_KEY_1', envVarName: 'FAL_KEY_1', label: 'Server fal.ai Slot 1 (FAL_KEY_1)', defaultPriority: 11 },
+  { id: 'env_FAL_KEY_2', envVarName: 'FAL_KEY_2', label: 'Server fal.ai Slot 2 (FAL_KEY_2)', defaultPriority: 12 },
+  { id: 'env_FAL_KEY_3', envVarName: 'FAL_KEY_3', label: 'Server fal.ai Slot 3 (FAL_KEY_3)', defaultPriority: 13 },
+] as const;
+
 export function scrubSecretText(text: string): string {
   let sanitized = String(text || '');
   // Redact standard Google API key patterns
   sanitized = sanitized.replace(/AIza[0-9A-Za-z_-]{20,}/g, '[REDACTED_API_KEY]');
+  // Redact standard fal.ai key patterns & headers
+  sanitized = sanitized.replace(/\bfal_[0-9A-Za-z_-]{16,}/g, '[REDACTED_FAL_KEY]');
+  sanitized = sanitized.replace(/(Authorization:\s*Key\s+)[^\s"']+/gi, '$1[REDACTED_FAL_KEY]');
 
-  // Redact any known active server keys (all 8 env slots + Admin Vault) from error text
+  // Redact any known active server keys (Gemini + fal.ai env slots & Admin Vault)
   const vault = readVaultData();
   const rawKeys = [
     ...ENV_KEY_SLOT_NAMES.map((slot) => process.env[slot.envVarName]),
+    ...FAL_ENV_KEY_SLOT_NAMES.map((slot) => process.env[slot.envVarName]),
     ...vault.keys.map((k) => {
+      try {
+        return decryptText(k.encryptedKey);
+      } catch {
+        return '';
+      }
+    }),
+    ...vault.falKeys.map((k) => {
       try {
         return decryptText(k.encryptedKey);
       } catch {
@@ -1020,6 +1584,9 @@ export function addVaultApiKey(params: {
   if (!cleanKey || cleanKey.length < 16) {
     throw new Error('Please enter a valid Google Gemini API key.');
   }
+  if (/^fal_/i.test(cleanKey) || /^[0-9a-f-]{16,}:[0-9a-f-]{16,}$/i.test(cleanKey)) {
+    throw new Error('Looks like a fal.ai key. Add fal.ai credentials inside the separate fal.ai API Key Vault section.');
+  }
   const cleanLabel = (params.label || '').trim() || `Admin Key ${Date.now().toString().slice(-4)}`;
   const vault = readVaultData();
 
@@ -1238,5 +1805,495 @@ export function recordKeyHealthResult(
     }
   }
 
-  writeVaultData(vault);
+  writeVaultData(vault, {
+    healthDelta: {
+      provider: 'gemini',
+      keyId,
+      projectId: resolvedProjectId,
+    },
+  });
 }
+
+// ============================================================================
+// ISOLATED fal.ai PROVIDER NAMESPACE (Never mixed with Google Gemini keys)
+// ============================================================================
+
+function getRuntimeFalEnvKeys(): Array<{
+  id: string;
+  envVarName: string;
+  label: string;
+  rawKey: string;
+  defaultPriority: number;
+}> {
+  const seenValues = new Set<string>();
+  const active: Array<{
+    id: string;
+    envVarName: string;
+    label: string;
+    rawKey: string;
+    defaultPriority: number;
+  }> = [];
+
+  for (const item of FAL_ENV_KEY_SLOT_NAMES) {
+    const val = (process.env[item.envVarName] || '').trim();
+    if (!val || seenValues.has(val)) continue;
+    seenValues.add(val);
+    active.push({
+      id: item.id,
+      envVarName: item.envVarName,
+      label: item.label,
+      rawKey: val,
+      defaultPriority: item.defaultPriority,
+    });
+  }
+  return active;
+}
+
+export function getFalConfig(): FalAiConfigState {
+  return readVaultData().falConfig;
+}
+
+export function updateFalConfig(patch: Partial<FalAiConfigState>): FalAiConfigState {
+  const vault = readVaultData();
+  const validFalIds = new Set(VERIFIED_FAL_MODELS.map((m) => m.id));
+
+  if (typeof patch.enableFalKeyFallback === 'boolean') {
+    vault.falConfig.enableFalKeyFallback = patch.enableFalKeyFallback;
+  }
+  if (typeof patch.enableFalImageFallback === 'boolean') {
+    vault.falConfig.enableFalImageFallback = patch.enableFalImageFallback;
+  }
+  if (typeof patch.enableFalVideoFallback === 'boolean') {
+    vault.falConfig.enableFalVideoFallback = patch.enableFalVideoFallback;
+  }
+  if (typeof patch.preferFalForVideo === 'boolean') {
+    vault.falConfig.preferFalForVideo = patch.preferFalForVideo;
+  }
+  if (typeof patch.maxConcurrentPerKey === 'number' && Number.isFinite(patch.maxConcurrentPerKey)) {
+    vault.falConfig.maxConcurrentPerKey = Math.max(1, Math.min(10, Math.round(patch.maxConcurrentPerKey)));
+  }
+  if (typeof patch.requestTimeoutSec === 'number' && Number.isFinite(patch.requestTimeoutSec)) {
+    vault.falConfig.requestTimeoutSec = Math.max(10, Math.min(180, Math.round(patch.requestTimeoutSec)));
+  }
+  if (typeof patch.maxQueueWaitSec === 'number' && Number.isFinite(patch.maxQueueWaitSec)) {
+    vault.falConfig.maxQueueWaitSec = Math.max(15, Math.min(240, Math.round(patch.maxQueueWaitSec)));
+  }
+  if (patch.primaryFalImageModel && validFalIds.has(patch.primaryFalImageModel)) {
+    vault.falConfig.primaryFalImageModel = patch.primaryFalImageModel;
+  }
+  if (patch.primaryFalImageEditModel && validFalIds.has(patch.primaryFalImageEditModel)) {
+    vault.falConfig.primaryFalImageEditModel = patch.primaryFalImageEditModel;
+  }
+  if (patch.primaryFalVideoModel && validFalIds.has(patch.primaryFalVideoModel)) {
+    vault.falConfig.primaryFalVideoModel = patch.primaryFalVideoModel;
+  }
+  if (patch.primaryFalImageToVideoModel && validFalIds.has(patch.primaryFalImageToVideoModel)) {
+    vault.falConfig.primaryFalImageToVideoModel = patch.primaryFalImageToVideoModel;
+  }
+
+  writeVaultData(vault, { strictRemoteSecret: true });
+  return vault.falConfig;
+}
+
+export function listResolvedFalKeys(): ResolvedExecutableFalKey[] {
+  const vault = readVaultData();
+  const now = Date.now();
+  const resolved: ResolvedExecutableFalKey[] = [];
+
+  for (const rec of vault.falKeys) {
+    let rawKey = '';
+    try {
+      rawKey = decryptText(rec.encryptedKey).trim();
+    } catch {
+      rawKey = '';
+    }
+    if (!rawKey) continue;
+    const isCooldownExpired = rec.cooldownUntil && rec.cooldownUntil <= now;
+    const status: KeyHealthStatus = !rec.enabled
+      ? 'disabled'
+      : rec.status === 'quota_exhausted' && isCooldownExpired
+      ? 'ready'
+      : rec.status === 'error' && isCooldownExpired
+      ? 'ready'
+      : rec.status;
+    resolved.push({
+      id: rec.id,
+      label: rec.label,
+      rawKey,
+      source: 'admin_vault',
+      enabled: rec.enabled,
+      priority: rec.priority,
+      status,
+      quotaScope: isCooldownExpired && rec.status === 'quota_exhausted' ? undefined : rec.quotaScope,
+      cooldownUntil: isCooldownExpired ? undefined : rec.cooldownUntil,
+    });
+  }
+
+  for (const envItem of getRuntimeFalEnvKeys()) {
+    const ov = vault.falEnvOverrides[envItem.id];
+    const enabled = ov ? ov.enabled : true;
+    const isCooldownExpired = ov?.cooldownUntil && ov.cooldownUntil <= now;
+    const rawStatus = ov?.status || 'ready';
+    const status: KeyHealthStatus = !enabled
+      ? 'disabled'
+      : (rawStatus === 'quota_exhausted' || rawStatus === 'error') && isCooldownExpired
+      ? 'ready'
+      : rawStatus;
+
+    resolved.push({
+      id: envItem.id,
+      label: envItem.label,
+      rawKey: envItem.rawKey,
+      source: 'runtime_env',
+      enabled,
+      priority: ov?.priority ?? envItem.defaultPriority,
+      status,
+      quotaScope: isCooldownExpired && rawStatus === 'quota_exhausted' ? undefined : ov?.quotaScope,
+      cooldownUntil: isCooldownExpired ? undefined : ov?.cooldownUntil,
+    });
+  }
+
+  return resolved.sort((a, b) => a.priority - b.priority);
+}
+
+export function listSafeFalKeySummaries(): SafeFalKeySummary[] {
+  const vault = readVaultData();
+  const now = Date.now();
+  const summaries: SafeFalKeySummary[] = [];
+
+  for (const rec of vault.falKeys) {
+    let raw = '';
+    try {
+      raw = decryptText(rec.encryptedKey).trim();
+    } catch {
+      raw = '';
+    }
+    const isCooldownExpired = rec.cooldownUntil && rec.cooldownUntil <= now;
+    const status: KeyHealthStatus = !rec.enabled
+      ? 'disabled'
+      : (rec.status === 'quota_exhausted' || rec.status === 'error') && isCooldownExpired
+      ? 'ready'
+      : rec.status;
+
+    summaries.push({
+      id: rec.id,
+      label: rec.label,
+      maskedKey: raw ? maskSecretValue(raw) : 'Decrypt Error',
+      source: 'admin_vault',
+      enabled: rec.enabled,
+      priority: rec.priority,
+      status,
+      quotaScope: isCooldownExpired && rec.status === 'quota_exhausted' ? undefined : rec.quotaScope,
+      failureCount: rec.failureCount || 0,
+      consecutiveFailures: rec.consecutiveFailures || 0,
+      lastError: rec.lastError,
+      lastTestedAt: rec.lastTestedAt,
+      cooldownUntil: isCooldownExpired ? undefined : rec.cooldownUntil,
+    });
+  }
+
+  for (const envItem of getRuntimeFalEnvKeys()) {
+    const ov = vault.falEnvOverrides[envItem.id];
+    const enabled = ov ? ov.enabled : true;
+    const isCooldownExpired = ov?.cooldownUntil && ov.cooldownUntil <= now;
+    const rawStatus = ov?.status || 'ready';
+    const status: KeyHealthStatus = !enabled
+      ? 'disabled'
+      : (rawStatus === 'quota_exhausted' || rawStatus === 'error') && isCooldownExpired
+      ? 'ready'
+      : rawStatus;
+
+    summaries.push({
+      id: envItem.id,
+      label: envItem.label,
+      maskedKey: maskSecretValue(envItem.rawKey),
+      source: 'runtime_env',
+      envVarName: envItem.envVarName,
+      enabled,
+      priority: ov?.priority ?? envItem.defaultPriority,
+      status,
+      quotaScope: isCooldownExpired && rawStatus === 'quota_exhausted' ? undefined : ov?.quotaScope,
+      failureCount: ov?.failureCount || 0,
+      consecutiveFailures: ov?.consecutiveFailures || 0,
+      lastError: ov?.lastError,
+      lastTestedAt: ov?.lastTestedAt,
+      cooldownUntil: isCooldownExpired ? undefined : ov?.cooldownUntil,
+    });
+  }
+
+  return summaries.sort((a, b) => a.priority - b.priority);
+}
+
+export function listFalModelHealthSummaries(): FalModelHealthRecord[] {
+  const vault = readVaultData();
+  const now = Date.now();
+  return Object.values(vault.falModelHealth || {})
+    .map((rec) => {
+      if (rec.status === 'error' && rec.cooldownUntil && rec.cooldownUntil <= now) {
+        return { ...rec, status: 'ready' as const, cooldownUntil: undefined };
+      }
+      return rec;
+    })
+    .sort((a, b) => a.modelId.localeCompare(b.modelId));
+}
+
+function validateFalApiKeyFormat(rawKey: string): string {
+  const cleanKey = (rawKey || '').trim();
+  if (!cleanKey || cleanKey.length < 16 || /\s/.test(cleanKey)) {
+    throw new Error('Please enter a valid fal.ai API key.');
+  }
+  if (/^AIza/i.test(cleanKey)) {
+    throw new Error(
+      'This looks like a Google Gemini API key (AIza...). Add Gemini keys in the Google Gemini Vault above.'
+    );
+  }
+  return cleanKey;
+}
+
+export function addFalVaultApiKey(params: {
+  label: string;
+  apiKey: string;
+  priority?: number;
+}): SafeFalKeySummary {
+  const cleanKey = validateFalApiKeyFormat(params.apiKey);
+  const cleanLabel = (params.label || '').trim() || `fal.ai Key ${Date.now().toString().slice(-4)}`;
+  const vault = readVaultData();
+
+  const id = `fk_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
+  const nowIso = new Date().toISOString();
+  const nextPriority =
+    typeof params.priority === 'number' && Number.isFinite(params.priority)
+      ? Math.max(1, Math.min(999, Math.round(params.priority)))
+      : vault.falKeys.length + 1;
+
+  vault.falKeys.push({
+    id,
+    label: cleanLabel.slice(0, 60),
+    encryptedKey: encryptText(cleanKey),
+    enabled: true,
+    priority: nextPriority,
+    status: 'ready',
+    failureCount: 0,
+    consecutiveFailures: 0,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  });
+
+  writeVaultData(vault, { strictRemoteSecret: true });
+  return listSafeFalKeySummaries().find((k) => k.id === id)!;
+}
+
+export function updateFalVaultApiKey(
+  keyId: string,
+  patch: {
+    label?: string;
+    apiKey?: string;
+    enabled?: boolean;
+    priority?: number;
+    resetHealth?: boolean;
+  }
+): SafeFalKeySummary | null {
+  const vault = readVaultData();
+
+  if (keyId.startsWith('env_FAL_')) {
+    const envItem = getRuntimeFalEnvKeys().find((e) => e.id === keyId);
+    if (!envItem) return null;
+    const prev = vault.falEnvOverrides[keyId] || {
+      enabled: true,
+      priority: envItem.defaultPriority,
+      status: 'ready' as KeyHealthStatus,
+    };
+    const nextEnabled = typeof patch.enabled === 'boolean' ? patch.enabled : prev.enabled;
+    vault.falEnvOverrides[keyId] = {
+      ...prev,
+      enabled: nextEnabled,
+      priority:
+        typeof patch.priority === 'number' && Number.isFinite(patch.priority)
+          ? Math.max(1, Math.min(999, Math.round(patch.priority)))
+          : prev.priority,
+      status: patch.resetHealth
+        ? nextEnabled
+          ? 'ready'
+          : 'disabled'
+        : !nextEnabled
+        ? 'disabled'
+        : prev.status === 'disabled'
+        ? 'ready'
+        : prev.status,
+      quotaScope: patch.resetHealth ? undefined : prev.quotaScope,
+      consecutiveFailures: patch.resetHealth ? 0 : prev.consecutiveFailures,
+      lastError: patch.resetHealth ? undefined : prev.lastError,
+      cooldownUntil: patch.resetHealth ? undefined : prev.cooldownUntil,
+    };
+
+    writeVaultData(vault, { strictRemoteSecret: true });
+    return listSafeFalKeySummaries().find((k) => k.id === keyId) || null;
+  }
+
+  const idx = vault.falKeys.findIndex((k) => k.id === keyId);
+  if (idx === -1) return null;
+  const current = vault.falKeys[idx];
+  const updatedEnabled = typeof patch.enabled === 'boolean' ? patch.enabled : current.enabled;
+  let updatedEncrypted = current.encryptedKey;
+  let updatedStatus = current.status;
+  let updatedQuotaScope = current.quotaScope;
+  let updatedError = current.lastError;
+  let updatedCooldown = current.cooldownUntil;
+  let updatedConsecutive = current.consecutiveFailures || 0;
+
+  if (typeof patch.apiKey === 'string' && patch.apiKey.trim()) {
+    const cleanNew = validateFalApiKeyFormat(patch.apiKey);
+    updatedEncrypted = encryptText(cleanNew);
+    updatedStatus = updatedEnabled ? 'ready' : 'disabled';
+    updatedQuotaScope = undefined;
+    updatedError = undefined;
+    updatedCooldown = undefined;
+    updatedConsecutive = 0;
+  } else if (patch.resetHealth) {
+    updatedStatus = updatedEnabled ? 'ready' : 'disabled';
+    updatedQuotaScope = undefined;
+    updatedError = undefined;
+    updatedCooldown = undefined;
+    updatedConsecutive = 0;
+  } else if (typeof patch.enabled === 'boolean') {
+    updatedStatus = updatedEnabled ? (current.status === 'disabled' ? 'ready' : current.status) : 'disabled';
+  }
+
+  vault.falKeys[idx] = {
+    ...current,
+    label: typeof patch.label === 'string' && patch.label.trim() ? patch.label.trim().slice(0, 60) : current.label,
+    encryptedKey: updatedEncrypted,
+    enabled: updatedEnabled,
+    priority:
+      typeof patch.priority === 'number' && Number.isFinite(patch.priority)
+        ? Math.max(1, Math.min(999, Math.round(patch.priority)))
+        : current.priority,
+    status: updatedStatus,
+    quotaScope: updatedQuotaScope,
+    consecutiveFailures: updatedConsecutive,
+    lastError: updatedError,
+    cooldownUntil: updatedCooldown,
+    updatedAt: new Date().toISOString(),
+  };
+
+  writeVaultData(vault, { strictRemoteSecret: true });
+  return listSafeFalKeySummaries().find((k) => k.id === keyId) || null;
+}
+
+export function deleteFalVaultApiKey(keyId: string): boolean {
+  if (keyId.startsWith('env_FAL_')) {
+    throw new Error('Runtime server fal.ai environment keys cannot be deleted; disable them instead.');
+  }
+  const vault = readVaultData();
+  const nextKeys = vault.falKeys.filter((k) => k.id !== keyId);
+  if (nextKeys.length === vault.falKeys.length) return false;
+  vault.falKeys = nextKeys;
+  writeVaultData(vault, { strictRemoteSecret: true });
+  return true;
+}
+
+export function recordFalKeyHealthResult(
+  keyId: string,
+  result: {
+    status: KeyHealthStatus;
+    error?: string;
+    cooldownMs?: number;
+    quotaScope?: FalQuotaScope;
+    incrementFailure?: boolean;
+    testedAt?: string;
+  }
+): void {
+  const vault = readVaultData();
+  const now = Date.now();
+  const safeError = result.error ? scrubSecretText(result.error).slice(0, 240) : undefined;
+  const cooldownUntil = result.cooldownMs && result.cooldownMs > 0 ? now + result.cooldownMs : undefined;
+  const testedAt = result.testedAt || new Date(now).toISOString();
+  const isFailure = Boolean(result.incrementFailure) || result.status !== 'ready';
+
+  if (keyId.startsWith('env_FAL_')) {
+    const envItem = getRuntimeFalEnvKeys().find((e) => e.id === keyId);
+    const prev = vault.falEnvOverrides[keyId] || {
+      enabled: true,
+      priority: envItem?.defaultPriority ?? 10,
+      status: 'ready' as KeyHealthStatus,
+      failureCount: 0,
+      consecutiveFailures: 0,
+    };
+    vault.falEnvOverrides[keyId] = {
+      ...prev,
+      status: prev.enabled ? result.status : 'disabled',
+      quotaScope: result.status === 'ready' ? undefined : result.quotaScope,
+      failureCount: isFailure ? (prev.failureCount || 0) + 1 : prev.failureCount || 0,
+      consecutiveFailures: isFailure ? (prev.consecutiveFailures || 0) + 1 : 0,
+      lastError: result.status === 'ready' ? undefined : safeError,
+      lastTestedAt: testedAt,
+      cooldownUntil,
+    };
+  } else {
+    const idx = vault.falKeys.findIndex((k) => k.id === keyId);
+    if (idx === -1) return;
+    const cur = vault.falKeys[idx];
+
+    vault.falKeys[idx] = {
+      ...cur,
+      status: cur.enabled ? result.status : 'disabled',
+      quotaScope: result.status === 'ready' ? undefined : result.quotaScope,
+      failureCount: isFailure ? (cur.failureCount || 0) + 1 : cur.failureCount || 0,
+      consecutiveFailures: isFailure ? (cur.consecutiveFailures || 0) + 1 : 0,
+      lastError: result.status === 'ready' ? undefined : safeError,
+      lastTestedAt: testedAt,
+      cooldownUntil,
+      updatedAt: testedAt,
+    };
+  }
+
+  writeVaultData(vault, {
+    healthDelta: {
+      provider: 'fal',
+      keyId,
+    },
+  });
+}
+
+export function recordFalModelHealthResult(
+  modelId: string,
+  result: {
+    status: 'ready' | 'error';
+    error?: string;
+    cooldownMs?: number;
+  }
+): void {
+  const cleanId = (modelId || '').trim();
+  if (!cleanId) return;
+  const vault = readVaultData();
+  const now = Date.now();
+  const nowIso = new Date(now).toISOString();
+  const prev = vault.falModelHealth[cleanId];
+  const safeError = result.error ? scrubSecretText(result.error).slice(0, 240) : undefined;
+
+  if (result.status === 'ready') {
+    vault.falModelHealth[cleanId] = {
+      modelId: cleanId,
+      status: 'ready',
+      failureCount: prev?.failureCount || 0,
+      updatedAt: nowIso,
+    };
+  } else {
+    vault.falModelHealth[cleanId] = {
+      modelId: cleanId,
+      status: 'error',
+      failureCount: (prev?.failureCount || 0) + 1,
+      cooldownUntil: result.cooldownMs && result.cooldownMs > 0 ? now + result.cooldownMs : undefined,
+      lastError: safeError,
+      updatedAt: nowIso,
+    };
+  }
+
+  writeVaultData(vault, {
+    healthDelta: {
+      provider: 'fal',
+      falModelId: cleanId,
+    },
+  });
+}
+

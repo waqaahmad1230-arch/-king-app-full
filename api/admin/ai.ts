@@ -1,12 +1,17 @@
 import {
   fetchLiveModelsFromGoogleApi,
   getAdminAiStateAsync,
+  handleAdminAddFalKey,
   handleAdminAddKey,
+  handleAdminDeleteFalKey,
   handleAdminDeleteKey,
+  handleAdminUpdateFalConfig,
+  handleAdminUpdateFalKey,
   handleAdminUpdateKey,
   handleAdminUpdateModels,
   isVerifiedSuperAdmin,
   scrubSecretText,
+  testSpecificFalKeyLive,
   testSpecificKeyLive,
   testSpecificModelLive,
   verifyFirebaseBearerToken,
@@ -153,6 +158,73 @@ export default async function handler(req: any, res: any) {
       if (method !== 'GET') return res.status(405).json({ ok: false, error: 'Method not allowed' });
       const catalog = await fetchLiveModelsFromGoogleApi();
       return res.status(catalog.httpStatus).json(catalog);
+    }
+
+    // POST /api/admin/ai/fal/config
+    if (subPath === 'fal/config') {
+      if (method !== 'POST') return res.status(405).json({ ok: false, error: 'Method not allowed' });
+      try {
+        const result = await handleAdminUpdateFalConfig(body);
+        return res.status(200).json(result);
+      } catch (err: any) {
+        return res.status(400).json({ ok: false, error: scrubSecretText(err?.message || 'Invalid fal.ai configuration') });
+      }
+    }
+
+    // POST /api/admin/ai/fal/keys
+    if (subPath === 'fal/keys') {
+      if (method !== 'POST') return res.status(405).json({ ok: false, error: 'Method not allowed' });
+      try {
+        const result = await handleAdminAddFalKey({
+          label: String(body?.label || ''),
+          apiKey: String(body?.apiKey || ''),
+          priority: body?.priority !== undefined ? Number(body.priority) : undefined,
+        });
+        return res.status(201).json(result);
+      } catch (err: any) {
+        return res.status(400).json({ ok: false, error: scrubSecretText(err?.message || 'Could not save fal.ai API key.') });
+      }
+    }
+
+    // PATCH or DELETE /api/admin/ai/fal/keys/:id
+    if (subPath.startsWith('fal/keys/')) {
+      const keyId = decodeURIComponent(subPath.slice('fal/keys/'.length)).trim();
+      if (!keyId) {
+        return res.status(400).json({ ok: false, error: 'fal.ai Key ID is required.' });
+      }
+
+      if (method === 'PATCH') {
+        try {
+          const result = await handleAdminUpdateFalKey(keyId, body);
+          if (!result) return res.status(404).json({ ok: false, error: 'fal.ai key slot not found.' });
+          return res.status(200).json(result);
+        } catch (err: any) {
+          return res.status(400).json({ ok: false, error: scrubSecretText(err?.message || 'Could not update fal.ai API key.') });
+        }
+      }
+
+      if (method === 'DELETE') {
+        try {
+          const result = await handleAdminDeleteFalKey(keyId);
+          if (!result) return res.status(404).json({ ok: false, error: 'fal.ai key slot not found.' });
+          return res.status(200).json(result);
+        } catch (err: any) {
+          return res.status(400).json({ ok: false, error: scrubSecretText(err?.message || 'Could not delete fal.ai API key.') });
+        }
+      }
+
+      return res.status(405).json({ ok: false, error: 'Method not allowed' });
+    }
+
+    // POST /api/admin/ai/fal/test-key
+    if (subPath === 'fal/test-key') {
+      if (method !== 'POST') return res.status(405).json({ ok: false, error: 'Method not allowed' });
+      const keyId = String(body?.keyId || '').trim();
+      if (!keyId) {
+        return res.status(400).json({ ok: false, error: 'keyId is required.' });
+      }
+      const result = await testSpecificFalKeyLive(keyId);
+      return res.status(result.status).json({ ...result.payload, state: await getAdminAiStateAsync() });
     }
 
     return res.status(404).json({ ok: false, error: `Unknown admin AI route: ${subPath}` });

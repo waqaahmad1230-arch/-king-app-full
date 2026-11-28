@@ -43,6 +43,20 @@ service cloud.firestore {
         id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    // Validate normalized lowercase unique @username (3-24 chars: a-z, 0-9, underscore, dot)
+    function isValidUsername(u) {
+      return u is string &&
+        u.size() >= 3 &&
+        u.size() <= 24 &&
+        u.matches('^[a-z0-9_.]{3,24}$');
+    }
+
+    function isValidSocialLinksMap(links) {
+      return links is map && links.keys().hasOnly([
+        'whatsapp', 'instagram', 'facebook', 'tiktok', 'youtube', 'twitter', 'website'
+      ]);
+    }
+
     // Validate future Status visibility privacy config stored privately on /users/{userId}
     function isValidStatusPrivacy(p) {
       return p is map &&
@@ -78,6 +92,81 @@ service cloud.firestore {
       return (docData != null && (fieldName in docData) && docData[fieldName] is number && docData[fieldName] >= 0)
         ? docData[fieldName]
         : 0;
+    }
+
+    // Mathematical follow-edge delta inside a transaction (+1 create, -1 delete, 0 unchanged)
+    function followEdgeDelta(edgeId) {
+      return (!exists(/databases/$(database)/documents/follows/$(edgeId)) &&
+              existsAfter(/databases/$(database)/documents/follows/$(edgeId)))
+        ? 1
+        : ((exists(/databases/$(database)/documents/follows/$(edgeId)) &&
+            !existsAfter(/databases/$(database)/documents/follows/$(edgeId)))
+            ? -1
+            : 0);
+    }
+
+    function expectedClampedCounter(currentVal, delta) {
+      return (currentVal + delta) >= 0 ? (currentVal + delta) : 0;
+    }
+
+    // Verify publicProfiles counter changes match atomic /follows edge changes in the same transaction
+    function isValidFollowCounterSync(userId, otherUid) {
+      return isValidId(otherUid) &&
+        otherUid != userId &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'followersCount', 'followingCount', 'updatedAt'
+        ]) &&
+        (
+          followEdgeDelta(userId + '_' + otherUid) != 0 ||
+          followEdgeDelta(otherUid + '_' + userId) != 0
+        ) &&
+        (
+          (followEdgeDelta(userId + '_' + otherUid) <= 0 && followEdgeDelta(otherUid + '_' + userId) <= 0) ||
+          !isBlockedBetween(userId, otherUid)
+        ) &&
+        (
+          (!('followingCount' in request.resource.data.diff(resource.data).affectedKeys()) &&
+           followEdgeDelta(userId + '_' + otherUid) == 0) ||
+          (request.resource.data.followingCount is int &&
+           request.resource.data.followingCount == expectedClampedCounter(
+             getDocCounter(resource.data, 'followingCount'),
+             followEdgeDelta(userId + '_' + otherUid)
+           ))
+        ) &&
+        (
+          (!('followersCount' in request.resource.data.diff(resource.data).affectedKeys()) &&
+           followEdgeDelta(otherUid + '_' + userId) == 0) ||
+          (request.resource.data.followersCount is int &&
+           request.resource.data.followersCount == expectedClampedCounter(
+             getDocCounter(resource.data, 'followersCount'),
+             followEdgeDelta(otherUid + '_' + userId)
+           ))
+        );
+    }
+
+    // Verify publicProfiles counter is incremented (+1) in the same transaction as /follows create
+    function isProfileCounterIncrementedOnFollow(profileUid, fieldName) {
+      return existsAfter(/databases/$(database)/documents/publicProfiles/$(profileUid)) &&
+        (fieldName in getAfter(/databases/$(database)/documents/publicProfiles/$(profileUid)).data) &&
+        getAfter(/databases/$(database)/documents/publicProfiles/$(profileUid)).data[fieldName] is int &&
+        getAfter(/databases/$(database)/documents/publicProfiles/$(profileUid)).data[fieldName] == (
+          exists(/databases/$(database)/documents/publicProfiles/$(profileUid))
+            ? getDocCounter(get(/databases/$(database)/documents/publicProfiles/$(profileUid)).data, fieldName)
+            : 0
+        ) + 1;
+    }
+
+    // Verify existing publicProfiles counter is decremented (-1, clamped >= 0) in the same transaction as /follows delete
+    function isProfileCounterDecrementedOnUnfollow(profileUid, fieldName) {
+      return !exists(/databases/$(database)/documents/publicProfiles/$(profileUid)) || (
+        existsAfter(/databases/$(database)/documents/publicProfiles/$(profileUid)) &&
+        (fieldName in getAfter(/databases/$(database)/documents/publicProfiles/$(profileUid)).data) &&
+        getAfter(/databases/$(database)/documents/publicProfiles/$(profileUid)).data[fieldName] is int &&
+        getAfter(/databases/$(database)/documents/publicProfiles/$(profileUid)).data[fieldName] == expectedClampedCounter(
+          getDocCounter(get(/databases/$(database)/documents/publicProfiles/$(profileUid)).data, fieldName),
+          -1
+        )
+      );
     }
 
     // Enforce Status visibility, 24h expiry, and bidirectional blocks on single-doc gets and relational checks
@@ -247,21 +336,129 @@ service cloud.firestore {
     // --- Public Profiles Collection ---
     match /publicProfiles/{userId} {
       allow read: if true;
+
       allow create: if isAdmin() || (
-        isSignedIn() && request.auth.uid == userId &&
-        request.resource.data.keys().hasOnly([
-          'uid', 'displayName', 'name', 'photoURL', 'bio', 'socialLinks', 'createdAt', 'updatedAt'
-        ]) &&
-        (!('uid' in request.resource.data) || request.resource.data.uid == userId)
+        isSignedIn() && isValidId(userId) && (
+          // Owner creating their own public profile (zero initial follow counters; never self-verifiable)
+          (
+            request.auth.uid == userId &&
+            request.resource.data.keys().hasOnly([
+              'uid', 'displayName', 'name', 'displayNameLower', 'username', 'usernameLower',
+              'photoURL', 'bio', 'socialLinks', 'followersCount', 'followingCount', 'createdAt', 'updatedAt'
+            ]) &&
+            (!('uid' in request.resource.data) || request.resource.data.uid == userId) &&
+            (!('followersCount' in request.resource.data) || request.resource.data.followersCount == 0) &&
+            (!('followingCount' in request.resource.data) || (
+              request.resource.data.followingCount == 0 || (
+                request.resource.data.followingCount == 1 &&
+                existsAfter(/databases/$(database)/documents/users/$(userId)) &&
+                isValidId(getAfter(/databases/$(database)/documents/users/$(userId)).data._socialSyncUid) &&
+                getAfter(/databases/$(database)/documents/users/$(userId)).data._socialSyncUid != userId &&
+                followEdgeDelta(userId + '_' + getAfter(/databases/$(database)/documents/users/$(userId)).data._socialSyncUid) == 1 &&
+                !isBlockedBetween(userId, getAfter(/databases/$(database)/documents/users/$(userId)).data._socialSyncUid)
+              )
+            )) &&
+            (!('username' in request.resource.data) || (
+              isValidUsername(request.resource.data.username) &&
+              request.resource.data.usernameLower == request.resource.data.username &&
+              existsAfter(/databases/$(database)/documents/usernames/$(request.resource.data.username)) &&
+              getAfter(/databases/$(database)/documents/usernames/$(request.resource.data.username)).data.uid == request.auth.uid
+            )) &&
+            (!('socialLinks' in request.resource.data) || isValidSocialLinksMap(request.resource.data.socialLinks))
+          ) ||
+          // Follower initializing a missing legacy creator profile doc atomically inside a follow transaction
+          (
+            request.auth.uid != userId &&
+            request.resource.data.keys().hasAll(['uid', 'followersCount', 'followingCount', 'updatedAt']) &&
+            request.resource.data.keys().hasOnly(['uid', 'followersCount', 'followingCount', 'updatedAt']) &&
+            request.resource.data.uid == userId &&
+            request.resource.data.followersCount == 1 &&
+            request.resource.data.followingCount == 0 &&
+            followEdgeDelta(request.auth.uid + '_' + userId) == 1 &&
+            !isBlockedBetween(request.auth.uid, userId)
+          )
+        )
       );
+
       allow update: if isAdmin() || (
-        isSignedIn() && request.auth.uid == userId &&
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          'uid', 'displayName', 'name', 'photoURL', 'bio', 'socialLinks', 'createdAt', 'updatedAt'
-        ]) &&
-        (!('uid' in request.resource.data.diff(resource.data).affectedKeys()) || (('uid' in request.resource.data) && request.resource.data.uid == userId))
+        isSignedIn() && (
+          // Owner editing own profile metadata (cannot tamper with counters or isVerified)
+          (
+            request.auth.uid == userId &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'uid', 'displayName', 'name', 'displayNameLower', 'username', 'usernameLower',
+              'photoURL', 'bio', 'socialLinks', 'followersCount', 'followingCount', 'createdAt', 'updatedAt'
+            ]) &&
+            (!('uid' in request.resource.data.diff(resource.data).affectedKeys()) || (('uid' in request.resource.data) && request.resource.data.uid == userId)) &&
+            (!('followersCount' in request.resource.data.diff(resource.data).affectedKeys()) || (!('followersCount' in resource.data) && request.resource.data.followersCount == 0)) &&
+            (!('followingCount' in request.resource.data.diff(resource.data).affectedKeys()) || (!('followingCount' in resource.data) && request.resource.data.followingCount == 0)) &&
+            (!('displayName' in request.resource.data.diff(resource.data).affectedKeys()) || (request.resource.data.displayName is string && request.resource.data.displayName.size() <= 100)) &&
+            (!('displayNameLower' in request.resource.data.diff(resource.data).affectedKeys()) || (request.resource.data.displayNameLower is string && request.resource.data.displayNameLower.size() <= 100)) &&
+            (!('bio' in request.resource.data.diff(resource.data).affectedKeys()) || (request.resource.data.bio is string && request.resource.data.bio.size() <= 500)) &&
+            (!('socialLinks' in request.resource.data.diff(resource.data).affectedKeys()) || isValidSocialLinksMap(request.resource.data.socialLinks)) &&
+            (
+              (!('username' in request.resource.data.diff(resource.data).affectedKeys()) &&
+               !('usernameLower' in request.resource.data.diff(resource.data).affectedKeys())) ||
+              (
+                ('username' in request.resource.data) &&
+                ('usernameLower' in request.resource.data) &&
+                isValidUsername(request.resource.data.username) &&
+                request.resource.data.usernameLower == request.resource.data.username &&
+                existsAfter(/databases/$(database)/documents/usernames/$(request.resource.data.username)) &&
+                getAfter(/databases/$(database)/documents/usernames/$(request.resource.data.username)).data.uid == request.auth.uid &&
+                (
+                  !('username' in resource.data) ||
+                  !isValidUsername(resource.data.username) ||
+                  resource.data.username == request.resource.data.username ||
+                  !exists(/databases/$(database)/documents/usernames/$(resource.data.username)) ||
+                  get(/databases/$(database)/documents/usernames/$(resource.data.username)).data.uid != request.auth.uid ||
+                  !existsAfter(/databases/$(database)/documents/usernames/$(resource.data.username))
+                )
+              )
+            )
+          ) ||
+          // Actor updating own counters atomically paired with /users/{me}._socialSyncUid & /follows edge change
+          (
+            request.auth.uid == userId &&
+            existsAfter(/databases/$(database)/documents/users/$(userId)) &&
+            isValidFollowCounterSync(userId, getAfter(/databases/$(database)/documents/users/$(userId)).data._socialSyncUid)
+          ) ||
+          // Actor updating target profile counters atomically paired with /follows edge change
+          (
+            request.auth.uid != userId &&
+            isValidFollowCounterSync(userId, request.auth.uid)
+          )
+        )
       );
+
       allow delete: if isAdmin();
+    }
+
+    // --- Unique Usernames Collection (/usernames/{username}) ---
+    match /usernames/{username} {
+      allow get: if true;
+      allow list: if isAdmin();
+      allow create: if isSignedIn() &&
+        isValidUsername(username) &&
+        request.resource.data.keys().hasAll(['uid', 'username', 'createdAt']) &&
+        request.resource.data.keys().hasOnly(['uid', 'username', 'createdAt']) &&
+        request.resource.data.uid == request.auth.uid &&
+        request.resource.data.username == username &&
+        request.resource.data.createdAt == request.time &&
+        existsAfter(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)) &&
+        ('username' in getAfter(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)).data) &&
+        ('usernameLower' in getAfter(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)).data) &&
+        getAfter(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)).data.username == username &&
+        getAfter(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)).data.usernameLower == username;
+      allow update: if false;
+      allow delete: if isAdmin() || (
+        isSignedIn() &&
+        resource.data.uid == request.auth.uid && (
+          !existsAfter(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)) ||
+          !('username' in getAfter(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)).data) ||
+          getAfter(/databases/$(database)/documents/publicProfiles/$(request.auth.uid)).data.username != username
+        )
+      );
     }
 
     // --- Videos Collection ---
@@ -684,23 +881,9 @@ service cloud.firestore {
     }
 
     // --- Follows Collection (/follows/{followerUid_targetUid}) ---
+    // Contains only UIDs and createdAt (no PII) so Followers/Following lists load cleanly on creator profiles.
     match /follows/{followId} {
-      allow get: if isAdmin() || (
-        isSignedIn() && (
-          resource == null
-            ? (isValidId(followId) && (followId.matches('^' + request.auth.uid + '_.*') || followId.matches('.*_' + request.auth.uid + '$')))
-            : (
-                resource.data.followerUid == request.auth.uid ||
-                resource.data.targetUid == request.auth.uid
-              )
-        )
-      );
-      allow list: if isAdmin() || (
-        isSignedIn() && (
-          resource.data.followerUid == request.auth.uid ||
-          resource.data.targetUid == request.auth.uid
-        )
-      );
+      allow get, list: if true;
       allow create: if isSignedIn() &&
         request.resource.data.keys().hasOnly(['followerUid', 'targetUid', 'createdAt']) &&
         isValidId(request.auth.uid) &&
@@ -710,13 +893,17 @@ service cloud.firestore {
         isValidId(followId) &&
         followId == request.resource.data.followerUid + '_' + request.resource.data.targetUid &&
         request.resource.data.createdAt == request.time &&
-        !isBlockedBetween(request.resource.data.followerUid, request.resource.data.targetUid);
+        !isBlockedBetween(request.resource.data.followerUid, request.resource.data.targetUid) &&
+        isProfileCounterIncrementedOnFollow(request.resource.data.followerUid, 'followingCount') &&
+        isProfileCounterIncrementedOnFollow(request.resource.data.targetUid, 'followersCount');
       allow update: if false;
       allow delete: if isAdmin() || (
         isSignedIn() && (
           resource.data.followerUid == request.auth.uid ||
           resource.data.targetUid == request.auth.uid
-        )
+        ) &&
+        isProfileCounterDecrementedOnUnfollow(resource.data.followerUid, 'followingCount') &&
+        isProfileCounterDecrementedOnUnfollow(resource.data.targetUid, 'followersCount')
       );
     }
 
@@ -885,13 +1072,20 @@ service cloud.firestore {
     }
 
     // --- Notifications Collection (/notifications/{notificationId}) ---
-    // Recipient reads and marks read; actors can only emit verified status/social notifications when not blocked.
+    // Recipient reads and marks read; actors can only emit verified status or follow notifications when not blocked.
     match /notifications/{notificationId} {
       allow get: if isAdmin() || (
         isSignedIn() && (
           resource == null
             ? isValidId(notificationId)
-            : resource.data.recipientUid == request.auth.uid
+            : (
+                resource.data.recipientUid == request.auth.uid ||
+                (
+                  resource.data.actorUid == request.auth.uid &&
+                  resource.data.type == 'new_follower' &&
+                  notificationId == 'follow_' + request.auth.uid + '_' + resource.data.recipientUid
+                )
+              )
         )
       );
       allow list: if isAdmin() || (
@@ -901,7 +1095,7 @@ service cloud.firestore {
         isSignedIn() &&
         isValidId(notificationId) &&
         request.resource.data.keys().hasAll([
-          'recipientUid', 'actorUid', 'actorName', 'actorPhoto', 'type', 'statusId',
+          'recipientUid', 'actorUid', 'actorName', 'actorPhoto', 'type',
           'title', 'body', 'read', 'createdAt', 'expiresAt'
         ]) &&
         request.resource.data.keys().hasOnly([
@@ -913,8 +1107,6 @@ service cloud.firestore {
         request.resource.data.recipientUid != request.auth.uid &&
         request.resource.data.actorName is string && request.resource.data.actorName.size() <= 100 &&
         request.resource.data.actorPhoto is string && request.resource.data.actorPhoto.size() <= 1000 &&
-        request.resource.data.type in ['status_reaction', 'status_reply'] &&
-        isValidId(request.resource.data.statusId) &&
         request.resource.data.title is string && request.resource.data.title.size() >= 1 && request.resource.data.title.size() <= 120 &&
         request.resource.data.body is string && request.resource.data.body.size() >= 1 && request.resource.data.body.size() <= 300 &&
         (!('emoji' in request.resource.data) || (request.resource.data.emoji is string && request.resource.data.emoji.size() <= 16)) &&
@@ -922,28 +1114,88 @@ service cloud.firestore {
         request.resource.data.createdAt == request.time &&
         request.resource.data.expiresAt is timestamp &&
         !isBlockedBetween(request.auth.uid, request.resource.data.recipientUid) &&
-        exists(/databases/$(database)/documents/statuses/$(request.resource.data.statusId)) &&
-        get(/databases/$(database)/documents/statuses/$(request.resource.data.statusId)).data.authorUid == request.resource.data.recipientUid &&
-        canViewStatusDoc(get(/databases/$(database)/documents/statuses/$(request.resource.data.statusId)).data) &&
         (
-          request.resource.data.type != 'status_reaction' ||
-          exists(/databases/$(database)/documents/status_likes/$(request.resource.data.statusId + '_' + request.auth.uid)) ||
-          existsAfter(/databases/$(database)/documents/status_likes/$(request.resource.data.statusId + '_' + request.auth.uid))
+          (
+            request.resource.data.type in ['status_reaction', 'status_reply'] &&
+            ('statusId' in request.resource.data) &&
+            isValidId(request.resource.data.statusId) &&
+            exists(/databases/$(database)/documents/statuses/$(request.resource.data.statusId)) &&
+            get(/databases/$(database)/documents/statuses/$(request.resource.data.statusId)).data.authorUid == request.resource.data.recipientUid &&
+            canViewStatusDoc(get(/databases/$(database)/documents/statuses/$(request.resource.data.statusId)).data) &&
+            (
+              request.resource.data.type != 'status_reaction' ||
+              exists(/databases/$(database)/documents/status_likes/$(request.resource.data.statusId + '_' + request.auth.uid)) ||
+              existsAfter(/databases/$(database)/documents/status_likes/$(request.resource.data.statusId + '_' + request.auth.uid))
+            )
+          ) ||
+          (
+            request.resource.data.type == 'new_follower' &&
+            notificationId == 'follow_' + request.auth.uid + '_' + request.resource.data.recipientUid &&
+            (
+              exists(/databases/$(database)/documents/follows/$(request.auth.uid + '_' + request.resource.data.recipientUid)) ||
+              existsAfter(/databases/$(database)/documents/follows/$(request.auth.uid + '_' + request.resource.data.recipientUid))
+            )
+          )
         )
       );
       allow update: if isAdmin() || (
-        isSignedIn() &&
-        resource.data.recipientUid == request.auth.uid &&
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']) &&
-        request.resource.data.read is bool
-      );
-      allow delete: if isAdmin() || (
         isSignedIn() && (
-          resource.data.recipientUid == request.auth.uid ||
-          resource.data.actorUid == request.auth.uid
+          // Recipient marks notification read/unread
+          (
+            resource.data.recipientUid == request.auth.uid &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']) &&
+            request.resource.data.read is bool
+          ) ||
+          // Re-follow notification refresh gated by deterministic ID + 1-hour anti-spam cooldown
+          (
+            resource.data.actorUid == request.auth.uid &&
+            resource.data.type == 'new_follower' &&
+            notificationId == 'follow_' + request.auth.uid + '_' + resource.data.recipientUid &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'actorName', 'actorPhoto', 'title', 'body', 'read', 'createdAt', 'expiresAt'
+            ]) &&
+            request.resource.data.actorName is string && request.resource.data.actorName.size() <= 100 &&
+            request.resource.data.actorPhoto is string && request.resource.data.actorPhoto.size() <= 1000 &&
+            request.resource.data.title is string && request.resource.data.title.size() >= 1 && request.resource.data.title.size() <= 120 &&
+            request.resource.data.body is string && request.resource.data.body.size() >= 1 && request.resource.data.body.size() <= 300 &&
+            request.resource.data.read == false &&
+            request.resource.data.createdAt == request.time &&
+            request.resource.data.expiresAt is timestamp &&
+            request.time > resource.data.createdAt + duration.value(1, 'h') &&
+            !isBlockedBetween(request.auth.uid, resource.data.recipientUid) &&
+            (
+              exists(/databases/$(database)/documents/follows/$(request.auth.uid + '_' + resource.data.recipientUid)) ||
+              existsAfter(/databases/$(database)/documents/follows/$(request.auth.uid + '_' + resource.data.recipientUid))
+            )
+          )
         )
       );
+      allow delete: if isAdmin() || (
+        isSignedIn() && resource.data.recipientUid == request.auth.uid
+      );
     }
+
+    // --- KING SHOP Server-Authoritative Collections ---
+    // Exclusively accessed via Express backend using Firebase Admin SDK.
+    // Explicit zero-trust client deny rules prevent any direct reads, tampering, or fallback leaks.
+    match /king_shop_settings/{docId} { allow read, write: if false; }
+    match /king_shop_wallets/{docId} { allow read, write: if false; }
+    match /king_shop_transactions/{docId} { allow read, write: if false; }
+    match /king_shop_checkins/{docId} { allow read, write: if false; }
+    match /king_shop_missions/{docId} { allow read, write: if false; }
+    match /king_shop_mission_progress/{docId} { allow read, write: if false; }
+    match /king_shop_game_sessions/{docId} { allow read, write: if false; }
+    match /king_shop_game_limits/{docId} { allow read, write: if false; }
+    match /king_shop_quiz_history/{docId} { allow read, write: if false; }
+    match /king_shop_coupons/{docId} { allow read, write: if false; }
+    match /king_shop_coupon_locks/{docId} { allow read, write: if false; }
+    match /king_shop_redemption_limits/{docId} { allow read, write: if false; }
+    match /king_shop_idempotency/{docId} { allow read, write: if false; }
+    match /king_shop_orders/{docId} { allow read, write: if false; }
+    match /king_shop_vip_profiles/{docId} { allow read, write: if false; }
+    match /king_shop_vip_events/{docId} { allow read, write: if false; }
+    match /king_shop_achievements/{docId} { allow read, write: if false; }
+    match /king_shop_admin_audit/{docId} { allow read, write: if false; }
 
     // --- Bottom Fallback Rule ---
     // Restricted to Super Admin to protect private user data (emails, notifications, drafts)

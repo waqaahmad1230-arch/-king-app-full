@@ -54,6 +54,7 @@ interface StatusViewerModalProps {
   onStatusReactionChanged?: (statusId: string, myReaction: StatusReactionEmoji | null, likesCount: number) => void;
   onStatusDeleted?: (statusId: string) => void;
   onShowToast: (msg: string) => void;
+  onOpenCreatorProfile?: (uid: string) => void;
 }
 
 function formatRelativeTime(createdAtMs: number): string {
@@ -75,6 +76,7 @@ export default function StatusViewerModal({
   onStatusReactionChanged,
   onStatusDeleted,
   onShowToast,
+  onOpenCreatorProfile,
 }: StatusViewerModalProps) {
   const safeInitialGroup = Math.max(0, Math.min(groups.length - 1, initialGroupIndex));
   const [groupIdx, setGroupIdx] = useState<number>(safeInitialGroup);
@@ -643,7 +645,19 @@ export default function StatusViewerModal({
           </div>
 
           <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2.5 min-w-0">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (activeStatus.authorUid && onOpenCreatorProfile) {
+                  handleSafeClose();
+                  onOpenCreatorProfile(activeStatus.authorUid);
+                }
+              }}
+              className={`flex items-center gap-2.5 min-w-0 text-left ${
+                onOpenCreatorProfile ? 'cursor-pointer hover:opacity-90' : ''
+              }`}
+            >
               <CreatorAvatar
                 uid={activeStatus.authorUid}
                 fallbackPhoto={activeStatus.authorPhoto}
@@ -673,7 +687,7 @@ export default function StatusViewerModal({
                   )}
                 </div>
               </div>
-            </div>
+            </button>
 
             <div className="flex items-center gap-1 shrink-0 relative">
               {/* Volume Slider Toggle + Mute Button */}
@@ -1127,7 +1141,15 @@ export default function StatusViewerModal({
                       return (
                         <div
                           key={v.id}
-                          className="flex items-center justify-between p-2 rounded-xl bg-[#060a14] border border-slate-800"
+                          onClick={() => {
+                            if (v.viewerUid && onOpenCreatorProfile) {
+                              handleSafeClose();
+                              onOpenCreatorProfile(v.viewerUid);
+                            }
+                          }}
+                          className={`flex items-center justify-between p-2 rounded-xl bg-[#060a14] border border-slate-800 ${
+                            onOpenCreatorProfile ? 'cursor-pointer hover:border-cyan-500/40' : ''
+                          }`}
                         >
                           <div className="flex items-center gap-2.5 min-w-0">
                             <CreatorAvatar
@@ -1159,13 +1181,22 @@ export default function StatusViewerModal({
                   </h4>
                   <div className="flex flex-wrap gap-2">
                     {ownerLikes.map((l) => (
-                      <div
+                      <button
                         key={l.id}
-                        className="px-2.5 py-1 rounded-xl bg-[#060a14] border border-slate-800 text-xs text-white flex items-center gap-1.5"
+                        type="button"
+                        onClick={() => {
+                          if (l.userUid && onOpenCreatorProfile) {
+                            handleSafeClose();
+                            onOpenCreatorProfile(l.userUid);
+                          }
+                        }}
+                        className={`px-2.5 py-1 rounded-xl bg-[#060a14] border border-slate-800 text-xs text-white flex items-center gap-1.5 ${
+                          onOpenCreatorProfile ? 'cursor-pointer hover:border-cyan-500/40' : ''
+                        }`}
                       >
                         <span>{l.emoji}</span>
                         <span className="font-semibold">{l.userName}</span>
-                      </div>
+                      </button>
                     ))}
                   </div>
                 </div>
@@ -1183,7 +1214,15 @@ export default function StatusViewerModal({
                     {ownerReplies.map((r) => (
                       <div
                         key={r.id}
-                        className="p-2.5 rounded-xl bg-[#060a14] border border-slate-800 space-y-1"
+                        onClick={() => {
+                          if (r.senderUid && onOpenCreatorProfile) {
+                            handleSafeClose();
+                            onOpenCreatorProfile(r.senderUid);
+                          }
+                        }}
+                        className={`p-2.5 rounded-xl bg-[#060a14] border border-slate-800 space-y-1 ${
+                          onOpenCreatorProfile ? 'cursor-pointer hover:border-cyan-500/40' : ''
+                        }`}
                       >
                         <div className="flex items-center justify-between text-[11px]">
                           <span className="font-bold text-white">{r.senderName}</span>

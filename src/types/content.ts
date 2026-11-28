@@ -11,7 +11,10 @@ export interface UserPost {
   authorPhoto: string;
   mediaUrl: string;
   thumbnailUrl: string;
+  imageUrls?: string[];
   caption: string;
+  location?: string;
+  privacy?: string;
   likesCount: number;
   commentsCount: number;
   lastCommentId?: string;
@@ -41,6 +44,9 @@ export interface CentralFeedItem {
   caption: string;
   mediaUrl: string;
   thumbnailUrl: string;
+  imageUrls?: string[];
+  location?: string;
+  privacy?: string;
   likesCount: number;
   viewsCount: number;
   commentsCount: number;

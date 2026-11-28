@@ -1,14 +1,32 @@
 import { doc, onSnapshot } from 'firebase/firestore';
-import { db } from '../firebase';
 import { useState, useEffect } from 'react';
 
 export interface CreatorPublicProfile {
   uid: string;
   displayName?: string;
   name?: string;
+  displayNameLower?: string;
+  username?: string;
+  usernameLower?: string;
+  bio?: string;
   photoURL?: string | null;
   socialLinks?: Record<string, string>;
-  subscribersCount?: number;
+  followersCount?: number;
+  followingCount?: number;
+  isVerified?: boolean;
+}
+
+export function formatCreatorHandle(
+  profile?: { username?: string | null; uid?: string | null } | null
+): string {
+  if (profile?.username && typeof profile.username === 'string' && profile.username.trim()) {
+    return `@${profile.username.trim().replace(/^@+/, '')}`;
+  }
+  const uid = profile?.uid?.trim() || '';
+  if (uid) {
+    return `@king_${uid.slice(0, 6).toLowerCase()}`;
+  }
+  return '@king_creator';
 }
 
 /**
@@ -81,45 +99,70 @@ export function subscribeToCreatorProfile(
 
   // Setup Firestore onSnapshot listener if not already active
   if (!unsubsMap.has(safeUid)) {
-    try {
-      const docRef = doc(db, 'publicProfiles', safeUid);
-      const unsub = onSnapshot(
-        docRef,
-        (snap) => {
-          if (snap.exists()) {
-            const data = snap.data();
-            const profile: CreatorPublicProfile = {
-              uid: safeUid,
-              displayName: data.displayName || data.name || '',
-              name: data.name || data.displayName || '',
-              photoURL: cleanProfilePhoto(data.photoURL),
-              socialLinks: data.socialLinks,
-              subscribersCount: data.subscribersCount,
-            };
-            profilesCache.set(safeUid, profile);
-            const listeners = listenersMap.get(safeUid);
-            if (listeners) {
-              listeners.forEach((fn) => fn(profile));
+    let active = true;
+    let realUnsub: () => void = () => {};
+    unsubsMap.set(safeUid, () => {
+      active = false;
+      realUnsub();
+    });
+
+    import('../firebase')
+      .then(({ db }) => {
+        if (!active) return;
+        const docRef = doc(db, 'publicProfiles', safeUid);
+        realUnsub = onSnapshot(
+          docRef,
+          (snap) => {
+            if (snap.exists()) {
+              const data = snap.data();
+              const followersCount =
+                typeof data.followersCount === 'number' && data.followersCount >= 0
+                  ? Math.floor(data.followersCount)
+                  : 0;
+              const followingCount =
+                typeof data.followingCount === 'number' && data.followingCount >= 0
+                  ? Math.floor(data.followingCount)
+                  : 0;
+              const profile: CreatorPublicProfile = {
+                uid: safeUid,
+                displayName: data.displayName || data.name || '',
+                name: data.name || data.displayName || '',
+                displayNameLower:
+                  typeof data.displayNameLower === 'string' ? data.displayNameLower : undefined,
+                username: typeof data.username === 'string' ? data.username : undefined,
+                usernameLower:
+                  typeof data.usernameLower === 'string' ? data.usernameLower : undefined,
+                bio: typeof data.bio === 'string' ? data.bio : '',
+                photoURL: cleanProfilePhoto(data.photoURL),
+                socialLinks: data.socialLinks,
+                followersCount,
+                followingCount,
+                isVerified: data.isVerified === true,
+              };
+              profilesCache.set(safeUid, profile);
+              const listeners = listenersMap.get(safeUid);
+              if (listeners) {
+                listeners.forEach((fn) => fn(profile));
+              }
+            } else {
+              profilesCache.set(safeUid, null);
+              const listeners = listenersMap.get(safeUid);
+              if (listeners) {
+                listeners.forEach((fn) => fn(null));
+              }
             }
-          } else {
-            profilesCache.set(safeUid, null);
-            const listeners = listenersMap.get(safeUid);
-            if (listeners) {
-              listeners.forEach((fn) => fn(null));
+          },
+          (err) => {
+            // Graceful handling of network / permission errors without noise
+            if (err?.code !== 'unavailable') {
+              console.warn(`Public profile fetch notice for ${safeUid}:`, err?.message || err);
             }
           }
-        },
-        (err) => {
-          // Graceful handling of network / permission errors without noise
-          if (err?.code !== 'unavailable') {
-            console.warn(`Public profile fetch notice for ${safeUid}:`, err?.message || err);
-          }
-        }
-      );
-      unsubsMap.set(safeUid, unsub);
-    } catch (e) {
-      console.warn("Could not attach listener for creator profile:", e);
-    }
+        );
+      })
+      .catch((e) => {
+        console.warn('Could not attach listener for creator profile:', e);
+      });
   }
 
   return () => {

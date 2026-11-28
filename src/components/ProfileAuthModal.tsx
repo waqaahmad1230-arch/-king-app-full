@@ -12,6 +12,7 @@ import {
 import { doc, setDoc, getDoc, collection, getDocs } from 'firebase/firestore';
 import { auth, db } from '../firebase';
 import { useAuth } from '../context/AuthContext';
+import { ensureDefaultUsername } from '../services/socialGraphService';
 
 interface ProfileAuthModalProps {
   isOpen: boolean;
@@ -111,14 +112,19 @@ export default function ProfileAuthModal({ isOpen, onClose, currentUser }: Profi
           createdAt: new Date().toISOString(),
         }, { merge: true });
 
+        const nowIso = new Date().toISOString();
         await setDoc(doc(db, 'publicProfiles', res.user.uid), {
           uid: res.user.uid,
           displayName: name,
           name: name,
+          displayNameLower: name.toLowerCase(),
           photoURL: '',
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
+          followersCount: 0,
+          followingCount: 0,
+          createdAt: nowIso,
+          updatedAt: nowIso,
         }, { merge: true });
+        await ensureDefaultUsername(res.user.uid, name);
       }
     } catch (err: any) {
       setErrorMsg(err.message || 'Authentication failed');

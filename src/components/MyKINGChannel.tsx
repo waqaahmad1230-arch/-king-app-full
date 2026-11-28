@@ -25,7 +25,6 @@ import {
   doc, 
   getDoc, 
   setDoc, 
-  updateDoc,
   collection,
   getDocs,
   serverTimestamp,
@@ -33,32 +32,40 @@ import {
   query,
   where,
   orderBy,
+  limit,
   onSnapshot
 } from 'firebase/firestore';
 import { 
   updateProfile, 
   signOut, 
-  signInWithPopup, 
-  GoogleAuthProvider, 
-  FacebookAuthProvider,
   User as FirebaseUser
 } from 'firebase/auth';
-import { auth, db, storage } from '../firebase';
+import { auth, db } from '../firebase';
 import { generateVideoThumbnail, getVideoDuration } from '../utils/videoUtils';
 import { saveToHistory } from '../utils/historyUtils';
 import { downloadVideoFile } from '../utils/downloadUtils';
 import { useAuth } from '../context/AuthContext';
 import CreatorAvatar from './CreatorAvatar';
+import FollowListModal from './FollowListModal';
 import {
   ProfileRelationshipBar,
   SocialHubSection,
   StatusPrivacySettingsCard,
 } from './SocialNetworkPanel';
 import {
+  formatCreatorHandle,
+  subscribeToCreatorProfile,
+} from '../services/creatorProfileService';
+import {
+  checkUsernameAvailability,
+  claimUsername,
+  resolveSocialErrorMessage,
   subscribeMyFollowers,
   subscribeMyFollowing,
   subscribeMyFriendships,
+  validateUsername,
 } from '../services/socialGraphService';
+import { toggleVideoLike } from '../services/videoSocialService';
 import {
   markAllMyNotificationsRead,
   markNotificationRead,
@@ -99,22 +106,17 @@ interface MyKINGChannelProps {
 }
 
 export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUserId, onOpenTab }: MyKINGChannelProps) {
+  const { loginWithGoogle, loginWithFacebook, openAuthModal } = useAuth();
   const authUser = currentUser || auth.currentUser;
   const signedInUid = authUser?.uid || '';
-  const [internalProfileUid, setInternalProfileUid] = useState<string | null>(null);
+  const [profileStack, setProfileStack] = useState<string[]>([]);
   const [socialCounts, setSocialCounts] = useState({ friends: 0, incomingRequests: 0, followers: 0, following: 0 });
-  const openAuthModal = (_mode: string) => {
-    alert('Please sign in first');
-  };
+  const [followListTab, setFollowListTab] = useState<'followers' | 'following' | null>(null);
 
   // Navigation sub-views: channel, settings, liked, notifications
   const [subView, setSubView] = useState<'channel' | 'settings' | 'liked' | 'notifications'>('channel');
-  
-  // Real Firestore Data States
-  const [subscribersCount, setSubscribersCount] = useState<number>(1340);
-  const [videoCount, setVideoCount] = useState<number>(6);
   const [activeTab, setActiveTab] = useState<'videos' | 'subs'>('videos');
-  
+
   // Toast state
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
@@ -128,11 +130,30 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
   });
   const [savingSocialKey, setSavingSocialKey] = useState<string | null>(null);
 
-  const activeTargetProfileUid = internalProfileUid ?? profileUserId ?? null;
+  const activeTargetProfileUid =
+    profileStack.length > 0 ? profileStack[profileStack.length - 1] : (profileUserId ?? null);
   const effectiveUserId = activeTargetProfileUid || signedInUid;
   const isViewingOtherCreator = Boolean(
     activeTargetProfileUid && activeTargetProfileUid !== signedInUid
   );
+
+  const pushProfile = (uid: string) => {
+    const cleanUid = uid?.trim();
+    if (!cleanUid) return;
+    setFollowListTab(null);
+    setSubView('channel');
+    setActiveTab('videos');
+    setSelectedChannelVideo(null);
+    setPlayingVideoIndex(null);
+
+    if (cleanUid === signedInUid && profileStack.length === 0 && !profileUserId) {
+      return;
+    }
+    setProfileStack((prev) => {
+      if (prev.length > 0 && prev[prev.length - 1] === cleanUid) return prev;
+      return [...prev, cleanUid];
+    });
+  };
 
   // Meta Business Connections State
   const [metaConnections, setMetaConnections] = useState<any[]>([]);
@@ -142,7 +163,8 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
     if (!auth.currentUser) return;
     try {
       setLoadingMeta(true);
-      const idToken = await auth.currentUser.getIdToken();
+      const idToken = await auth.currentUser.getIdToken().catch(() => null);
+      if (!idToken) return;
       const res = await fetch('/api/meta/connections', {
         headers: { Authorization: `Bearer ${idToken}` },
       });
@@ -150,8 +172,10 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
         const data = await res.json();
         setMetaConnections(data.connections || []);
       }
-    } catch (err) {
-      console.error('Error fetching meta connections:', err);
+    } catch (err: any) {
+      if (!err?.message?.includes('network-request-failed')) {
+        console.warn('Meta connections notice:', err?.message || err);
+      }
     } finally {
       setLoadingMeta(false);
     }
@@ -169,7 +193,10 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
       return;
     }
     try {
-      const idToken = await auth.currentUser.getIdToken();
+      const idToken = await auth.currentUser.getIdToken().catch(() => null);
+      if (!idToken) {
+        throw new Error('Network connection required to connect Meta Business.');
+      }
       const res = await fetch('/api/meta/auth-url', {
         headers: { Authorization: `Bearer ${idToken}` },
       });
@@ -179,7 +206,7 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
       const { url } = await res.json();
       const authWindow = window.open(url, 'meta_oauth', 'width=600,height=700');
       if (!authWindow) {
-        alert('Please allow popups for this site to connect Meta Business.');
+        showToast('Please allow popups for this site to connect Meta Business.');
       }
     } catch (err: any) {
       showToast(err?.message || 'Could not initiate Meta connection.');
@@ -204,7 +231,11 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
   const handleDisconnectMeta = async (pageId: string) => {
     if (!auth.currentUser) return;
     try {
-      const idToken = await auth.currentUser.getIdToken();
+      const idToken = await auth.currentUser.getIdToken().catch(() => null);
+      if (!idToken) {
+        showToast('Network connection required.');
+        return;
+      }
       const res = await fetch('/api/meta/disconnect', {
         method: 'POST',
         headers: {
@@ -219,14 +250,15 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
       } else {
         showToast('Failed to disconnect account.');
       }
-    } catch {
-      showToast('Error disconnecting Meta account.');
+    } catch (err: any) {
+      showToast(err?.message || 'Could not disconnect account.');
     }
   };
 
-  // Reset subView and internal navigation whenever external profileUserId or open state changes
+  // Reset subView and internal navigation stack whenever external profileUserId or open state changes
   useEffect(() => {
-    setInternalProfileUid(null);
+    setProfileStack([]);
+    setFollowListTab(null);
     setSubView('channel');
     setActiveTab('videos');
     setSelectedChannelVideo(null);
@@ -264,43 +296,44 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
   const [editingName, setEditingName] = useState(false);
   const [newName, setNewName] = useState('');
   const [savingProfile, setSavingProfile] = useState(false);
+  const [editingUsername, setEditingUsername] = useState(false);
+  const [usernameInput, setUsernameInput] = useState('');
+  const [usernameCheckMsg, setUsernameCheckMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [savingUsername, setSavingUsername] = useState(false);
 
   const [channelProfile, setChannelProfile] = useState<any | null>(null);
   const [dbPhotoURL, setDbPhotoURL] = useState<string | null>(null);
-  
-  // Fetch channel profile (publicProfiles first, fallback to users only when viewing own profile)
+
+  // Real-time subscription to publicProfiles/{effectiveUserId} (with private /users fallback for own channel)
   useEffect(() => {
-    const fetchUserData = async () => {
-      const activeUid = effectiveUserId;
-      if (!activeUid) {
-        setChannelProfile(null);
-        setDbPhotoURL(null);
-        setSocialLinks({ whatsapp: '', facebook: '', youtube: '', instagram: '', tiktok: '' });
-        return;
-      }
-      try {
-        // Try publicProfiles first
-        const pubRef = doc(db, 'publicProfiles', activeUid);
-        const pubSnap = await getDoc(pubRef);
-        if (pubSnap.exists()) {
-          const data = pubSnap.data();
-          setChannelProfile(data);
-          setDbPhotoURL(data?.photoURL || null);
-          setSocialLinks({
-            whatsapp: data?.socialLinks?.whatsapp || '',
-            facebook: data?.socialLinks?.facebook || '',
-            youtube: data?.socialLinks?.youtube || '',
-            instagram: data?.socialLinks?.instagram || '',
-            tiktok: data?.socialLinks?.tiktok || '',
-          });
-          if (typeof data?.subscribersCount === 'number') {
-            setSubscribersCount(data.subscribersCount);
-          }
-        } else if (!isViewingOtherCreator) {
-          // Fallback to private /users/{uid} ONLY for signed-in owner
-          const userRef = doc(db, 'users', activeUid);
-          const snap = await getDoc(userRef);
-          if (snap.exists()) {
+    const activeUid = effectiveUserId;
+    if (!activeUid) {
+      setChannelProfile(null);
+      setDbPhotoURL(null);
+      setSocialLinks({ whatsapp: '', facebook: '', youtube: '', instagram: '', tiktok: '' });
+      return;
+    }
+
+    let cancelled = false;
+    const unsub = subscribeToCreatorProfile(activeUid, async (pubProfile) => {
+      if (cancelled) return;
+      if (pubProfile) {
+        setChannelProfile(pubProfile);
+        setDbPhotoURL(pubProfile.photoURL || null);
+        setSocialLinks({
+          whatsapp: pubProfile.socialLinks?.whatsapp || '',
+          facebook: pubProfile.socialLinks?.facebook || '',
+          youtube: pubProfile.socialLinks?.youtube || '',
+          instagram: pubProfile.socialLinks?.instagram || '',
+          tiktok: pubProfile.socialLinks?.tiktok || '',
+        });
+        if (!isViewingOtherCreator && !editingUsername) {
+          setUsernameInput(pubProfile.username || '');
+        }
+      } else if (!isViewingOtherCreator) {
+        try {
+          const snap = await getDoc(doc(db, 'users', activeUid));
+          if (!cancelled && snap.exists()) {
             const data = snap.data();
             setChannelProfile(data);
             setDbPhotoURL(data?.photoURL || null);
@@ -311,28 +344,46 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
               instagram: data?.socialLinks?.instagram || '',
               tiktok: data?.socialLinks?.tiktok || '',
             });
-          } else {
+          } else if (!cancelled) {
             setChannelProfile(null);
           }
-        } else {
-          setChannelProfile(null);
-          setDbPhotoURL(null);
-          setSocialLinks({ whatsapp: '', facebook: '', youtube: '', instagram: '', tiktok: '' });
+        } catch (err) {
+          console.warn('Error loading fallback channel profile:', err);
         }
-      } catch (err) {
-        console.warn("Error loading channel profile:", err);
+      } else {
+        setChannelProfile(null);
+        setDbPhotoURL(null);
+        setSocialLinks({ whatsapp: '', facebook: '', youtube: '', instagram: '', tiktok: '' });
       }
+    });
+
+    return () => {
+      cancelled = true;
+      unsub();
     };
-    fetchUserData();
   }, [effectiveUserId, isViewingOtherCreator]);
 
   const realName = isViewingOtherCreator
     ? (channelProfile?.displayName || channelProfile?.name || 'KING Creator')
-    : (authUser?.displayName || currentUser?.displayName || channelProfile?.displayName || channelProfile?.name || authUser?.email?.split('@')[0] || 'KING User');
+    : (channelProfile?.displayName || channelProfile?.name || authUser?.displayName || currentUser?.displayName || authUser?.email?.split('@')[0] || 'KING User');
   const realEmail = isViewingOtherCreator ? '' : (authUser?.email || currentUser?.email || 'No Email');
-  const realHandle = isViewingOtherCreator
-    ? `@${realName.toLowerCase().replace(/\s+/g, '_')}`
-    : (authUser?.email ? `@${authUser.email.split('@')[0]}` : '@KINGUser');
+  const realHandle = formatCreatorHandle({
+    username: channelProfile?.username,
+    uid: effectiveUserId,
+  });
+  const isProfileVerified = channelProfile?.isVerified === true;
+  const displayedFollowersCount =
+    typeof channelProfile?.followersCount === 'number'
+      ? Math.max(0, Math.floor(channelProfile.followersCount))
+      : !isViewingOtherCreator
+      ? socialCounts.followers
+      : 0;
+  const displayedFollowingCount =
+    typeof channelProfile?.followingCount === 'number'
+      ? Math.max(0, Math.floor(channelProfile.followingCount))
+      : !isViewingOtherCreator
+      ? socialCounts.following
+      : 0;
 
   const getLargeFacebookPhoto = (url: string | null) => {
     if (url && url.includes('graph.facebook.com')) {
@@ -401,13 +452,65 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
   // Real Uploaded Videos List (Initialized empty until user uploads)
   const [channelVideos, setChannelVideos] = useState<ChannelVideoItem[]>([]);
 
-  // Liked videos state
-  const [likedList, setLikedList] = useState([
-    { id: 101, title: 'KING App • Official Viral Promo', channel: 'KING AI Studio', duration: '0:16' },
-    { id: 102, title: 'KING Shop Cyber Audio Showcase', channel: 'KING Shop Official', duration: '4:20' },
-  ]);
+  // Real Liked videos state synced from Firestore video like records
+  const [likedList, setLikedList] = useState<
+    Array<{ id: string; title: string; channel: string; duration: string; videoObj?: any }>
+  >([]);
+  const [loadingLiked, setLoadingLiked] = useState(false);
 
-  // Real-time Firestore Notifications (Status reactions, replies & social alerts)
+  useEffect(() => {
+    if (subView !== 'liked' || !signedInUid) {
+      if (!signedInUid) setLikedList([]);
+      return;
+    }
+    let active = true;
+    setLoadingLiked(true);
+    (async () => {
+      try {
+        const vidsSnap = await getDocs(
+          query(collection(db, 'videos'), orderBy('createdAt', 'desc'), limit(40))
+        ).catch(() => getDocs(query(collection(db, 'videos'), limit(40))));
+
+        const likeChecks = await Promise.all(
+          vidsSnap.docs.map(async (vidDoc) => {
+            const likeSnap = await getDoc(
+              doc(db, 'videos', vidDoc.id, 'likes', signedInUid)
+            ).catch(() => null);
+            if (!likeSnap?.exists()) return null;
+            const data = vidDoc.data();
+            return {
+              id: vidDoc.id,
+              title: String(data.title || 'KING Video'),
+              channel: String(data.channelName || data.uploaderName || 'KING Creator'),
+              duration: String(data.duration || 'Video'),
+              videoObj: { id: vidDoc.id, ...data },
+            };
+          })
+        );
+
+        if (active) {
+          setLikedList(
+            likeChecks.filter(
+              (
+                item
+              ): item is { id: string; title: string; channel: string; duration: string; videoObj: any } =>
+                Boolean(item)
+            )
+          );
+        }
+      } catch (err) {
+        console.warn('[MyKINGChannel] load liked videos notice:', err);
+      } finally {
+        if (active) setLoadingLiked(false);
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [subView, signedInUid]);
+
+  // Real-time Firestore Notifications (New followers, Status reactions & replies)
   const [notifications, setNotifications] = useState<AppNotificationRecord[]>([]);
 
   useEffect(() => {
@@ -423,36 +526,106 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
     setTimeout(() => setToastMessage(null), 3500);
   };
 
-  // Load videos from collection "videos" for effective channel user
+  // Load videos scoped to effective channel user (bounded limit(50) queries instead of entire collection)
   useEffect(() => {
     if (!effectiveUserId) {
       setChannelVideos([]);
       return;
     }
-    
-    console.log("Channel Videos Target UID:", effectiveUserId);
-    
-    const q = query(collection(db, "videos"), orderBy("createdAt", "desc"));
-    return onSnapshot(
-      q,
-      (snap) => {
-        const all = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-        const channelVids = all.filter((v: any) => {
-          const belongs = v.uid === effectiveUserId || v.userId === effectiveUserId;
-          if (!belongs) return false;
-          if (isViewingOtherCreator && (v.publicationStatus === 'unpublished' || v.publicationStatus === 'rejected' || v.status === 'unpublished' || v.status === 'rejected')) {
-            return false;
+
+    let active = true;
+    const byUserIdMap = new Map<string, any>();
+    const byUidMap = new Map<string, any>();
+
+    const emitMerged = () => {
+      if (!active) return;
+      const merged = new Map<string, any>();
+      byUserIdMap.forEach((v, k) => merged.set(k, v));
+      byUidMap.forEach((v, k) => merged.set(k, v));
+
+      const filtered = Array.from(merged.values()).filter((v: any) => {
+        if (
+          isViewingOtherCreator &&
+          (v.publicationStatus === 'unpublished' ||
+            v.publicationStatus === 'rejected' ||
+            v.status === 'unpublished' ||
+            v.status === 'rejected')
+        ) {
+          return false;
+        }
+        return true;
+      });
+
+      filtered.sort((a: any, b: any) => {
+        const aMs =
+          typeof a.createdAt?.toMillis === 'function'
+            ? a.createdAt.toMillis()
+            : typeof a.createdAt?.seconds === 'number'
+            ? a.createdAt.seconds * 1000
+            : 0;
+        const bMs =
+          typeof b.createdAt?.toMillis === 'function'
+            ? b.createdAt.toMillis()
+            : typeof b.createdAt?.seconds === 'number'
+            ? b.createdAt.seconds * 1000
+            : 0;
+        return bMs - aMs;
+      });
+
+      setChannelVideos(filtered as ChannelVideoItem[]);
+    };
+
+    const attachScopedListener = (
+      fieldName: 'userId' | 'uid',
+      targetMap: Map<string, any>
+    ): (() => void) => {
+      let unsub: (() => void) | null = null;
+      const start = (ordered: boolean) => {
+        const q = ordered
+          ? query(
+              collection(db, 'videos'),
+              where(fieldName, '==', effectiveUserId),
+              orderBy('createdAt', 'desc'),
+              limit(50)
+            )
+          : query(
+              collection(db, 'videos'),
+              where(fieldName, '==', effectiveUserId),
+              limit(50)
+            );
+        unsub = onSnapshot(
+          q,
+          (snap) => {
+            targetMap.clear();
+            snap.docs.forEach((d) => {
+              targetMap.set(d.id, { id: d.id, ...d.data() });
+            });
+            emitMerged();
+          },
+          (err: any) => {
+            if (ordered && err?.code === 'failed-precondition') {
+              unsub?.();
+              start(false);
+              return;
+            }
+            console.warn(`[MyKINGChannel] Videos (${fieldName}) snapshot notice:`, err);
           }
-          return true;
-        });
-        console.log("Total Channel Videos:", channelVids.length);
-        setChannelVideos(channelVids as ChannelVideoItem[]);
-      },
-      (err) => {
-        console.warn("[MyKINGChannel] Videos snapshot notice:", err);
-      }
-    );
-  }, [effectiveUserId]);
+        );
+      };
+
+      start(true);
+      return () => unsub?.();
+    };
+
+    const unsub1 = attachScopedListener('userId', byUserIdMap);
+    const unsub2 = attachScopedListener('uid', byUidMap);
+
+    return () => {
+      active = false;
+      unsub1();
+      unsub2();
+    };
+  }, [effectiveUserId, isViewingOtherCreator]);
 
 
 
@@ -593,13 +766,16 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
     }
   };
 
-  // 3. Back button handler
+  // 3. Back button handler (supports multi-hop profileStack A -> B -> C -> Back -> B -> Back -> A)
   const handleBack = () => {
-    if (subView !== 'channel') {
+    if (followListTab !== null) {
+      setFollowListTab(null);
+    } else if (subView !== 'channel') {
       setSubView('channel');
-    } else if (internalProfileUid) {
-      setInternalProfileUid(null);
-      setActiveTab('subs');
+    } else if (profileStack.length > 0) {
+      setProfileStack((prev) => prev.slice(0, -1));
+      setSelectedChannelVideo(null);
+      setPlayingVideoIndex(null);
     } else {
       onClose();
     }
@@ -611,20 +787,21 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
     if (!auth.currentUser || !newName.trim()) return;
     setSavingProfile(true);
     const activeUid = auth.currentUser.uid;
+    const trimmed = newName.trim().slice(0, 100);
     try {
-      await updateProfile(auth.currentUser, { displayName: newName.trim() });
+      await updateProfile(auth.currentUser, { displayName: trimmed });
       await setDoc(
         doc(db, 'users', activeUid),
-        { name: newName.trim(), displayName: newName.trim() },
+        { name: trimmed, displayName: trimmed },
         { merge: true }
       );
-      // Sync public profile
       await setDoc(
         doc(db, 'publicProfiles', activeUid),
         {
           uid: activeUid,
-          displayName: newName.trim(),
-          name: newName.trim(),
+          displayName: trimmed,
+          name: trimmed,
+          displayNameLower: trimmed.toLowerCase(),
           photoURL: realPhoto,
           updatedAt: new Date().toISOString(),
         },
@@ -636,6 +813,44 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
       showToast(e.message || 'Failed to update profile');
     } finally {
       setSavingProfile(false);
+    }
+  };
+
+  const handleUsernameInputChange = async (val: string) => {
+    setUsernameInput(val);
+    const check = validateUsername(val);
+    if (!check.valid) {
+      setUsernameCheckMsg({ ok: false, text: check.error || 'Invalid username.' });
+      return;
+    }
+    setUsernameCheckMsg({ ok: true, text: `Checking @${check.normalized}...` });
+    try {
+      const avail = await checkUsernameAvailability(check.normalized, signedInUid);
+      setUsernameCheckMsg({
+        ok: avail.available,
+        text: avail.available ? `@${avail.normalized} is available` : avail.reason || 'Unavailable',
+      });
+    } catch {
+      setUsernameCheckMsg(null);
+    }
+  };
+
+  const handleSaveUsername = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!signedInUid) {
+      openAuthModal('login');
+      return;
+    }
+    setSavingUsername(true);
+    try {
+      const claimed = await claimUsername(signedInUid, usernameInput);
+      setEditingUsername(false);
+      setUsernameCheckMsg(null);
+      showToast(`Username updated to @${claimed}`);
+    } catch (err) {
+      showToast(resolveSocialErrorMessage(err, 'Could not claim username.'));
+    } finally {
+      setSavingUsername(false);
     }
   };
 
@@ -755,7 +970,7 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
     }
 
     if (!auth.currentUser) {
-      alert("Sign in karo pehle");
+      openAuthModal('login');
       return;
     }
 
@@ -764,7 +979,7 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
 
     if (!fileToUpload && !clipToUpload?.uri) {
       console.log("No file or video selected for upload");
-      alert("Please select a video file or clip to upload");
+      showToast("Please select a video file or clip to upload");
       return;
     }
     
@@ -849,16 +1064,16 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
       });
       
       setUploadProgress(100);
-      alert("Upload SUCCESS - KINGTUBE me agayi!");
-      
+      showToast("Upload complete! Live on KINGTUBE.");
+
       setSelectedVideoFile(null);
       setSelectedVideo(null);
       setShowAddModal(false);
       setUploadStep('select_source');
-      
+
     } catch (e: any) {
       console.error("Upload error details:", e);
-      alert("FAIL: " + (e?.message || "Failed to upload video. Please try again."));
+      showToast(e?.message || "Failed to upload video. Please try again.");
     } finally {
       setIsUploading(false);
       setUploadProgress(0);
@@ -872,7 +1087,6 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
     setSubView('channel');
   };
 
-  const { loginWithGoogle, loginWithFacebook } = useAuth();
   const [authLoading, setAuthLoading] = useState(false);
 
   // Quick Facebook Login
@@ -1030,17 +1244,84 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
             <div className="flex-1 min-w-0">
               <div className="text-sm font-bold text-white truncate flex items-center gap-1.5">
                 {realName}
-                <span className="text-[10px] bg-cyan-500/20 text-cyan-400 px-2 py-0.5 rounded-full">
-                  Verified
-                </span>
+                {isProfileVerified && (
+                  <span className="text-[10px] bg-cyan-500/20 text-cyan-400 px-2 py-0.5 rounded-full">
+                    Verified
+                  </span>
+                )}
               </div>
+              <div className="text-xs text-cyan-300 font-bold truncate">{realHandle}</div>
               {realEmail && <div className="text-xs text-slate-400 truncate">{realEmail}</div>}
               {(authUser?.uid || currentUser?.uid) ? (
-                <div className="text-[10px] text-amber-400 font-mono mt-0.5">UID: {authUser?.uid || currentUser?.uid}</div>
+                <div className="text-[10px] text-amber-400 font-mono mt-0.5 truncate">UID: {authUser?.uid || currentUser?.uid}</div>
               ) : (
                 <div className="text-[10px] text-emerald-400 font-bold mt-0.5">KING Member</div>
               )}
             </div>
+          </div>
+
+          {/* Edit Unique @username */}
+          <div className="bg-[#0b1222] border border-slate-800 p-4 rounded-2xl space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">Unique @username</span>
+              {!editingUsername && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUsernameInput(channelProfile?.username || '');
+                    setUsernameCheckMsg(null);
+                    setEditingUsername(true);
+                  }}
+                  className="text-xs text-cyan-400 hover:underline flex items-center gap-1 font-bold cursor-pointer"
+                >
+                  <Edit2 className="w-3 h-3" /> Edit
+                </button>
+              )}
+            </div>
+
+            {editingUsername ? (
+              <form onSubmit={handleSaveUsername} className="space-y-2">
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-cyan-400 text-xs font-bold">@</span>
+                  <input
+                    type="text"
+                    value={usernameInput}
+                    onChange={(e) => handleUsernameInputChange(e.target.value)}
+                    placeholder="your_handle"
+                    className="w-full bg-[#060a14] border border-cyan-500/50 text-white pl-7 pr-3 py-2 rounded-xl text-xs focus:outline-none"
+                    required
+                  />
+                </div>
+                {usernameCheckMsg && (
+                  <p className={`text-[11px] font-semibold ${usernameCheckMsg.ok ? 'text-emerald-400' : 'text-amber-300'}`}>
+                    {usernameCheckMsg.text}
+                  </p>
+                )}
+                <div className="flex gap-2">
+                  <button
+                    type="submit"
+                    disabled={savingUsername || usernameCheckMsg?.ok === false}
+                    className="flex-1 py-1.5 bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 text-black font-bold text-xs rounded-lg transition cursor-pointer"
+                  >
+                    {savingUsername ? 'Saving...' : 'Save Username'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingUsername(false);
+                      setUsernameCheckMsg(null);
+                    }}
+                    className="px-3 py-1.5 bg-slate-800 text-slate-300 text-xs rounded-lg cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <div className="text-sm font-semibold text-cyan-300 bg-[#060a14] p-2.5 rounded-xl border border-gray-800">
+                {realHandle}
+              </div>
+            )}
           </div>
 
           {/* Edit Display Name */}
@@ -1049,7 +1330,10 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
               <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">Channel Display Name</span>
               {!editingName && (
                 <button
-                  onClick={() => setEditingName(true)}
+                  onClick={() => {
+                    setNewName(realName);
+                    setEditingName(true);
+                  }}
                   className="text-xs text-cyan-400 hover:underline flex items-center gap-1 font-bold"
                 >
                   <Edit2 className="w-3 h-3" /> Edit
@@ -1481,41 +1765,76 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
             </h2>
             <button
               onClick={() => setSubView('channel')}
-              className="text-xs bg-[#1a1f35] px-3 py-1.5 rounded-full text-slate-300"
+              className="text-xs bg-[#1a1f35] px-3 py-1.5 rounded-full text-slate-300 cursor-pointer"
             >
               Back
             </button>
           </div>
 
-          <div className="space-y-2.5">
-            {likedList.map((vid) => (
-              <div
-                key={vid.id}
-                className="flex items-center justify-between p-3 bg-[#0a0e1f] border border-gray-800 rounded-2xl hover:border-slate-700 transition"
-              >
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-rose-500/20 text-rose-400 flex items-center justify-center flex-shrink-0">
-                    <Play className="w-4 h-4 fill-current ml-0.5" />
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-bold text-white line-clamp-1">{vid.title}</h4>
-                    <p className="text-[10px] text-slate-400 mt-0.5">{vid.channel} • {vid.duration}</p>
-                  </div>
-                </div>
-
-                <button
-                  onClick={() => {
-                    setLikedList(likedList.filter(l => l.id !== vid.id));
-                    showToast('Removed from Liked Videos');
-                  }}
-                  className="text-slate-500 hover:text-red-400 p-2"
-                  title="Unlike"
+          {!signedInUid ? (
+            <div className="p-5 bg-[#0a0e1f] border border-gray-800 rounded-2xl text-center text-xs text-slate-400">
+              Sign in to see videos you have liked.
+            </div>
+          ) : loadingLiked ? (
+            <div className="py-10 text-center text-xs text-slate-400">Loading liked videos...</div>
+          ) : likedList.length === 0 ? (
+            <div className="p-6 bg-[#0a0e1f] border border-dashed border-gray-800 rounded-2xl text-center space-y-1.5">
+              <Heart className="w-7 h-7 text-slate-600 mx-auto" />
+              <div className="text-xs font-bold text-slate-300">No liked videos yet</div>
+              <p className="text-[11px] text-slate-500">
+                Videos you like on KINGTUBE will show up here.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-2.5">
+              {likedList.map((vid) => (
+                <div
+                  key={vid.id}
+                  className="flex items-center justify-between p-3 bg-[#0a0e1f] border border-gray-800 rounded-2xl hover:border-slate-700 transition"
                 >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              </div>
-            ))}
-          </div>
+                  <button
+                    type="button"
+                    onClick={() => vid.videoObj && handleVideoCardClick(vid.videoObj)}
+                    className="flex items-center gap-3 min-w-0 flex-1 text-left cursor-pointer"
+                  >
+                    <div className="w-10 h-10 rounded-xl bg-rose-500/20 text-rose-400 flex items-center justify-center flex-shrink-0">
+                      <Play className="w-4 h-4 fill-current ml-0.5" />
+                    </div>
+                    <div className="min-w-0">
+                      <h4 className="text-xs font-bold text-white line-clamp-1">{vid.title}</h4>
+                      <p className="text-[10px] text-slate-400 mt-0.5 truncate">
+                        {vid.channel} • {vid.duration}
+                      </p>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (!authUser) return;
+                      try {
+                        const res = await toggleVideoLike(vid.id, {
+                          uid: authUser.uid,
+                          displayName: authUser.displayName,
+                          photoURL: authUser.photoURL,
+                        });
+                        if (!res.isLiked) {
+                          setLikedList((prev) => prev.filter((l) => l.id !== vid.id));
+                          showToast('Removed from Liked Videos');
+                        }
+                      } catch {
+                        showToast('Could not unlike right now');
+                      }
+                    }}
+                    className="text-slate-500 hover:text-red-400 p-2 cursor-pointer"
+                    title="Unlike"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -1546,14 +1865,14 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
 
           {!signedInUid ? (
             <div className="p-5 bg-[#0a0e1f] border border-gray-800 rounded-2xl text-center text-xs text-slate-400">
-              Sign in to receive Status reaction & reply notifications.
+              Sign in to receive follower, Status reaction & reply notifications.
             </div>
           ) : notifications.length === 0 ? (
             <div className="p-6 bg-[#0a0e1f] border border-dashed border-gray-800 rounded-2xl text-center space-y-1.5">
               <Bell className="w-7 h-7 text-slate-600 mx-auto" />
               <div className="text-xs font-bold text-slate-300">No notifications yet</div>
               <p className="text-[11px] text-slate-500">
-                Status reactions and private replies from friends will appear here in real time.
+                New followers, Status reactions, and replies will appear here in real time.
               </p>
             </div>
           ) : (
@@ -1567,7 +1886,9 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
                     ? `${diffSec}s ago`
                     : diffSec < 3600
                     ? `${Math.floor(diffSec / 60)}m ago`
-                    : `${Math.floor(diffSec / 3600)}h ago`;
+                    : diffSec < 86400
+                    ? `${Math.floor(diffSec / 3600)}h ago`
+                    : `${Math.floor(diffSec / 86400)}d ago`;
 
                 return (
                   <button
@@ -1577,11 +1898,14 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
                       if (!n.read) {
                         markNotificationRead(n.id).catch(() => {});
                       }
+                      if (n.actorUid && n.actorUid !== signedInUid) {
+                        pushProfile(n.actorUid);
+                      }
                     }}
                     className={`w-full text-left p-3.5 rounded-2xl border transition cursor-pointer ${
                       !n.read
                         ? 'bg-[#0e1830] border-cyan-500/40 text-white'
-                        : 'bg-[#0a0e1f] border-gray-800 text-slate-300'
+                        : 'bg-[#0a0e1f] border-gray-800 text-slate-300 hover:border-slate-700'
                     }`}
                   >
                     <div className="flex items-start gap-2.5">
@@ -1616,7 +1940,7 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
           {/* Banner */}
           <div className="h-48 bg-gradient-to-br from-orange-400 via-purple-500 to-cyan-400"></div>
           <div className="absolute top-4 right-4 bg-[#0f1830] border border-cyan-500/30 px-3 py-1 rounded-full text-xs font-bold text-cyan-300">
-            ✨ VIP PARTNER
+            ✨ KING CREATOR
           </div>
 
           {/* Profile Details */}
@@ -1638,11 +1962,16 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
             </div>
 
             {/* Real Name */}
-            <h2 className="mt-3 text-3xl font-black italic flex items-center gap-2">
-              {realName}{' '}
-              <span className="bg-[#00d4ff] text-black w-7 h-7 rounded-full flex items-center justify-center text-sm font-black">
-                ✓
-              </span>
+            <h2 className="mt-3 text-3xl font-black italic flex items-center gap-2 text-center px-4">
+              <span>{realName}</span>
+              {isProfileVerified && (
+                <span
+                  className="bg-[#00d4ff] text-black w-7 h-7 rounded-full flex items-center justify-center text-sm font-black shrink-0"
+                  title="Verified Creator"
+                >
+                  ✓
+                </span>
+              )}
             </h2>
 
             {/* 2. Real Official Social Links (Conditional - Only show if link exists) */}
@@ -1755,27 +2084,48 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
               );
             })()}
 
-            {/* Handle & Real Stats */}
-            <p className="mt-4 text-sm text-center px-4">
-              <span className="text-cyan-400 font-bold">{realHandle}</span>{' '}
-              <span className="mx-2">•</span>{' '}
-              {!isViewingOtherCreator && signedInUid ? (
-                <>
-                  <span className="font-bold">{socialCounts.friends} Friends</span>{' '}
-                  <span className="mx-1.5">•</span>{' '}
-                  <span className="font-bold">{socialCounts.followers} Followers</span>{' '}
-                  <span className="mx-1.5">•</span>{' '}
-                  <span className="font-bold">{socialCounts.following} Following</span>{' '}
-                  <span className="mx-1.5">•</span>{' '}
-                </>
-              ) : (
-                <>
-                  <span className="font-bold">{(subscribersCount / 1000).toFixed(1)}K Subscribers</span>{' '}
-                  <span className="mx-2">•</span>{' '}
-                </>
-              )}
-              {channelVideos.length} Videos
-            </p>
+            {/* Handle & Clickable Real Follow Stats (Own & Other Creator Profiles) */}
+            <div className="mt-3 text-center px-4 space-y-2.5">
+              <div className="text-sm font-bold text-cyan-400">{realHandle}</div>
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => effectiveUserId && setFollowListTab('followers')}
+                  className="px-3.5 py-1.5 rounded-xl bg-[#0a0e1f] hover:bg-[#101834] border border-slate-800 hover:border-cyan-500/40 transition cursor-pointer"
+                >
+                  <span className="text-sm font-black text-white">
+                    {displayedFollowersCount.toLocaleString()}
+                  </span>{' '}
+                  <span className="text-xs text-slate-300 font-semibold">Followers</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => effectiveUserId && setFollowListTab('following')}
+                  className="px-3.5 py-1.5 rounded-xl bg-[#0a0e1f] hover:bg-[#101834] border border-slate-800 hover:border-cyan-500/40 transition cursor-pointer"
+                >
+                  <span className="text-sm font-black text-white">
+                    {displayedFollowingCount.toLocaleString()}
+                  </span>{' '}
+                  <span className="text-xs text-slate-300 font-semibold">Following</span>
+                </button>
+                {!isViewingOtherCreator && signedInUid && (
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('subs')}
+                    className="px-3.5 py-1.5 rounded-xl bg-[#0a0e1f] hover:bg-[#101834] border border-slate-800 hover:border-cyan-500/40 transition cursor-pointer"
+                  >
+                    <span className="text-sm font-black text-white">
+                      {socialCounts.friends.toLocaleString()}
+                    </span>{' '}
+                    <span className="text-xs text-slate-300 font-semibold">Friends</span>
+                  </button>
+                )}
+                <div className="px-3.5 py-1.5 rounded-xl bg-[#0a0e1f] border border-slate-800">
+                  <span className="text-sm font-black text-white">{channelVideos.length}</span>{' '}
+                  <span className="text-xs text-slate-300 font-semibold">Videos</span>
+                </div>
+              </div>
+            </div>
 
             <p className="mt-3 text-center text-gray-400 text-sm px-6 max-w-md">
               Welcome to my official KING Channel ✨! Uploading HD Movies, Kids Cartoons, Cyber Gaming &
@@ -1945,10 +2295,7 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
             {activeTab === 'subs' && !isViewingOtherCreator && (
               <SocialHubSection
                 currentUid={signedInUid}
-                onOpenUserProfile={(uid) => {
-                  setInternalProfileUid(uid);
-                  setActiveTab('videos');
-                }}
+                onOpenUserProfile={(uid) => pushProfile(uid)}
                 onRequireAuth={() => openAuthModal('login')}
                 onShowToast={showToast}
                 onCountsChange={setSocialCounts}
@@ -1957,6 +2304,23 @@ export default function MyKINGChannel({ isOpen, onClose, currentUser, profileUse
 
           </div>
         </div>
+      )}
+
+      {/* Paginated Followers / Following Modal (Own & Other Creator Profiles) */}
+      {followListTab && effectiveUserId && (
+        <FollowListModal
+          isOpen={Boolean(followListTab)}
+          onClose={() => setFollowListTab(null)}
+          profileUid={effectiveUserId}
+          profileName={realName}
+          initialTab={followListTab}
+          currentUid={signedInUid}
+          followersCount={displayedFollowersCount}
+          followingCount={displayedFollowingCount}
+          onOpenUserProfile={(uid) => pushProfile(uid)}
+          onRequireAuth={() => openAuthModal('login')}
+          onShowToast={showToast}
+        />
       )}
 
       {/* Hidden File Input for Phone Gallery selection */}

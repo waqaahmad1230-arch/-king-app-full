@@ -5,25 +5,41 @@ import {
   AlignCenter,
   AlignLeft,
   AlignRight,
+  ArrowLeft,
+  ArrowRight,
   Bold,
   Camera,
   Check,
+  ChevronDown,
+  ChevronUp,
   Copy,
   Crop,
+  Eye,
+  FlipHorizontal2,
+  FlipVertical2,
+  Globe,
+  Image as ImageIcon,
   Italic,
   Link2,
   Loader2,
+  Lock,
+  MapPin,
   Music,
   Palette,
   Pause,
   Pencil,
   Play,
   Plus,
+  Redo2,
   RotateCw,
   Scissors,
   Share,
+  Sliders,
   Smile,
+  Sparkles,
   Trash2,
+  Undo2,
+  Users,
   Volume2,
   VolumeX,
   X,
@@ -33,12 +49,16 @@ import {
   normalizeSelectedMediaFile,
   publishGalleryMediaPost,
 } from '../services/centralContentService';
+import { createStatusPost } from '../services/statusService';
 import { FeedContentType } from '../types/content';
 import {
+  StatusAudioTrack,
   StatusEditorTextFont,
   StatusMediaOverlay,
   StatusOverlayTextEffect,
+  StatusPrivacyMode,
 } from '../types/social';
+import { uploadFileToCloudinary } from '../utils/cloudinaryUpload';
 import { KING_ROYALTY_FREE_TRACKS, StatusRoyaltyFreePlayer } from '../utils/statusAudioEngine';
 import {
   BrushStroke,
@@ -56,8 +76,10 @@ import {
 import {
   compressStatusImage,
   MAX_STATUS_IMAGE_BYTES,
+  MAX_STATUS_VIDEO_SECONDS,
   normalizeStatusWhatsAppCta,
   readMediaDurationSeconds,
+  uploadStatusMediaToCloudinary,
 } from '../utils/statusMediaUtils';
 import PostAiWorkspaceModal, { KingAiPetalIcon } from './PostAiWorkspaceModal';
 
@@ -65,6 +87,7 @@ interface PostEditorModalProps {
   isOpen: boolean;
   initialFile: File | null;
   selectionKey?: number;
+  creationType?: 'post' | 'story';
   onClose: () => void;
   onRetake: () => void;
   onPublished: (info: { id: string; contentType: FeedContentType; mediaUrl: string }) => void;
@@ -73,14 +96,15 @@ interface PostEditorModalProps {
 type EffectCategoryTab = 'Featured' | 'Styles' | 'Moods' | 'Lighting';
 type ActiveDrawer =
   | 'none'
+  | 'filters'
   | 'emoji'
   | 'music'
   | 'trim'
-  | 'link'
-  | 'whatsapp'
+  | 'cover'
   | 'crop'
   | 'draw'
-  | 'bg';
+  | 'bg'
+  | 'adjust';
 
 interface EffectPresetCard {
   id: string;
@@ -233,11 +257,18 @@ const BRUSH_WIDTHS = [4, 8, 14, 22];
 const INITIAL_PHOTO_STATE: PhotoEditState = {
   aspect: 'original',
   rotation: 0,
+  flipX: false,
+  flipY: false,
   zoom: 1,
   panX: 0,
   panY: 0,
   bgColor: '#000000',
   filterCss: 'none',
+  brightness: 1,
+  contrast: 1,
+  saturation: 1,
+  exposure: 1,
+  blur: 0,
   strokes: [],
   overlays: [],
 };
@@ -330,11 +361,19 @@ export default function PostEditorModal({
   isOpen,
   initialFile,
   selectionKey = 0,
+  creationType = 'post',
   onClose,
   onRetake,
   onPublished,
 }: PostEditorModalProps) {
   const { user, openAuthModal } = useAuth();
+
+  const [editorStep, setEditorStep] = useState<'edit' | 'details'>('edit');
+  const [postPrivacy, setPostPrivacy] = useState<'public' | 'friends' | 'private'>('public');
+  const [postLocation, setPostLocation] = useState<string>('');
+  const [shareToFeed, setShareToFeed] = useState<boolean>(true);
+  const [shareToStory, setShareToStory] = useState<boolean>(creationType === 'story');
+  const [editedPreviewDataUrl, setEditedPreviewDataUrl] = useState<string | null>(null);
 
   const [mediaType, setMediaType] = useState<FeedContentType>('photo');
   const [sourceFile, setSourceFile] = useState<File | null>(null);
@@ -364,6 +403,12 @@ export default function PostEditorModal({
   const [photoHistory, setPhotoHistory] = useState<PhotoEditState[]>([INITIAL_PHOTO_STATE]);
   const [photoHistoryIdx, setPhotoHistoryIdx] = useState<number>(0);
   const currentPhotoState = photoHistory[photoHistoryIdx] || INITIAL_PHOTO_STATE;
+  const [livePhotoPatch, setLivePhotoPatch] = useState<Partial<PhotoEditState> | null>(null);
+  const livePhotoPatchRef = useRef<Partial<PhotoEditState> | null>(null);
+  const effectivePhotoState = useMemo<PhotoEditState>(
+    () => (livePhotoPatch ? { ...currentPhotoState, ...livePhotoPatch } : currentPhotoState),
+    [currentPhotoState, livePhotoPatch]
+  );
 
   // Drawing & Overlays
   const [brushColor, setBrushColor] = useState<string>('#38bdf8');
@@ -371,6 +416,7 @@ export default function PostEditorModal({
   const [activeStroke, setActiveStroke] = useState<BrushStroke | null>(null);
   const [selectedOverlayId, setSelectedOverlayId] = useState<string | null>(null);
   const [liveDragPos, setLiveDragPos] = useState<{ id: string; x: number; y: number } | null>(null);
+  const [showOptionalMeta, setShowOptionalMeta] = useState<boolean>(false);
 
   // Text Composer
   const [showTextComposer, setShowTextComposer] = useState<boolean>(false);
@@ -396,6 +442,24 @@ export default function PostEditorModal({
   const [videoOverlayHistory, setVideoOverlayHistory] = useState<StatusMediaOverlay[][]>([[]]);
   const [videoOverlayIdx, setVideoOverlayIdx] = useState<number>(0);
   const currentVideoOverlays = videoOverlayHistory[videoOverlayIdx] || [];
+  const [customVideoThumbnail, setCustomVideoThumbnail] = useState<string | null>(null);
+
+  const captureVideoThumbnail = () => {
+    const vid = videoPreviewRef.current;
+    if (!vid) return;
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = vid.videoWidth || 540;
+      canvas.height = vid.videoHeight || 960;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.drawImage(vid, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+      setCustomVideoThumbnail(dataUrl);
+    } catch {
+      // ignore
+    }
+  };
 
   // Publish state
   const [isPublishing, setIsPublishing] = useState<boolean>(false);
@@ -453,6 +517,12 @@ export default function PostEditorModal({
   const loadMediaFile = useCallback(
     (file: File | null) => {
       setErrorMsg(null);
+      setEditorStep('edit');
+      setPostPrivacy('public');
+      setPostLocation('');
+      setShareToFeed(true);
+      setShareToStory(creationType === 'story');
+      setEditedPreviewDataUrl(null);
       setActiveTab('Featured');
       setSelectedEffectId(null);
       setSelectedEffectCss('none');
@@ -468,7 +538,11 @@ export default function PostEditorModal({
       setLinkInput('');
       setCaption('');
       setSelectedMusicId(null);
+      setCustomVideoThumbnail(null);
       stopBackgroundMusic();
+      setShowOptionalMeta(false);
+      livePhotoPatchRef.current = null;
+      setLivePhotoPatch(null);
       setProgressPct(0);
       setProgressLabel('');
       setIsPublishing(false);
@@ -531,7 +605,7 @@ export default function PostEditorModal({
         img.src = nextUrl;
       }
     },
-    [replaceObjectUrl, stopBackgroundMusic]
+    [creationType, replaceObjectUrl, stopBackgroundMusic]
   );
 
   useEffect(() => {
@@ -556,9 +630,11 @@ export default function PostEditorModal({
 
   const commitPhotoState = useCallback(
     (next: PhotoEditState) => {
+      livePhotoPatchRef.current = null;
+      setLivePhotoPatch(null);
       setPhotoHistory((prev) => {
         const sliced = prev.slice(0, photoHistoryIdx + 1);
-        const updated = [...sliced, next].slice(-30);
+        const updated = [...sliced, next].slice(-60);
         setPhotoHistoryIdx(updated.length - 1);
         return updated;
       });
@@ -566,11 +642,42 @@ export default function PostEditorModal({
     [photoHistoryIdx]
   );
 
+  const updateLivePhotoPatch = useCallback((patch: Partial<PhotoEditState>) => {
+    const merged = { ...(livePhotoPatchRef.current || {}), ...patch };
+    livePhotoPatchRef.current = merged;
+    setLivePhotoPatch(merged);
+  }, []);
+
+  const flushLivePhotoPatch = useCallback(() => {
+    const pending = livePhotoPatchRef.current;
+    if (!pending) return;
+    livePhotoPatchRef.current = null;
+    setLivePhotoPatch(null);
+    const hasChanged = (Object.keys(pending) as Array<keyof PhotoEditState>).some(
+      (k) => pending[k] !== currentPhotoState[k]
+    );
+    if (hasChanged) {
+      commitPhotoState({ ...currentPhotoState, ...pending });
+    }
+  }, [currentPhotoState, commitPhotoState]);
+
+  const handlePhotoUndo = () => {
+    livePhotoPatchRef.current = null;
+    setLivePhotoPatch(null);
+    setPhotoHistoryIdx((idx) => Math.max(0, idx - 1));
+  };
+
+  const handlePhotoRedo = () => {
+    livePhotoPatchRef.current = null;
+    setLivePhotoPatch(null);
+    setPhotoHistoryIdx((idx) => Math.min(photoHistory.length - 1, idx + 1));
+  };
+
   const commitVideoOverlays = useCallback(
     (next: StatusMediaOverlay[]) => {
       setVideoOverlayHistory((prev) => {
         const sliced = prev.slice(0, videoOverlayIdx + 1);
-        const updated = [...sliced, next].slice(-30);
+        const updated = [...sliced, next].slice(-60);
         setVideoOverlayIdx(updated.length - 1);
         return updated;
       });
@@ -579,7 +686,7 @@ export default function PostEditorModal({
   );
 
   const activeOverlays =
-    mediaType === 'photo' ? currentPhotoState.overlays : currentVideoOverlays;
+    mediaType === 'photo' ? effectivePhotoState.overlays : currentVideoOverlays;
 
   const setOverlaysWithHistory = useCallback(
     (nextOverlays: StatusMediaOverlay[]) => {
@@ -600,13 +707,13 @@ export default function PostEditorModal({
   const canvasDims = useMemo(() => {
     if (!loadedImg) return { width: 540, height: 675 };
     return resolveCanvasDimensions(
-      currentPhotoState.aspect,
+      effectivePhotoState.aspect,
       loadedImg.naturalWidth || loadedImg.width || 540,
       loadedImg.naturalHeight || loadedImg.height || 675,
-      currentPhotoState.rotation,
+      effectivePhotoState.rotation,
       540
     );
-  }, [loadedImg, currentPhotoState.aspect, currentPhotoState.rotation]);
+  }, [loadedImg, effectivePhotoState.aspect, effectivePhotoState.rotation]);
 
   useEffect(() => {
     if (mediaType !== 'photo' || !loadedImg || !canvasRef.current) return;
@@ -617,15 +724,14 @@ export default function PostEditorModal({
     if (!ctx) return;
 
     const previewState: PhotoEditState = {
-      ...currentPhotoState,
-      filterCss: 'none',
+      ...effectivePhotoState,
       strokes: activeStroke
-        ? [...currentPhotoState.strokes, activeStroke]
-        : currentPhotoState.strokes,
+        ? [...effectivePhotoState.strokes, activeStroke]
+        : effectivePhotoState.strokes,
       overlays: [],
     };
     drawPhotoCanvasFrame(ctx, canvasDims.width, canvasDims.height, loadedImg, previewState, true);
-  }, [mediaType, loadedImg, canvasDims, currentPhotoState, activeStroke]);
+  }, [mediaType, loadedImg, canvasDims, effectivePhotoState, activeStroke]);
 
   useEffect(() => {
     const vid = videoPreviewRef.current;
@@ -639,7 +745,12 @@ export default function PostEditorModal({
   }, [mediaType, videoPlaying, videoMuted]);
 
   const hasUnsavedEdits = useMemo(() => {
-    if (caption.trim().length > 0 || linkInput.trim().length > 0 || whatsappInput.trim().length > 0) {
+    if (
+      caption.trim().length > 0 ||
+      linkInput.trim().length > 0 ||
+      whatsappInput.trim().length > 0 ||
+      postLocation.trim().length > 0
+    ) {
       return true;
     }
     if (selectedMusicId) return true;
@@ -651,7 +762,14 @@ export default function PostEditorModal({
         currentPhotoState.overlays.length > 0 ||
         currentPhotoState.aspect !== 'original' ||
         currentPhotoState.rotation !== 0 ||
+        Boolean(currentPhotoState.flipX) ||
+        Boolean(currentPhotoState.flipY) ||
         currentPhotoState.zoom !== 1 ||
+        (currentPhotoState.brightness ?? 1) !== 1 ||
+        (currentPhotoState.contrast ?? 1) !== 1 ||
+        (currentPhotoState.saturation ?? 1) !== 1 ||
+        (currentPhotoState.exposure ?? 1) !== 1 ||
+        (currentPhotoState.blur ?? 0) > 0 ||
         (currentPhotoState.filterCss && currentPhotoState.filterCss !== 'none')
       );
     }
@@ -660,12 +778,14 @@ export default function PostEditorModal({
       currentVideoOverlays.length > 0 ||
       trimStartSec > 0.1 ||
       (rawVideoDuration > 0 && trimEndSec < rawVideoDuration - 0.1) ||
-      videoMuted
+      videoMuted ||
+      Boolean(customVideoThumbnail)
     );
   }, [
     caption,
     linkInput,
     whatsappInput,
+    postLocation,
     selectedMusicId,
     hasAiApplied,
     mediaType,
@@ -677,6 +797,7 @@ export default function PostEditorModal({
     trimEndSec,
     rawVideoDuration,
     videoMuted,
+    customVideoThumbnail,
   ]);
 
   const applyAiEditedPhotoFile = useCallback(
@@ -831,11 +952,7 @@ export default function PostEditorModal({
       const dy = (e.clientY - start.y) / Math.max(1, start.stageH);
       const nextPanX = Math.max(-0.5, Math.min(0.5, start.origPanX + dx));
       const nextPanY = Math.max(-0.5, Math.min(0.5, start.origPanY + dy));
-      setPhotoHistory((prev) => {
-        const copy = [...prev];
-        copy[photoHistoryIdx] = { ...copy[photoHistoryIdx], panX: nextPanX, panY: nextPanY };
-        return copy;
-      });
+      updateLivePhotoPatch({ panX: nextPanX, panY: nextPanY });
     }
   };
 
@@ -850,7 +967,10 @@ export default function PostEditorModal({
         });
       }
     }
-    panStartRef.current = null;
+    if (panStartRef.current) {
+      panStartRef.current = null;
+      flushLivePhotoPatch();
+    }
   };
 
   // --- Overlay Dragging ---
@@ -1153,7 +1273,45 @@ export default function PostEditorModal({
     setPreviewOnly((prev) => !prev);
   };
 
-  // --- Publish to KING (Reuses Cloudinary + Firebase Central Content Service) ---
+  const handleProceedToDetails = async () => {
+    if (!sourceFile || isPublishing) return;
+    setErrorMsg(null);
+    const pendingPatch = livePhotoPatchRef.current;
+    const exportPhotoState = pendingPatch
+      ? { ...currentPhotoState, ...pendingPatch }
+      : currentPhotoState;
+    if (pendingPatch) {
+      flushLivePhotoPatch();
+    }
+    if (mediaType === 'photo') {
+      if (loadedImg) {
+        try {
+          const exported = await exportEditedPhotoToFile(loadedImg, exportPhotoState, sourceFile.name);
+          setEditedPreviewDataUrl(exported.previewDataUrl);
+        } catch {
+          if (canvasRef.current) {
+            try {
+              setEditedPreviewDataUrl(canvasRef.current.toDataURL('image/jpeg', 0.85));
+            } catch {}
+          }
+        }
+      } else if (canvasRef.current) {
+        try {
+          setEditedPreviewDataUrl(canvasRef.current.toDataURL('image/jpeg', 0.85));
+        } catch {}
+      }
+    } else if (mediaType === 'video') {
+      if (!customVideoThumbnail && videoPreviewRef.current) {
+        captureVideoThumbnail();
+      }
+    }
+    setSelectedOverlayId(null);
+    setActiveDrawer('none');
+    setPreviewOnly(false);
+    setEditorStep('details');
+  };
+
+  // --- Publish to KING (Reuses Cloudinary + Firebase Central Content Service & Status Service) ---
   const handlePublishPost = async () => {
     if (isPublishing || publishingLockRef.current) return;
 
@@ -1165,16 +1323,26 @@ export default function PostEditorModal({
       setErrorMsg('Please select or capture a photo or video first.');
       return;
     }
+    if (!shareToFeed && !shareToStory) {
+      setErrorMsg('Select at least one destination (KING Feed or 24h Story).');
+      return;
+    }
+    if (shareToStory && mediaType === 'video' && trimmedDurationSec > MAX_STATUS_VIDEO_SECONDS) {
+      setErrorMsg(
+        `24h Story videos cannot exceed ${MAX_STATUS_VIDEO_SECONDS} seconds. Trim the clip or uncheck Story.`
+      );
+      return;
+    }
 
     let waSuffix = '';
+    const waCheck = normalizeStatusWhatsAppCta({
+      enabled: whatsappEnabled && Boolean(whatsappInput.trim()),
+      phoneOrLink: whatsappInput.trim(),
+    });
     if (whatsappEnabled && whatsappInput.trim()) {
-      const waCheck = normalizeStatusWhatsAppCta({
-        enabled: true,
-        phoneOrLink: whatsappInput.trim(),
-      });
       if (!waCheck.valid) {
         setErrorMsg(waCheck.error || 'Enter a valid WhatsApp number or link.');
-        setActiveDrawer('whatsapp');
+        setShowOptionalMeta(true);
         return;
       }
       if (waCheck.cta?.url) {
@@ -1200,11 +1368,18 @@ export default function PostEditorModal({
         const hasPhotoEdits =
           currentPhotoState.aspect !== 'original' ||
           currentPhotoState.rotation !== 0 ||
+          Boolean(currentPhotoState.flipX) ||
+          Boolean(currentPhotoState.flipY) ||
           currentPhotoState.zoom !== 1 ||
           currentPhotoState.panX !== 0 ||
           currentPhotoState.panY !== 0 ||
           currentPhotoState.bgColor !== '#000000' ||
           (currentPhotoState.filterCss && currentPhotoState.filterCss !== 'none') ||
+          (currentPhotoState.brightness ?? 1) !== 1 ||
+          (currentPhotoState.contrast ?? 1) !== 1 ||
+          (currentPhotoState.saturation ?? 1) !== 1 ||
+          (currentPhotoState.exposure ?? 1) !== 1 ||
+          (currentPhotoState.blur ?? 0) > 0 ||
           currentPhotoState.strokes.length > 0 ||
           currentPhotoState.overlays.length > 0;
 
@@ -1220,35 +1395,139 @@ export default function PostEditorModal({
         }
       }
 
-      const result = await publishGalleryMediaPost(
-        fileToUpload,
-        finalCaption,
-        {
-          uid: user.uid,
-          displayName: user.displayName,
-          photoURL: user.photoURL,
-          email: user.email,
-        },
-        (pct, statusText) => {
-          setProgressPct(pct);
-          setProgressLabel(statusText);
-        },
-        mediaType === 'video'
-          ? {
-              trimStartSec,
-              trimEndSec,
-              rawDurationSec: rawVideoDuration,
-              muted: videoMuted,
-              durationLabel: formatSec(trimmedDurationSec),
-            }
-          : undefined
-      );
+      let uploadedVideoThumbUrl: string | undefined;
+      if (mediaType === 'video' && customVideoThumbnail) {
+        if (customVideoThumbnail.startsWith('data:')) {
+          try {
+            setProgressPct(12);
+            setProgressLabel('Uploading custom video cover frame...');
+            const resp = await fetch(customVideoThumbnail);
+            const blob = await resp.blob();
+            const thumbFile = new File([blob], `cover_${Date.now()}.jpg`, {
+              type: blob.type || 'image/jpeg',
+            });
+            uploadedVideoThumbUrl = await uploadFileToCloudinary(thumbFile, 'image');
+          } catch {
+            // Fall back cleanly to auto-derived Cloudinary frame thumbnail
+            uploadedVideoThumbUrl = undefined;
+          }
+        } else if (customVideoThumbnail.startsWith('http') && customVideoThumbnail.length <= 2000) {
+          uploadedVideoThumbUrl = customVideoThumbnail;
+        }
+      }
 
-      onPublished({
-        id: result.id,
-        contentType: result.contentType,
-        mediaUrl: result.mediaUrl,
-      });
+      let publishedResult: { id: string; contentType: FeedContentType; mediaUrl: string } | null = null;
+
+      if (shareToFeed) {
+        const result = await publishGalleryMediaPost(
+          fileToUpload,
+          finalCaption,
+          {
+            uid: user.uid,
+            displayName: user.displayName,
+            photoURL: user.photoURL,
+            email: user.email,
+          },
+          (pct, statusText) => {
+            const scaledPct = shareToStory ? Math.min(72, Math.max(15, Math.round(pct * 0.72))) : pct;
+            setProgressPct(scaledPct);
+            setProgressLabel(statusText);
+          },
+          mediaType === 'video'
+            ? {
+                trimStartSec,
+                trimEndSec,
+                rawDurationSec: rawVideoDuration,
+                muted: videoMuted,
+                durationLabel: formatSec(trimmedDurationSec),
+                location: postLocation.trim() || undefined,
+                privacy: postPrivacy,
+                thumbnailUrl: uploadedVideoThumbUrl,
+              }
+            : {
+                location: postLocation.trim() || undefined,
+                privacy: postPrivacy,
+              }
+        );
+        publishedResult = {
+          id: result.id,
+          contentType: result.contentType,
+          mediaUrl: result.mediaUrl,
+        };
+      }
+
+      if (shareToStory) {
+        const storyPrivacy: StatusPrivacyMode =
+          postPrivacy === 'private' ? 'only_me' : postPrivacy === 'friends' ? 'friends' : 'public';
+        setProgressPct(shareToFeed ? 80 : 35);
+        setProgressLabel('Uploading 24h Story media...');
+        const storyUpload = await uploadStatusMediaToCloudinary(
+          fileToUpload,
+          mediaType === 'video' ? 'video' : 'image',
+          storyPrivacy,
+          (pct, lbl) => {
+            const base = shareToFeed ? 80 : 35;
+            const span = shareToFeed ? 15 : 55;
+            setProgressPct(Math.min(96, base + Math.round((pct / 100) * span)));
+            setProgressLabel(lbl);
+          }
+        );
+
+        const pickedTrack = selectedMusicId
+          ? KING_ROYALTY_FREE_TRACKS.find((t) => t.id === selectedMusicId)
+          : null;
+        const audioTrack: StatusAudioTrack = pickedTrack
+          ? { mode: 'royalty_free', label: pickedTrack.title, presetId: pickedTrack.id }
+          : {
+              mode: 'original',
+              label:
+                mediaType === 'video'
+                  ? videoMuted
+                    ? 'Muted Video'
+                    : 'Original Video Sound'
+                  : 'Ambient Silent',
+            };
+
+        setProgressPct(97);
+        setProgressLabel('Publishing 24h Story...');
+        const createdStatus = await createStatusPost({
+          authorUid: user.uid,
+          authorName: user.displayName || user.email?.split('@')[0] || 'KING Creator',
+          authorPhoto: user.photoURL || '',
+          type: mediaType === 'video' ? 'video' : 'image',
+          mediaUrl: storyUpload.secureUrl,
+          thumbnailUrl: uploadedVideoThumbUrl || storyUpload.thumbnailUrl,
+          cloudinaryPublicId: storyUpload.publicId,
+          cloudinaryResourceType: storyUpload.resourceType,
+          cloudinaryDeliveryType: storyUpload.deliveryType,
+          caption: finalCaption,
+          durationSec: mediaType === 'video' ? Math.max(1, Math.round(trimmedDurationSec)) : 6,
+          audioTrack,
+          whatsappCta: waCheck.cta,
+          videoEdits:
+            mediaType === 'video'
+              ? {
+                  trimStartSec: Number(trimStartSec.toFixed(2)),
+                  trimEndSec: Number(trimEndSec.toFixed(2)),
+                  muted: videoMuted,
+                  overlays: currentVideoOverlays,
+                }
+              : undefined,
+          privacyMode: storyPrivacy,
+        });
+
+        if (!publishedResult) {
+          publishedResult = {
+            id: createdStatus.id,
+            contentType: mediaType,
+            mediaUrl: createdStatus.mediaUrl || storyUpload.secureUrl,
+          };
+        }
+      }
+
+      if (publishedResult) {
+        onPublished(publishedResult);
+      }
       onClose();
     } catch (err: any) {
       setErrorMsg(err?.message || 'Failed to publish post. Please try again.');
@@ -1259,44 +1538,96 @@ export default function PostEditorModal({
   };
 
   const tabPresets = EFFECT_PRESETS_BY_TAB[activeTab] || EFFECT_PRESETS_BY_TAB.Featured;
+  const effectiveFilterCss =
+    mediaType === 'photo' ? currentPhotoState.filterCss || 'none' : selectedEffectCss;
 
   const editorMarkup = (
     <div
-      className="fixed inset-0 z-[150] bg-black flex flex-col items-center select-none animate-in fade-in duration-150 text-white overflow-y-auto [&::-webkit-scrollbar]:hidden"
+      className="fixed inset-0 z-[150] h-[100dvh] w-full bg-[#050811] flex flex-col select-none animate-in fade-in duration-150 text-white overflow-hidden"
       role="dialog"
       aria-modal="true"
-      aria-label="KING app editor"
+      aria-label={editorStep === 'details' ? 'Create KING Post' : 'KING app editor'}
     >
-      {/* TOP BAR — Exact Screenshot Match: X left, Logo + "KING app editor" center, White circular check right */}
-      <header className="w-full max-w-[420px] px-4 pt-3 pb-2 flex items-center justify-between shrink-0 z-30">
-        <button
-          type="button"
-          disabled={isPublishing}
-          onClick={requestClose}
-          className="w-11 h-11 -ml-2 rounded-full flex items-center justify-center text-[#9ca3af] hover:text-white hover:bg-white/10 cursor-pointer transition disabled:opacity-40"
-          aria-label="Close Post Editor"
-        >
-          <X className="w-6 h-6" strokeWidth={2} />
-        </button>
+      {/* TOP BAR — KING AI locked first on left, "KING app editor" center, Check + Close right */}
+      {editorStep === 'edit' ? (
+        <header className="w-full px-3.5 pt-[max(10px,env(safe-area-inset-top))] pb-2 flex items-center justify-between gap-2 shrink-0 z-30 bg-gradient-to-b from-black/90 via-black/55 to-transparent">
+          <button
+            type="button"
+            disabled={isPublishing || !sourceFile}
+            onClick={() => {
+              setSelectedOverlayId(null);
+              setShowAiWorkspace(true);
+            }}
+            aria-label="Open KING AI Studio"
+            className="h-9 px-3 rounded-full bg-gradient-to-r from-[#0d1930] to-[#15284c] hover:brightness-110 border border-blue-400/50 shadow-[0_0_16px_rgba(37,99,235,0.4)] flex items-center gap-1.5 cursor-pointer disabled:opacity-40 active:scale-95 transition shrink-0"
+          >
+            <KingAiPetalIcon className="w-4 h-4 shrink-0" />
+            <span className="text-[11px] font-extrabold tracking-wide text-white whitespace-nowrap">
+              KING AI
+            </span>
+            {hasAiApplied && (
+              <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.9)]" />
+            )}
+          </button>
 
-        <div className="flex items-center justify-center text-white font-medium text-[15px] tracking-[-0.01em] whitespace-nowrap">
-          <span>KING app editor</span>
-        </div>
+          <div className="flex items-center justify-center text-white font-medium text-[15px] tracking-[-0.01em] whitespace-nowrap truncate">
+            <span>KING app editor</span>
+          </div>
 
-        <button
-          type="button"
-          disabled={isPublishing}
-          onClick={handleTopConfirmCheck}
-          className="w-10 h-10 rounded-full bg-white text-[#111215] flex items-center justify-center cursor-pointer hover:bg-slate-200 active:scale-95 transition shadow-lg disabled:opacity-40 shrink-0"
-          aria-label={previewOnly ? 'Show editing panel' : 'Confirm edit'}
-        >
-          <Check className="w-5 h-5 stroke-[2.6]" />
-        </button>
-      </header>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              disabled={isPublishing}
+              onClick={handleTopConfirmCheck}
+              className="w-9 h-9 rounded-full bg-white text-[#111215] flex items-center justify-center cursor-pointer hover:bg-slate-200 active:scale-95 transition shadow-lg disabled:opacity-40 shrink-0"
+              aria-label={previewOnly ? 'Show editing panel' : 'Toggle clean preview'}
+            >
+              <Check className="w-4 h-4 stroke-[2.6]" />
+            </button>
+
+            <button
+              type="button"
+              disabled={isPublishing}
+              onClick={requestClose}
+              className="w-9 h-9 rounded-full flex items-center justify-center text-[#9ca3af] hover:text-white hover:bg-white/10 cursor-pointer transition disabled:opacity-40 shrink-0"
+              aria-label="Close Post Editor"
+            >
+              <X className="w-5 h-5" strokeWidth={2} />
+            </button>
+          </div>
+        </header>
+      ) : (
+        <header className="w-full px-4 pt-[max(12px,env(safe-area-inset-top))] pb-2.5 flex items-center justify-between gap-2 border-b border-blue-500/20 bg-[#080d1a] shrink-0 z-30">
+          <button
+            type="button"
+            disabled={isPublishing}
+            onClick={() => setEditorStep('edit')}
+            className="min-h-[44px] px-3.5 rounded-full bg-[#131a2b] hover:bg-[#1a243b] border border-white/15 text-slate-100 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition disabled:opacity-40"
+            aria-label="Back to Editor"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            <span>Edit</span>
+          </button>
+
+          <div className="text-white font-bold text-[15px] tracking-[-0.01em] whitespace-nowrap">
+            New Post
+          </div>
+
+          <button
+            type="button"
+            disabled={isPublishing}
+            onClick={requestClose}
+            className="w-11 h-11 rounded-full flex items-center justify-center text-slate-300 hover:text-white hover:bg-white/10 cursor-pointer transition disabled:opacity-40"
+            aria-label="Close Post Creation"
+          >
+            <X className="w-5 h-5" strokeWidth={2} />
+          </button>
+        </header>
+      )}
 
       {/* ERROR BANNER */}
       {errorMsg && (
-        <div className="w-full max-w-[388px] px-4 mb-2 shrink-0 z-30">
+        <div className="w-full max-w-2xl mx-auto px-4 pt-1 pb-1 shrink-0 z-30">
           <div className="px-3 py-2 rounded-xl bg-rose-950/90 border border-rose-500/40 text-rose-200 text-xs font-semibold flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 min-w-0">
               <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
@@ -1305,7 +1636,7 @@ export default function PostEditorModal({
             <button
               type="button"
               onClick={() => setErrorMsg(null)}
-              className="text-rose-300 font-bold px-1.5 cursor-pointer"
+              className="text-rose-300 font-bold px-2 py-1 cursor-pointer"
             >
               ×
             </button>
@@ -1313,951 +1644,1573 @@ export default function PostEditorModal({
         </div>
       )}
 
-      {/* MAIN CENTER COLUMN: Large Rounded Media Preview + Overlapping Dark Bottom Editing Panel */}
-      <div className="w-full max-w-[388px] mx-auto px-4 pt-1 pb-5 my-auto flex flex-col">
-        {/* LARGE ROUNDED MEDIA PREVIEW CARD */}
-        <div className="relative w-full aspect-[1/1.06] min-h-[265px] max-h-[410px] rounded-[24px] overflow-hidden bg-[#0a0b0e] flex items-center justify-center">
-          {mediaType === 'photo' ? (
-            <div
-              ref={photoStageRef}
-              onPointerDown={handlePhotoStagePointerDown}
-              onPointerMove={handlePhotoStagePointerMove}
-              onPointerUp={handlePhotoStagePointerUp}
-              onPointerCancel={handlePhotoStagePointerUp}
-              className={`relative w-full h-full flex items-center justify-center ${
-                activeDrawer === 'draw'
-                  ? 'cursor-crosshair touch-none'
-                  : activeDrawer === 'crop' || liveDragPos
-                  ? 'cursor-grab touch-none'
-                  : ''
-              }`}
-            >
-              {!loadedImg && objectUrl ? (
-                <img
-                  src={objectUrl}
-                  alt="Selected photo preview"
-                  className={`w-full h-full block ${
-                    currentPhotoState.aspect === 'original' ? 'object-cover' : 'object-contain'
-                  }`}
-                  style={{
-                    filter: selectedEffectCss !== 'none' ? selectedEffectCss : undefined,
-                  }}
-                />
-              ) : (
-                <canvas
-                  ref={canvasRef}
-                  className={`w-full h-full block ${
-                    currentPhotoState.aspect === 'original' ? 'object-cover' : 'object-contain'
-                  }`}
-                  style={{
-                    filter: selectedEffectCss !== 'none' ? selectedEffectCss : undefined,
-                  }}
-                />
-              )}
+      {/* MAIN WORKSPACE */}
+      {editorStep === 'edit' ? (
+        <div className="flex-1 min-h-0 w-full flex flex-col overflow-hidden">
+          {/* EDGE-TO-EDGE FULL-SCREEN MEDIA STAGE */}
+          <div className="relative flex-1 min-h-0 w-full bg-black flex items-center justify-center overflow-hidden">
+            {/* Floating Undo / Redo Bar (Always reachable & non-blocking) */}
+            {!previewOnly && (
+              <div
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => e.stopPropagation()}
+                className="absolute top-2 left-3 z-30 flex items-center gap-1.5"
+              >
+                {mediaType === 'photo' ? (
+                  <>
+                    <button
+                      type="button"
+                      disabled={photoHistoryIdx <= 0}
+                      onClick={handlePhotoUndo}
+                      aria-label="Undo photo edit"
+                      className="min-h-[40px] px-3 rounded-full bg-black/70 backdrop-blur-md border border-white/15 hover:bg-black/85 text-white text-xs font-bold flex items-center gap-1.5 disabled:opacity-35 cursor-pointer transition shadow-lg"
+                    >
+                      <Undo2 className="w-3.5 h-3.5" />
+                      <span>Undo</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={photoHistoryIdx >= photoHistory.length - 1}
+                      onClick={handlePhotoRedo}
+                      aria-label="Redo photo edit"
+                      className="min-h-[40px] px-3 rounded-full bg-black/70 backdrop-blur-md border border-white/15 hover:bg-black/85 text-white text-xs font-bold flex items-center gap-1.5 disabled:opacity-35 cursor-pointer transition shadow-lg"
+                    >
+                      <Redo2 className="w-3.5 h-3.5" />
+                      <span>Redo</span>
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      disabled={videoOverlayIdx <= 0}
+                      onClick={() => setVideoOverlayIdx((idx) => Math.max(0, idx - 1))}
+                      aria-label="Undo video overlay"
+                      className="min-h-[40px] px-3 rounded-full bg-black/70 backdrop-blur-md border border-white/15 hover:bg-black/85 text-white text-xs font-bold flex items-center gap-1.5 disabled:opacity-35 cursor-pointer transition shadow-lg"
+                    >
+                      <Undo2 className="w-3.5 h-3.5" />
+                      <span>Undo</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={videoOverlayIdx >= videoOverlayHistory.length - 1}
+                      onClick={() => setVideoOverlayIdx((idx) => Math.min(videoOverlayHistory.length - 1, idx + 1))}
+                      aria-label="Redo video overlay"
+                      className="min-h-[40px] px-3 rounded-full bg-black/70 backdrop-blur-md border border-white/15 hover:bg-black/85 text-white text-xs font-bold flex items-center gap-1.5 disabled:opacity-35 cursor-pointer transition shadow-lg"
+                    >
+                      <Redo2 className="w-3.5 h-3.5" />
+                      <span>Redo</span>
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
 
-              {/* Draggable Text & Emoji Overlays */}
-              {currentPhotoState.overlays.map((ov, ovIdx) => {
-                const isSelected = !previewOnly && selectedOverlayId === ov.id;
-                const renderX = liveDragPos?.id === ov.id ? liveDragPos.x : ov.x;
-                const renderY = liveDragPos?.id === ov.id ? liveDragPos.y : ov.y;
-                return (
-                  <div
-                    key={ov.id}
-                    onPointerDown={(e) => handleOverlayPointerDown(e, ov)}
-                    onPointerMove={handleOverlayPointerMove}
-                    onPointerUp={handleOverlayPointerUp}
-                    onPointerCancel={handleOverlayPointerUp}
-                    onClick={(e) => e.stopPropagation()}
-                    onDoubleClick={(e) => {
-                      e.stopPropagation();
-                      if (ov.kind === 'text' && !previewOnly) openEditTextComposer(ov);
-                    }}
-                    className={`absolute touch-none select-none cursor-move ${
-                      isSelected
-                        ? 'ring-2 ring-blue-400 rounded-xl p-1 shadow-[0_0_16px_rgba(59,130,246,0.45)]'
-                        : ''
-                    }`}
+            {/* Photo Canvas vs Video Stage */}
+            {mediaType === 'photo' ? (
+              <div
+                ref={photoStageRef}
+                onPointerDown={handlePhotoStagePointerDown}
+                onPointerMove={handlePhotoStagePointerMove}
+                onPointerUp={handlePhotoStagePointerUp}
+                onPointerCancel={handlePhotoStagePointerUp}
+                className={`relative w-full h-full flex items-center justify-center ${
+                  activeDrawer === 'draw'
+                    ? 'cursor-crosshair touch-none'
+                    : activeDrawer === 'crop' || liveDragPos
+                    ? 'cursor-grab touch-none'
+                    : ''
+                }`}
+              >
+                {!loadedImg && objectUrl ? (
+                  <img
+                    src={objectUrl}
+                    alt="Selected photo preview"
+                    className="w-full h-full object-contain block"
                     style={{
-                      left: `${renderX * 100}%`,
-                      top: `${renderY * 100}%`,
-                      zIndex: 10 + ovIdx,
-                      transform: `translate(-50%, -50%) rotate(${ov.rotation || 0}deg) scale(${ov.scale || 1})`,
+                      filter: effectiveFilterCss !== 'none' ? effectiveFilterCss : undefined,
                     }}
-                  >
-                    {ov.kind === 'sticker' ? (
-                      <span className="text-4xl leading-none drop-shadow-lg">{ov.content}</span>
-                    ) : (
-                      <div
-                        className={`px-3 py-1 rounded-xl max-w-[260px] whitespace-pre-wrap break-words text-xl leading-tight ${
-                          ov.font === 'display' ? 'uppercase tracking-wide' : ''
-                        } ${
-                          ov.align === 'left'
-                            ? 'text-left'
-                            : ov.align === 'right'
-                            ? 'text-right'
-                            : 'text-center'
-                        }`}
-                        style={getOverlayTextDisplayStyle(ov)}
-                      >
-                        {ov.content}
-                      </div>
-                    )}
+                  />
+                ) : (
+                  <canvas
+                    ref={canvasRef}
+                    className="w-full h-full object-contain block"
+                  />
+                )}
+
+                {activeDrawer === 'crop' && !previewOnly && (
+                  <div className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 z-20 px-3 py-1 rounded-full bg-black/70 border border-blue-400/35 text-[11px] font-medium text-slate-200 whitespace-nowrap">
+                    Drag photo to reposition crop
                   </div>
-                );
-              })}
-            </div>
-          ) : (
-            <div
-              ref={videoStageRef}
-              onClick={() => setSelectedOverlayId(null)}
-              className="relative w-full h-full flex items-center justify-center bg-black"
-            >
-              {objectUrl && (
-                <video
-                  ref={videoPreviewRef}
-                  src={objectUrl}
-                  playsInline
-                  muted={videoMuted}
-                  className="w-full h-full object-cover bg-black"
-                  style={{
-                    filter: selectedEffectCss !== 'none' ? selectedEffectCss : undefined,
-                  }}
-                  onTimeUpdate={(e) => {
-                    const v = e.currentTarget;
-                    if (v.currentTime < trimStartSec) {
-                      v.currentTime = trimStartSec;
-                    } else if (v.currentTime >= trimEndSec) {
+                )}
+
+                {/* Draggable Text & Emoji Overlays */}
+                {effectivePhotoState.overlays.map((ov, ovIdx) => {
+                  const isSelected = !previewOnly && selectedOverlayId === ov.id;
+                  const renderX = liveDragPos?.id === ov.id ? liveDragPos.x : ov.x;
+                  const renderY = liveDragPos?.id === ov.id ? liveDragPos.y : ov.y;
+                  return (
+                    <div
+                      key={ov.id}
+                      onPointerDown={(e) => handleOverlayPointerDown(e, ov)}
+                      onPointerMove={handleOverlayPointerMove}
+                      onPointerUp={handleOverlayPointerUp}
+                      onPointerCancel={handleOverlayPointerUp}
+                      onClick={(e) => e.stopPropagation()}
+                      onDoubleClick={(e) => {
+                        e.stopPropagation();
+                        if (ov.kind === 'text' && !previewOnly) openEditTextComposer(ov);
+                      }}
+                      className={`absolute touch-none select-none cursor-move ${
+                        isSelected
+                          ? 'ring-2 ring-blue-400 rounded-xl p-1 shadow-[0_0_16px_rgba(59,130,246,0.45)]'
+                          : ''
+                      }`}
+                      style={{
+                        left: `${renderX * 100}%`,
+                        top: `${renderY * 100}%`,
+                        zIndex: 10 + ovIdx,
+                        transform: `translate(-50%, -50%) rotate(${ov.rotation || 0}deg) scale(${ov.scale || 1})`,
+                      }}
+                    >
+                      {ov.kind === 'sticker' ? (
+                        <span className="text-4xl leading-none drop-shadow-lg">{ov.content}</span>
+                      ) : (
+                        <div
+                          className={`px-3 py-1 rounded-xl max-w-[260px] whitespace-pre-wrap break-words text-xl leading-tight ${
+                            ov.font === 'display' ? 'uppercase tracking-wide' : ''
+                          } ${
+                            ov.align === 'left'
+                              ? 'text-left'
+                              : ov.align === 'right'
+                              ? 'text-right'
+                              : 'text-center'
+                          }`}
+                          style={getOverlayTextDisplayStyle(ov)}
+                        >
+                          {ov.content}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div
+                ref={videoStageRef}
+                onClick={() => setSelectedOverlayId(null)}
+                className="relative w-full h-full flex items-center justify-center bg-black"
+              >
+                {objectUrl && (
+                  <video
+                    ref={videoPreviewRef}
+                    src={objectUrl}
+                    playsInline
+                    muted={videoMuted}
+                    className="w-full h-full object-contain bg-black"
+                    style={{
+                      filter: selectedEffectCss !== 'none' ? selectedEffectCss : undefined,
+                    }}
+                    onTimeUpdate={(e) => {
+                      const v = e.currentTarget;
+                      if (v.currentTime < trimStartSec) {
+                        v.currentTime = trimStartSec;
+                      } else if (v.currentTime >= trimEndSec) {
+                        v.currentTime = trimStartSec;
+                        if (videoPlaying) v.play().catch(() => {});
+                      }
+                      setVideoCurrentSec(v.currentTime);
+                    }}
+                    onLoadedMetadata={(e) => {
+                      const v = e.currentTarget;
+                      if (Number.isFinite(v.duration) && v.duration > 0) {
+                        const dur = Math.max(1, v.duration);
+                        setRawVideoDuration(dur);
+                        setTrimEndSec(dur);
+                      }
                       v.currentTime = trimStartSec;
                       if (videoPlaying) v.play().catch(() => {});
-                    }
-                    setVideoCurrentSec(v.currentTime);
-                  }}
-                  onLoadedMetadata={(e) => {
-                    const v = e.currentTarget;
-                    if (Number.isFinite(v.duration) && v.duration > 0) {
-                      const dur = Math.max(1, v.duration);
-                      setRawVideoDuration(dur);
-                      setTrimEndSec(dur);
-                    }
-                    v.currentTime = trimStartSec;
-                    if (videoPlaying) v.play().catch(() => {});
-                  }}
-                />
-              )}
+                    }}
+                  />
+                )}
 
-              {/* Video Play/Pause & Mute Floating Controls */}
-              <div className="absolute top-3 right-3 z-30 flex items-center gap-2">
-                <button
-                  type="button"
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setVideoMuted((m) => !m);
-                  }}
-                  className="w-9 h-9 rounded-full bg-black/60 hover:bg-black/80 text-white flex items-center justify-center border border-white/20 cursor-pointer"
-                  aria-label={videoMuted ? 'Unmute video' : 'Mute video'}
-                >
-                  {videoMuted ? (
-                    <VolumeX className="w-4 h-4 text-rose-400" />
-                  ) : (
-                    <Volume2 className="w-4 h-4" />
+                {/* Video Floating Play/Pause, Mute & Cover Frame Status */}
+                <div className="absolute top-2 right-3 z-30 flex items-center gap-2">
+                  {customVideoThumbnail && !previewOnly && (
+                    <button
+                      type="button"
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveDrawer((d) => (d === 'cover' ? 'none' : 'cover'));
+                      }}
+                      className="h-10 px-2.5 rounded-full bg-black/70 border border-blue-400/50 text-sky-300 text-[11px] font-bold flex items-center gap-1.5 cursor-pointer shadow-lg"
+                    >
+                      <img
+                        src={customVideoThumbnail}
+                        alt="Cover"
+                        className="w-5 h-5 rounded-full object-cover border border-white/40"
+                      />
+                      <span>Cover Set</span>
+                    </button>
                   )}
-                </button>
-                <button
-                  type="button"
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setVideoPlaying((p) => !p);
-                  }}
-                  className="w-9 h-9 rounded-full bg-black/60 hover:bg-black/80 text-white flex items-center justify-center border border-white/20 cursor-pointer"
-                  aria-label={videoPlaying ? 'Pause video' : 'Play video'}
-                >
-                  {videoPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
-                </button>
-              </div>
-
-              {/* Video Overlays (Text & Emoji) */}
-              {currentVideoOverlays.map((ov, ovIdx) => {
-                const isSelected = !previewOnly && selectedOverlayId === ov.id;
-                const renderX = liveDragPos?.id === ov.id ? liveDragPos.x : ov.x;
-                const renderY = liveDragPos?.id === ov.id ? liveDragPos.y : ov.y;
-                return (
-                  <div
-                    key={ov.id}
-                    onPointerDown={(e) => handleOverlayPointerDown(e, ov)}
-                    onPointerMove={handleOverlayPointerMove}
-                    onPointerUp={handleOverlayPointerUp}
-                    onPointerCancel={handleOverlayPointerUp}
-                    onClick={(e) => e.stopPropagation()}
-                    onDoubleClick={(e) => {
+                  <button
+                    type="button"
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
                       e.stopPropagation();
-                      if (ov.kind === 'text' && !previewOnly) openEditTextComposer(ov);
+                      setVideoMuted((m) => !m);
                     }}
-                    className={`absolute touch-none select-none cursor-move ${
-                      isSelected
-                        ? 'ring-2 ring-blue-400 rounded-xl p-1 shadow-[0_0_16px_rgba(59,130,246,0.45)]'
-                        : ''
-                    }`}
-                    style={{
-                      left: `${renderX * 100}%`,
-                      top: `${renderY * 100}%`,
-                      zIndex: 10 + ovIdx,
-                      transform: `translate(-50%, -50%) rotate(${ov.rotation || 0}deg) scale(${ov.scale || 1})`,
-                    }}
+                    className="w-11 h-11 rounded-full bg-black/65 hover:bg-black/85 backdrop-blur-md text-white flex items-center justify-center border border-white/20 cursor-pointer shadow-lg"
+                    aria-label={videoMuted ? 'Unmute video' : 'Mute video'}
                   >
-                    {ov.kind === 'sticker' ? (
-                      <span className="text-4xl leading-none drop-shadow-lg">{ov.content}</span>
+                    {videoMuted ? (
+                      <VolumeX className="w-4 h-4 text-rose-400" />
                     ) : (
-                      <div
-                        className={`px-3 py-1 rounded-xl max-w-[260px] whitespace-pre-wrap break-words text-xl leading-tight ${
-                          ov.font === 'display' ? 'uppercase tracking-wide' : ''
-                        } ${
-                          ov.align === 'left'
-                            ? 'text-left'
-                            : ov.align === 'right'
-                            ? 'text-right'
-                            : 'text-center'
-                        }`}
-                        style={getOverlayTextDisplayStyle(ov)}
-                      >
-                        {ov.content}
-                      </div>
+                      <Volume2 className="w-4 h-4" />
                     )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
+                  </button>
+                  <button
+                    type="button"
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setVideoPlaying((p) => !p);
+                    }}
+                    className="w-11 h-11 rounded-full bg-black/65 hover:bg-black/85 backdrop-blur-md text-white flex items-center justify-center border border-white/20 cursor-pointer shadow-lg"
+                    aria-label={videoPlaying ? 'Pause video' : 'Play video'}
+                  >
+                    {videoPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
+                  </button>
+                </div>
 
-          {/* Selected Overlay Quick Bar */}
-          {!previewOnly && selectedOverlay && (
-            <div
-              onPointerDown={(e) => e.stopPropagation()}
-              onClick={(e) => e.stopPropagation()}
-              className="absolute top-3 left-1/2 -translate-x-1/2 z-40 bg-[#141824]/95 border border-white/15 rounded-2xl px-2 py-1 flex items-center gap-1 shadow-2xl max-w-[92%] overflow-x-auto [&::-webkit-scrollbar]:hidden"
-            >
-              {selectedOverlay.kind === 'text' && (
-                <button
-                  type="button"
-                  onClick={() => openEditTextComposer(selectedOverlay)}
-                  className="px-2 py-1 rounded-lg bg-[#2563eb] text-white text-[11px] font-bold cursor-pointer whitespace-nowrap"
-                >
-                  Edit
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={() =>
-                  updateSelectedOverlay({ scale: clampOverlayScale((selectedOverlay.scale || 1) - 0.15) })
-                }
-                className="px-2 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-black cursor-pointer"
-              >
-                A-
-              </button>
-              <button
-                type="button"
-                onClick={() =>
-                  updateSelectedOverlay({ scale: clampOverlayScale((selectedOverlay.scale || 1) + 0.15) })
-                }
-                className="px-2 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-black cursor-pointer"
-              >
-                A+
-              </button>
-              <button
-                type="button"
-                onClick={() =>
-                  updateSelectedOverlay({
-                    rotation: normalizeOverlayRotation((selectedOverlay.rotation || 0) + 15),
-                  })
-                }
-                className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white cursor-pointer"
-                aria-label="Rotate overlay"
-              >
-                <RotateCw className="w-3.5 h-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={duplicateSelectedOverlay}
-                className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white cursor-pointer"
-                aria-label="Duplicate overlay"
-              >
-                <Copy className="w-3.5 h-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={deleteSelectedOverlay}
-                className="p-1.5 rounded-lg bg-rose-500/25 hover:bg-rose-500/40 text-rose-300 cursor-pointer"
-                aria-label="Delete overlay"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          )}
-        </div>
+                {/* Video Overlays (Text & Emoji) */}
+                {currentVideoOverlays.map((ov, ovIdx) => {
+                  const isSelected = !previewOnly && selectedOverlayId === ov.id;
+                  const renderX = liveDragPos?.id === ov.id ? liveDragPos.x : ov.x;
+                  const renderY = liveDragPos?.id === ov.id ? liveDragPos.y : ov.y;
+                  return (
+                    <div
+                      key={ov.id}
+                      onPointerDown={(e) => handleOverlayPointerDown(e, ov)}
+                      onPointerMove={handleOverlayPointerMove}
+                      onPointerUp={handleOverlayPointerUp}
+                      onPointerCancel={handleOverlayPointerUp}
+                      onClick={(e) => e.stopPropagation()}
+                      onDoubleClick={(e) => {
+                        e.stopPropagation();
+                        if (ov.kind === 'text' && !previewOnly) openEditTextComposer(ov);
+                      }}
+                      className={`absolute touch-none select-none cursor-move ${
+                        isSelected
+                          ? 'ring-2 ring-blue-400 rounded-xl p-1 shadow-[0_0_16px_rgba(59,130,246,0.45)]'
+                          : ''
+                      }`}
+                      style={{
+                        left: `${renderX * 100}%`,
+                        top: `${renderY * 100}%`,
+                        zIndex: 10 + ovIdx,
+                        transform: `translate(-50%, -50%) rotate(${ov.rotation || 0}deg) scale(${ov.scale || 1})`,
+                      }}
+                    >
+                      {ov.kind === 'sticker' ? (
+                        <span className="text-4xl leading-none drop-shadow-lg">{ov.content}</span>
+                      ) : (
+                        <div
+                          className={`px-3 py-1 rounded-xl max-w-[260px] whitespace-pre-wrap break-words text-xl leading-tight ${
+                            ov.font === 'display' ? 'uppercase tracking-wide' : ''
+                          } ${
+                            ov.align === 'left'
+                              ? 'text-left'
+                              : ov.align === 'right'
+                              ? 'text-right'
+                              : 'text-center'
+                          }`}
+                          style={getOverlayTextDisplayStyle(ov)}
+                        >
+                          {ov.content}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
 
-        {/* DARK ROUNDED BOTTOM EDITING PANEL — Overlaps the lower part of the media preview */}
-        {!previewOnly && (
-          <div
-            onPointerDown={(e) => e.stopPropagation()}
-            onClick={(e) => e.stopPropagation()}
-            className="relative z-20 -mt-6 w-full bg-[#131417] border border-white/[0.06] rounded-[24px] px-3.5 pt-3.5 pb-3.5 shadow-[0_-14px_34px_rgba(0,0,0,0.88)] space-y-2.5 shrink-0"
-          >
-            {/* 1. WHATSAPP TOGGLE ROW + LINK ADD BUTTON */}
-            <div className="flex items-center gap-2">
-              <div className="flex-1 bg-[#1b1c20] rounded-xl px-2.5 h-[40px] flex items-center justify-between border border-white/[0.05]">
+            {/* Selected Overlay Quick Bar */}
+            {!previewOnly && selectedOverlay && (
+              <div
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => e.stopPropagation()}
+                className="absolute bottom-3 left-1/2 -translate-x-1/2 z-40 bg-[#0d1526]/95 backdrop-blur-md border border-blue-400/35 rounded-2xl px-2 py-1.5 flex items-center gap-1 shadow-2xl max-w-[94%] overflow-x-auto [&::-webkit-scrollbar]:hidden"
+              >
+                {selectedOverlay.kind === 'text' && (
+                  <button
+                    type="button"
+                    onClick={() => openEditTextComposer(selectedOverlay)}
+                    className="min-h-[36px] px-2.5 rounded-lg bg-[#2563eb] text-white text-xs font-bold cursor-pointer whitespace-nowrap"
+                  >
+                    Edit
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() =>
-                    setActiveDrawer((d) => (d === 'whatsapp' ? 'none' : 'whatsapp'))
+                    updateSelectedOverlay({ scale: clampOverlayScale((selectedOverlay.scale || 1) - 0.15) })
                   }
-                  className="flex items-center gap-2 min-w-0 cursor-pointer"
+                  className="min-h-[36px] px-2.5 rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-black cursor-pointer"
                 >
-                  <span className="w-6 h-6 rounded-full bg-[#25D366] text-white flex items-center justify-center shrink-0">
-                    <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 fill-current" aria-hidden="true">
-                      <path d="M12 2a10 10 0 0 0-8.6 15.1L2 22l5.1-1.3A10 10 0 1 0 12 2zm5.6 14.1c-.2.6-1.3 1.2-1.8 1.2-.5 0-1.1.2-3.6-.8-3-1.2-4.9-4.2-5.1-4.4-.1-.2-1.2-1.6-1.2-3.1s.8-2.2 1-2.5c.3-.3.6-.4.8-.4h.6c.2 0 .4 0 .6.5.2.6.8 2 .9 2.1.1.2.1.3 0 .5l-.4.5c-.1.2-.3.3-.1.6.2.3.8 1.3 1.8 2.2 1.2 1.1 2.2 1.4 2.5 1.6.3.1.5.1.7-.1l.8-.9c.2-.2.4-.2.7-.1.3.1 1.8.8 2.1 1 .3.2.5.2.6.4.1.2.1.9-.1 1.5z" />
-                    </svg>
-                  </span>
-                  <span className="text-[13.5px] font-semibold text-white truncate">WhatsApp</span>
+                  A-
                 </button>
-
                 <button
                   type="button"
-                  role="switch"
-                  aria-checked={whatsappEnabled}
-                  aria-label="Toggle WhatsApp link"
-                  onClick={() => {
-                    const next = !whatsappEnabled;
-                    setWhatsappEnabled(next);
-                    if (next) setActiveDrawer('whatsapp');
-                    else if (activeDrawer === 'whatsapp') setActiveDrawer('none');
-                  }}
-                  className={`relative flex items-center w-[54px] h-[24px] rounded-full p-0.5 transition-colors cursor-pointer shrink-0 ${
-                    whatsappEnabled ? 'bg-[#25D366]' : 'bg-[#383a42]'
-                  }`}
+                  onClick={() =>
+                    updateSelectedOverlay({ scale: clampOverlayScale((selectedOverlay.scale || 1) + 0.15) })
+                  }
+                  className="min-h-[36px] px-2.5 rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-black cursor-pointer"
                 >
-                  <span
-                    className={`w-[19px] h-[19px] rounded-full shadow transition-transform duration-150 ${
-                      whatsappEnabled
-                        ? 'translate-x-[30px] bg-white'
-                        : 'translate-x-0.5 bg-[#9ca3af]'
-                    }`}
-                  />
-                  <span
-                    className={`absolute text-[9px] font-bold tracking-tight ${
-                      whatsappEnabled
-                        ? 'left-2 text-white'
-                        : 'right-2 text-[#cbd5e1]'
-                    }`}
-                  >
-                    {whatsappEnabled ? 'ON' : 'OFF'}
-                  </span>
+                  A+
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    updateSelectedOverlay({
+                      rotation: normalizeOverlayRotation((selectedOverlay.rotation || 0) + 15),
+                    })
+                  }
+                  className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 text-white cursor-pointer"
+                  aria-label="Rotate overlay"
+                >
+                  <RotateCw className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={duplicateSelectedOverlay}
+                  className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 text-white cursor-pointer"
+                  aria-label="Duplicate overlay"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={deleteSelectedOverlay}
+                  className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg bg-rose-500/25 hover:bg-rose-500/40 text-rose-300 cursor-pointer"
+                  aria-label="Delete overlay"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
                 </button>
               </div>
+            )}
 
+            {/* Clean preview restore button */}
+            {previewOnly && (
               <button
                 type="button"
-                onClick={() => setActiveDrawer((d) => (d === 'link' ? 'none' : 'link'))}
-                className={`h-[40px] px-3 rounded-xl border text-[12px] font-medium flex items-center gap-1.5 cursor-pointer transition shrink-0 ${
-                  activeDrawer === 'link' || linkInput.trim() || caption.trim()
-                    ? 'bg-[#23262d] border-blue-400/50 text-white'
-                    : 'bg-[#18191d] hover:bg-[#23252a] border-white/[0.12] text-white'
-                }`}
+                onClick={() => setPreviewOnly(false)}
+                className="absolute bottom-5 left-1/2 -translate-x-1/2 z-40 min-h-[44px] px-5 rounded-full bg-[#0d1930]/90 hover:bg-[#132547] border border-blue-400/50 text-white text-xs font-bold flex items-center gap-2 shadow-[0_0_20px_rgba(37,99,235,0.45)] cursor-pointer"
               >
-                <Link2 className="w-3.5 h-3.5 text-slate-300" />
-                <span>Link Add</span>
+                <Eye className="w-4 h-4 text-sky-300" />
+                <span>Show Editing Tools</span>
               </button>
-            </div>
-
-            {/* Expandable Context Drawers (WhatsApp / Link & Caption / Emoji / Music / Photo Crop & Draw) */}
-            {activeDrawer === 'whatsapp' && (
-              <div className="bg-[#1b1c20] border border-white/10 rounded-xl p-2.5 space-y-2">
-                <div className="flex items-center justify-between text-[11px] font-semibold text-slate-300">
-                  <span>WhatsApp Number or Link</span>
-                  <button
-                    type="button"
-                    onClick={() => setActiveDrawer('none')}
-                    className="text-slate-400 hover:text-white cursor-pointer"
-                  >
-                    Done
-                  </button>
-                </div>
-                <input
-                  type="text"
-                  value={whatsappInput}
-                  onChange={(e) => {
-                    setWhatsappInput(e.target.value);
-                    if (e.target.value.trim() && !whatsappEnabled) setWhatsappEnabled(true);
-                  }}
-                  placeholder="+923001234567 or https://wa.me/..."
-                  className="w-full bg-[#121316] border border-white/10 focus:border-[#25D366] rounded-lg px-2.5 py-1.5 text-xs text-white placeholder:text-slate-500 focus:outline-none"
-                />
-              </div>
             )}
+          </div>
 
-            {activeDrawer === 'link' && (
-              <div className="bg-[#1b1c20] border border-white/10 rounded-xl p-2.5 space-y-2">
-                <div className="flex items-center justify-between text-[11px] font-semibold text-slate-300">
-                  <span>Post Caption &amp; Link</span>
-                  <button
-                    type="button"
-                    onClick={() => setActiveDrawer('none')}
-                    className="text-slate-400 hover:text-white cursor-pointer"
-                  >
-                    Done
-                  </button>
-                </div>
-                <input
-                  type="text"
-                  value={caption}
-                  onChange={(e) => setCaption(e.target.value)}
-                  maxLength={350}
-                  placeholder="Write a caption for your post..."
-                  className="w-full bg-[#121316] border border-white/10 focus:border-blue-500 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder:text-slate-500 focus:outline-none"
-                />
-                <input
-                  type="url"
-                  value={linkInput}
-                  onChange={(e) => setLinkInput(e.target.value)}
-                  maxLength={140}
-                  placeholder="Add external link (https://...)"
-                  className="w-full bg-[#121316] border border-white/10 focus:border-blue-500 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder:text-slate-500 focus:outline-none"
-                />
-              </div>
-            )}
-
-            {activeDrawer === 'emoji' && (
-              <div className="grid grid-cols-8 gap-1 bg-[#1b1c20] border border-white/10 rounded-xl p-2">
-                {EMOJI_PALETTE.map((emoji) => (
-                  <button
-                    key={emoji}
-                    type="button"
-                    onClick={() => addEmojiOverlay(emoji)}
-                    className="min-h-[34px] rounded-lg bg-white/5 hover:bg-white/15 text-lg flex items-center justify-center cursor-pointer active:scale-90 transition"
-                  >
-                    {emoji}
-                  </button>
-                ))}
-              </div>
-            )}
-
-            {activeDrawer === 'music' && (
-              <div className="bg-[#1b1c20] border border-white/10 rounded-xl p-2.5 space-y-2">
-                <div className="flex items-center justify-between text-[11px] font-semibold text-slate-300">
-                  <span>Background Music (KING Royalty-Free)</span>
-                  <div className="flex items-center gap-2">
-                    {mediaType === 'video' && (
+          {/* BOTTOM-DOCKED EDITING CONTROLS (KING BLUE-GLOW DARK THEME) */}
+          {!previewOnly && (
+            <div
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
+              className="shrink-0 z-30 w-full bg-[#080d1a]/95 backdrop-blur-xl border-t border-blue-500/25 shadow-[0_-14px_40px_rgba(0,0,0,0.9)] px-3 pt-2.5 pb-[max(12px,env(safe-area-inset-bottom))]"
+            >
+              <div className="max-w-2xl mx-auto w-full space-y-2">
+                {/* ACTIVE TOOL DRAWERS */}
+                {activeDrawer === 'crop' && mediaType === 'photo' && (
+                  <div className="bg-[#0e1628] border border-blue-500/25 rounded-2xl p-2.5 space-y-2.5 max-h-[34dvh] overflow-y-auto">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-bold text-slate-200">Crop, Rotate &amp; Flip</span>
                       <button
                         type="button"
-                        onClick={() => setVideoMuted((m) => !m)}
-                        className="text-[10px] font-bold px-2 py-0.5 rounded bg-white/10 text-slate-200 cursor-pointer"
+                        onClick={() => setActiveDrawer('none')}
+                        className="text-xs font-semibold text-sky-300 hover:text-white cursor-pointer px-2 py-1"
                       >
-                        {videoMuted ? 'Video Audio: Muted' : 'Video Audio: On'}
+                        Done
                       </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => setActiveDrawer('none')}
-                      className="text-slate-400 hover:text-white cursor-pointer"
-                    >
-                      Done
-                    </button>
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-1.5">
-                  {KING_ROYALTY_FREE_TRACKS.map((track) => {
-                    const isPlaying = selectedMusicId === track.id;
-                    return (
-                      <button
-                        key={track.id}
-                        type="button"
-                        onClick={() => handleToggleMusicTrack(track.id)}
-                        className={`px-2.5 py-1.5 rounded-lg border text-left flex items-center justify-between gap-1.5 cursor-pointer transition ${
-                          isPlaying
-                            ? 'bg-emerald-500/20 border-emerald-400/60 text-white'
-                            : 'bg-[#121316] border-white/10 text-slate-300 hover:text-white'
-                        }`}
-                      >
-                        <div className="min-w-0">
-                          <p className="text-[11px] font-bold truncate">{track.title}</p>
-                          <p className="text-[9px] text-slate-400 truncate">{track.mood}</p>
-                        </div>
-                        {isPlaying ? (
-                          <Pause className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                        ) : (
-                          <Play className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {activeDrawer === 'crop' && mediaType === 'photo' && (
-              <div className="bg-[#1b1c20] border border-white/10 rounded-xl p-2 space-y-2">
-                <div className="flex items-center justify-between gap-1.5 overflow-x-auto [&::-webkit-scrollbar]:hidden">
-                  <div className="flex items-center gap-1">
-                    {ASPECT_PRESETS.map((ap) => (
-                      <button
-                        key={ap.id}
-                        type="button"
-                        onClick={() =>
-                          commitPhotoState({ ...currentPhotoState, aspect: ap.id, panX: 0, panY: 0 })
-                        }
-                        className={`px-2 py-1 rounded-lg text-[10px] font-bold cursor-pointer ${
-                          currentPhotoState.aspect === ap.id
-                            ? 'bg-[#2563eb] text-white'
-                            : 'bg-white/10 text-slate-300'
-                        }`}
-                      >
-                        {ap.label}
-                      </button>
-                    ))}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      commitPhotoState({
-                        ...currentPhotoState,
-                        rotation: (((currentPhotoState.rotation + 90) % 360) as 0 | 90 | 180 | 270),
-                      })
-                    }
-                    className="px-2 py-1 rounded-lg bg-white/10 text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer shrink-0"
-                  >
-                    <RotateCw className="w-3 h-3" /> 90°
-                  </button>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-bold text-slate-300">
-                    Zoom {currentPhotoState.zoom.toFixed(1)}x
-                  </span>
-                  <input
-                    type="range"
-                    min={60}
-                    max={300}
-                    value={Math.round(currentPhotoState.zoom * 100)}
-                    onChange={(e) => {
-                      const zoom = Number(e.target.value) / 100;
-                      setPhotoHistory((prev) => {
-                        const copy = [...prev];
-                        copy[photoHistoryIdx] = { ...copy[photoHistoryIdx], zoom };
-                        return copy;
-                      });
-                    }}
-                    className="flex-1 accent-blue-500 cursor-pointer"
-                  />
-                </div>
-              </div>
-            )}
-
-            {activeDrawer === 'draw' && mediaType === 'photo' && (
-              <div className="bg-[#1b1c20] border border-white/10 rounded-xl p-2 space-y-2">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-1.5 overflow-x-auto [&::-webkit-scrollbar]:hidden">
-                    {COLOR_SWATCHES.map((c) => (
-                      <button
-                        key={c}
-                        type="button"
-                        onClick={() => setBrushColor(c)}
-                        className={`w-5 h-5 rounded-full border-2 shrink-0 cursor-pointer ${
-                          brushColor === c ? 'border-blue-400 scale-110' : 'border-white/30'
-                        }`}
-                        style={{ backgroundColor: c }}
+                    </div>
+                    <div className="flex items-center justify-between gap-1.5 overflow-x-auto [&::-webkit-scrollbar]:hidden pb-0.5">
+                      <div className="flex items-center gap-1">
+                        {ASPECT_PRESETS.map((ap) => (
+                          <button
+                            key={ap.id}
+                            type="button"
+                            onClick={() =>
+                              commitPhotoState({ ...currentPhotoState, aspect: ap.id, panX: 0, panY: 0 })
+                            }
+                            className={`min-h-[36px] px-2.5 rounded-xl text-[11px] font-bold cursor-pointer shrink-0 ${
+                              effectivePhotoState.aspect === ap.id
+                                ? 'bg-[#2563eb] text-white shadow'
+                                : 'bg-white/10 text-slate-300'
+                            }`}
+                          >
+                            {ap.label}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            commitPhotoState({
+                              ...currentPhotoState,
+                              rotation: (((currentPhotoState.rotation + 90) % 360) as 0 | 90 | 180 | 270),
+                            })
+                          }
+                          className="min-h-[36px] px-2.5 rounded-xl bg-white/10 text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer shrink-0"
+                        >
+                          <RotateCw className="w-3.5 h-3.5" /> 90°
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            commitPhotoState({
+                              ...currentPhotoState,
+                              flipX: !currentPhotoState.flipX,
+                            })
+                          }
+                          className={`min-h-[36px] px-2.5 rounded-xl text-[11px] font-bold cursor-pointer ${
+                            effectivePhotoState.flipX ? 'bg-[#2563eb] text-white' : 'bg-white/10 text-slate-300'
+                          }`}
+                        >
+                          Flip H
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            commitPhotoState({
+                              ...currentPhotoState,
+                              flipY: !currentPhotoState.flipY,
+                            })
+                          }
+                          className={`min-h-[36px] px-2.5 rounded-xl text-[11px] font-bold cursor-pointer ${
+                            effectivePhotoState.flipY ? 'bg-[#2563eb] text-white' : 'bg-white/10 text-slate-300'
+                          }`}
+                        >
+                          Flip V
+                        </button>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <span className="text-[11px] font-bold text-slate-300 tabular-nums shrink-0">
+                        Zoom {effectivePhotoState.zoom.toFixed(1)}x
+                      </span>
+                      <input
+                        type="range"
+                        min={60}
+                        max={300}
+                        value={Math.round(effectivePhotoState.zoom * 100)}
+                        onChange={(e) => {
+                          const zoom = Number(e.target.value) / 100;
+                          updateLivePhotoPatch({ zoom });
+                        }}
+                        onPointerUp={flushLivePhotoPatch}
+                        onTouchEnd={flushLivePhotoPatch}
+                        onKeyUp={flushLivePhotoPatch}
+                        onBlur={flushLivePhotoPatch}
+                        className="flex-1 h-7 accent-blue-500 cursor-pointer"
                       />
-                    ))}
+                    </div>
                   </div>
-                  {currentPhotoState.strokes.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => commitPhotoState({ ...currentPhotoState, strokes: [] })}
-                      className="text-[10px] font-bold text-rose-400 cursor-pointer"
+                )}
+
+                {activeDrawer === 'adjust' && mediaType === 'photo' && (
+                  <div className="bg-[#0e1628] border border-blue-500/25 rounded-2xl p-3 space-y-2.5 max-h-[36dvh] overflow-y-auto">
+                    <div className="flex items-center justify-between text-xs font-bold text-slate-200">
+                      <span>Adjust Photo</span>
+                      <div className="flex items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            commitPhotoState({
+                              ...currentPhotoState,
+                              brightness: 1,
+                              contrast: 1,
+                              saturation: 1,
+                              exposure: 1,
+                              blur: 0,
+                            })
+                          }
+                          className="text-slate-400 hover:text-white cursor-pointer"
+                        >
+                          Reset
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setActiveDrawer('none')}
+                          className="text-sky-300 hover:text-white cursor-pointer"
+                        >
+                          Done
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2">
+                      <div className="space-y-0.5">
+                        <div className="flex justify-between text-[11px] text-slate-300 tabular-nums">
+                          <span>Brightness</span>
+                          <span>{Math.round((effectivePhotoState.brightness ?? 1) * 100)}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={20}
+                          max={200}
+                          value={Math.round((effectivePhotoState.brightness ?? 1) * 100)}
+                          onChange={(e) => updateLivePhotoPatch({ brightness: Number(e.target.value) / 100 })}
+                          onPointerUp={flushLivePhotoPatch}
+                          onTouchEnd={flushLivePhotoPatch}
+                          onKeyUp={flushLivePhotoPatch}
+                          onBlur={flushLivePhotoPatch}
+                          className="w-full h-7 accent-blue-500 cursor-pointer"
+                        />
+                      </div>
+
+                      <div className="space-y-0.5">
+                        <div className="flex justify-between text-[11px] text-slate-300 tabular-nums">
+                          <span>Contrast</span>
+                          <span>{Math.round((effectivePhotoState.contrast ?? 1) * 100)}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={20}
+                          max={200}
+                          value={Math.round((effectivePhotoState.contrast ?? 1) * 100)}
+                          onChange={(e) => updateLivePhotoPatch({ contrast: Number(e.target.value) / 100 })}
+                          onPointerUp={flushLivePhotoPatch}
+                          onTouchEnd={flushLivePhotoPatch}
+                          onKeyUp={flushLivePhotoPatch}
+                          onBlur={flushLivePhotoPatch}
+                          className="w-full h-7 accent-blue-500 cursor-pointer"
+                        />
+                      </div>
+
+                      <div className="space-y-0.5">
+                        <div className="flex justify-between text-[11px] text-slate-300 tabular-nums">
+                          <span>Saturation</span>
+                          <span>{Math.round((effectivePhotoState.saturation ?? 1) * 100)}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={300}
+                          value={Math.round((effectivePhotoState.saturation ?? 1) * 100)}
+                          onChange={(e) => updateLivePhotoPatch({ saturation: Number(e.target.value) / 100 })}
+                          onPointerUp={flushLivePhotoPatch}
+                          onTouchEnd={flushLivePhotoPatch}
+                          onKeyUp={flushLivePhotoPatch}
+                          onBlur={flushLivePhotoPatch}
+                          className="w-full h-7 accent-blue-500 cursor-pointer"
+                        />
+                      </div>
+
+                      <div className="space-y-0.5">
+                        <div className="flex justify-between text-[11px] text-slate-300 tabular-nums">
+                          <span>Exposure</span>
+                          <span>{Math.round((effectivePhotoState.exposure ?? 1) * 100)}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={20}
+                          max={200}
+                          value={Math.round((effectivePhotoState.exposure ?? 1) * 100)}
+                          onChange={(e) => updateLivePhotoPatch({ exposure: Number(e.target.value) / 100 })}
+                          onPointerUp={flushLivePhotoPatch}
+                          onTouchEnd={flushLivePhotoPatch}
+                          onKeyUp={flushLivePhotoPatch}
+                          onBlur={flushLivePhotoPatch}
+                          className="w-full h-7 accent-blue-500 cursor-pointer"
+                        />
+                      </div>
+
+                      <div className="space-y-0.5 sm:col-span-2">
+                        <div className="flex justify-between text-[11px] text-slate-300 tabular-nums">
+                          <span>Blur</span>
+                          <span>{effectivePhotoState.blur ?? 0}px</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={20}
+                          value={effectivePhotoState.blur ?? 0}
+                          onChange={(e) => updateLivePhotoPatch({ blur: Number(e.target.value) })}
+                          onPointerUp={flushLivePhotoPatch}
+                          onTouchEnd={flushLivePhotoPatch}
+                          onKeyUp={flushLivePhotoPatch}
+                          onBlur={flushLivePhotoPatch}
+                          className="w-full h-7 accent-blue-500 cursor-pointer"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {activeDrawer === 'draw' && mediaType === 'photo' && (
+                  <div className="bg-[#0e1628] border border-blue-500/25 rounded-2xl p-2.5 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-bold text-slate-200">Draw on Photo</span>
+                      <div className="flex items-center gap-3">
+                        {currentPhotoState.strokes.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => commitPhotoState({ ...currentPhotoState, strokes: [] })}
+                            className="text-xs font-bold text-rose-400 cursor-pointer"
+                          >
+                            Clear
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setActiveDrawer('none')}
+                          className="text-xs font-semibold text-sky-300 hover:text-white cursor-pointer"
+                        >
+                          Done
+                        </button>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 overflow-x-auto [&::-webkit-scrollbar]:hidden py-0.5">
+                      {COLOR_SWATCHES.map((c) => (
+                        <button
+                          key={c}
+                          type="button"
+                          onClick={() => setBrushColor(c)}
+                          className={`w-7 h-7 rounded-full border-2 shrink-0 cursor-pointer ${
+                            brushColor === c ? 'border-blue-400 scale-110' : 'border-white/30'
+                          }`}
+                          style={{ backgroundColor: c }}
+                        />
+                      ))}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] font-bold text-slate-300">Size</span>
+                      {BRUSH_WIDTHS.map((w) => (
+                        <button
+                          key={w}
+                          type="button"
+                          onClick={() => setBrushWidth(w)}
+                          className={`min-h-[34px] px-2.5 rounded-lg text-xs font-bold cursor-pointer ${
+                            brushWidth === w ? 'bg-[#2563eb] text-white' : 'bg-white/10 text-slate-300'
+                          }`}
+                        >
+                          {w}px
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {activeDrawer === 'bg' && mediaType === 'photo' && (
+                  <div className="bg-[#0e1628] border border-blue-500/25 rounded-2xl p-2.5 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-slate-200">Canvas Background</span>
+                      <button
+                        type="button"
+                        onClick={() => setActiveDrawer('none')}
+                        className="text-xs font-semibold text-sky-300 hover:text-white cursor-pointer"
+                      >
+                        Done
+                      </button>
+                    </div>
+                    <div className="flex items-center gap-2 overflow-x-auto [&::-webkit-scrollbar]:hidden">
+                      {BG_SWATCHES.map((bg) => (
+                        <button
+                          key={bg.color}
+                          type="button"
+                          onClick={() => commitPhotoState({ ...currentPhotoState, bgColor: bg.color })}
+                          className={`min-h-[38px] px-3 rounded-xl border text-xs font-bold flex items-center gap-2 shrink-0 cursor-pointer ${
+                            currentPhotoState.bgColor === bg.color
+                              ? 'border-blue-400 bg-[#172542] text-white'
+                              : 'border-white/10 bg-[#11182b] text-slate-300'
+                          }`}
+                        >
+                          <span
+                            className="w-3.5 h-3.5 rounded-full border border-white/30"
+                            style={{ backgroundColor: bg.color }}
+                          />
+                          {bg.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {activeDrawer === 'emoji' && (
+                  <div className="bg-[#0e1628] border border-blue-500/25 rounded-2xl p-2.5 space-y-2">
+                    <div className="flex items-center justify-between text-xs font-bold text-slate-200">
+                      <span>Add Emoji / Sticker</span>
+                      <button
+                        type="button"
+                        onClick={() => setActiveDrawer('none')}
+                        className="text-sky-300 hover:text-white cursor-pointer"
+                      >
+                        Done
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-8 gap-1.5">
+                      {EMOJI_PALETTE.map((emoji) => (
+                        <button
+                          key={emoji}
+                          type="button"
+                          onClick={() => addEmojiOverlay(emoji)}
+                          className="min-h-[40px] rounded-xl bg-white/5 hover:bg-white/15 text-xl flex items-center justify-center cursor-pointer active:scale-90 transition"
+                        >
+                          {emoji}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {activeDrawer === 'music' && (
+                  <div className="bg-[#0e1628] border border-blue-500/25 rounded-2xl p-2.5 space-y-2">
+                    <div className="flex items-center justify-between text-xs font-semibold text-slate-200 gap-2">
+                      <div className="min-w-0">
+                        <span className="font-bold block">Background Music (KING Audio)</span>
+                        <span className="text-[10px] text-slate-400 block">
+                          Preview track — saved when sharing to 24h Story
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {mediaType === 'video' && (
+                          <button
+                            type="button"
+                            onClick={() => setVideoMuted((m) => !m)}
+                            className="min-h-[34px] text-[11px] font-bold px-2.5 rounded-lg bg-white/10 text-slate-200 cursor-pointer"
+                          >
+                            {videoMuted ? 'Video: Muted' : 'Video: Sound On'}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setActiveDrawer('none')}
+                          className="text-sky-300 hover:text-white cursor-pointer px-2 py-1"
+                        >
+                          Done
+                        </button>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {KING_ROYALTY_FREE_TRACKS.map((track) => {
+                        const isPlaying = selectedMusicId === track.id;
+                        return (
+                          <button
+                            key={track.id}
+                            type="button"
+                            onClick={() => handleToggleMusicTrack(track.id)}
+                            className={`min-h-[44px] px-3 py-1.5 rounded-xl border text-left flex items-center justify-between gap-2 cursor-pointer transition ${
+                              isPlaying
+                                ? 'bg-emerald-500/20 border-emerald-400/60 text-white'
+                                : 'bg-[#0b1120] border-white/10 text-slate-300 hover:text-white'
+                            }`}
+                          >
+                            <div className="min-w-0">
+                              <p className="text-xs font-bold truncate">{track.title}</p>
+                              <p className="text-[10px] text-slate-400 truncate">{track.mood}</p>
+                            </div>
+                            {isPlaying ? (
+                              <Pause className="w-4 h-4 text-emerald-400 shrink-0" />
+                            ) : (
+                              <Play className="w-4 h-4 text-slate-400 shrink-0" />
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {activeDrawer === 'cover' && mediaType === 'video' && (
+                  <div className="bg-[#0e1628] border border-blue-500/25 rounded-2xl p-2.5 space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-slate-200">
+                        Select Video Cover Frame ({formatSec(videoCurrentSec)})
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setActiveDrawer('none')}
+                        className="text-xs font-semibold text-sky-300 hover:text-white cursor-pointer"
+                      >
+                        Done
+                      </button>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={Math.max(1, timelineMaxSec)}
+                      step={0.1}
+                      value={Math.min(timelineMaxSec, Math.max(0, videoCurrentSec))}
+                      onChange={(e) => {
+                        const sec = Number(e.target.value);
+                        setVideoPlaying(false);
+                        setVideoCurrentSec(sec);
+                        if (videoPreviewRef.current) {
+                          videoPreviewRef.current.pause();
+                          videoPreviewRef.current.currentTime = sec;
+                        }
+                      }}
+                      className="w-full h-7 accent-blue-500 cursor-pointer"
+                      aria-label="Scrub video frame for cover"
+                    />
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        {customVideoThumbnail ? (
+                          <img
+                            src={customVideoThumbnail}
+                            alt="Selected cover thumbnail"
+                            className="w-10 h-10 rounded-lg object-cover border border-blue-400/50 shrink-0"
+                          />
+                        ) : (
+                          <div className="w-10 h-10 rounded-lg bg-white/5 border border-white/10 flex items-center justify-center shrink-0">
+                            <ImageIcon className="w-4 h-4 text-slate-400" />
+                          </div>
+                        )}
+                        <span className="text-[11px] text-slate-300 truncate">
+                          {customVideoThumbnail ? 'Cover frame ready for post' : 'Scrub & capture frame'}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={captureVideoThumbnail}
+                        className="min-h-[40px] px-3.5 rounded-xl bg-[#2563eb] hover:bg-[#1d4ed8] text-white text-xs font-bold cursor-pointer shrink-0 transition"
+                      >
+                        Set Cover Frame
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {activeDrawer === 'trim' && mediaType === 'video' && (
+                  <div className="bg-[#0e1628] border border-blue-500/25 rounded-2xl p-2.5 space-y-2.5 text-xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => handleTrimStartChange(trimStartSec - 0.5)}
+                          className="min-h-[38px] px-2.5 rounded-xl bg-white/10 text-white font-semibold cursor-pointer"
+                        >
+                          Start -
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleTrimStartChange(trimStartSec + 0.5)}
+                          className="min-h-[38px] px-2.5 rounded-xl bg-white/10 text-white font-semibold cursor-pointer"
+                        >
+                          Start +
+                        </button>
+                      </div>
+                      <span className="text-amber-400 font-bold tabular-nums">
+                        Clip {formatSec(trimmedDurationSec)}
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => handleTrimEndChange(trimEndSec - 0.5)}
+                          className="min-h-[38px] px-2.5 rounded-xl bg-white/10 text-white font-semibold cursor-pointer"
+                        >
+                          End -
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleTrimEndChange(trimEndSec + 0.5)}
+                          className="min-h-[38px] px-2.5 rounded-xl bg-white/10 text-white font-semibold cursor-pointer"
+                        >
+                          End +
+                        </button>
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between gap-2 pt-1.5 border-t border-white/10">
+                      <span className="text-slate-300 text-[11px]">
+                        {customVideoThumbnail ? 'Cover frame captured ✓' : 'Capture current frame as cover'}
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={captureVideoThumbnail}
+                          className="min-h-[36px] px-3 rounded-xl bg-[#2563eb] hover:bg-[#1d4ed8] text-white font-bold cursor-pointer transition"
+                        >
+                          Capture Cover
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setActiveDrawer('none')}
+                          className="min-h-[36px] px-2.5 text-sky-300 hover:text-white font-semibold cursor-pointer"
+                        >
+                          Done
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* VIDEO-ONLY TRIM TIMELINE (Never shown in Photo mode) */}
+                {mediaType === 'video' && (
+                  <div className="space-y-1 px-1">
+                    <div className="flex items-center justify-between text-[11px] text-slate-300 tabular-nums">
+                      <span>Start {formatSec(trimStartSec)}</span>
+                      <span className="text-amber-400 font-bold">
+                        Duration {formatSec(trimmedDurationSec)}
+                      </span>
+                      <span>End {formatSec(trimEndSec)}</span>
+                    </div>
+
+                    <div
+                      ref={timelineTrackRef}
+                      onPointerDown={(e) => handleTimelinePointerDown(e, 'seek')}
+                      onPointerMove={handleTimelinePointerMove}
+                      onPointerUp={handleTimelinePointerUp}
+                      onPointerCancel={handleTimelinePointerUp}
+                      className="relative h-7 flex items-center select-none touch-none cursor-pointer"
                     >
-                      Clear
-                    </button>
-                  )}
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] font-bold text-slate-300">Size</span>
-                  {BRUSH_WIDTHS.map((w) => (
+                      <div className="w-full h-[3px] bg-[#242c42] rounded-full relative">
+                        <div
+                          className="absolute top-0 bottom-0 bg-[#eab308]"
+                          style={{
+                            left: `${startPct}%`,
+                            right: `${Math.max(0, 100 - endPct)}%`,
+                          }}
+                        />
+                      </div>
+
+                      <div
+                        className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 flex flex-col items-center pointer-events-none"
+                        style={{ left: `${playheadPct}%` }}
+                      >
+                        <span className="w-2 h-2 rounded-full bg-[#facc15] -mt-3 block" />
+                        <span className="w-[2px] h-4 bg-[#facc15] block" />
+                      </div>
+
+                      <div
+                        role="slider"
+                        tabIndex={0}
+                        aria-label="Trim start time"
+                        aria-valuemin={0}
+                        aria-valuemax={Math.max(0, timelineMaxSec - 1)}
+                        aria-valuenow={trimStartSec}
+                        onPointerDown={(e) => handleTimelinePointerDown(e, 'start')}
+                        onPointerMove={handleTimelinePointerMove}
+                        onPointerUp={handleTimelinePointerUp}
+                        onPointerCancel={handleTimelinePointerUp}
+                        className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-7 h-7 flex items-center justify-center cursor-ew-resize z-10 touch-none"
+                        style={{ left: `${Math.max(2, startPct)}%` }}
+                      >
+                        <span className="w-4 h-3 rounded-[4px] bg-[#b4831f] border border-[#eab308] flex items-center justify-center shadow">
+                          <span className="w-1.5 h-[2px] bg-[#fde047] block" />
+                        </span>
+                      </div>
+
+                      <div
+                        role="slider"
+                        tabIndex={0}
+                        aria-label="Trim end time"
+                        aria-valuemin={Math.min(timelineMaxSec, trimStartSec + 1)}
+                        aria-valuemax={timelineMaxSec}
+                        aria-valuenow={trimEndSec}
+                        onPointerDown={(e) => handleTimelinePointerDown(e, 'end')}
+                        onPointerMove={handleTimelinePointerMove}
+                        onPointerUp={handleTimelinePointerUp}
+                        onPointerCancel={handleTimelinePointerUp}
+                        className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-7 h-7 flex items-center justify-center cursor-ew-resize z-10 touch-none"
+                        style={{ left: `${Math.min(98, endPct)}%` }}
+                      >
+                        <span className="w-4 h-3 rounded-[4px] bg-[#b4831f] border border-[#eab308] flex items-center justify-center shadow">
+                          <span className="w-1.5 h-[2px] bg-[#fde047] block" />
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* EFFECTS TABS + CARDS (Shown cleanly when no sub-drawer is open, or Filters selected) */}
+                {(activeDrawer === 'none' || activeDrawer === 'filters') && (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 overflow-x-auto [&::-webkit-scrollbar]:hidden">
+                        {EFFECT_TABS.map((tab) => {
+                          const isActive = activeTab === tab;
+                          return (
+                            <button
+                              key={tab}
+                              type="button"
+                              onClick={() => setActiveTab(tab)}
+                              className={`min-h-[32px] px-3 rounded-full text-[11px] font-semibold transition cursor-pointer whitespace-nowrap ${
+                                isActive
+                                  ? 'bg-[#3b8744] text-white shadow-sm'
+                                  : 'bg-[#141c30] text-slate-300 hover:text-white'
+                              }`}
+                            >
+                              {tab}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      {mediaType === 'video' && (
+                        <span className="text-[10px] text-slate-400 whitespace-nowrap shrink-0">
+                          Preview &amp; Story
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2">
+                      {tabPresets.map((card) => {
+                        const isSelected =
+                          mediaType === 'photo'
+                            ? effectiveFilterCss === card.css
+                            : selectedEffectId === card.id;
+                        return (
+                          <button
+                            key={card.id}
+                            type="button"
+                            onClick={() => toggleEffectPreset(card)}
+                            className={`rounded-xl p-1.5 flex items-center gap-2 border transition cursor-pointer ${
+                              isSelected
+                                ? 'bg-[#172848] border-[#3b8744] shadow-[0_0_12px_rgba(59,135,68,0.3)]'
+                                : 'bg-[#0f1628] hover:bg-[#15203b] border-white/10'
+                            }`}
+                          >
+                            <div className="w-9 h-9 rounded-lg overflow-hidden shrink-0">
+                              <EffectThumbnailArtwork kind={card.thumbKind} />
+                            </div>
+                            <span className="text-[11px] font-semibold text-slate-100 truncate">
+                              {card.label}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* DIRECT MODE-SPECIFIC EDITING TOOL STRIP */}
+                {mediaType === 'photo' ? (
+                  <div className="flex items-center gap-1.5 overflow-x-auto [&::-webkit-scrollbar]:hidden pb-0.5">
                     <button
-                      key={w}
                       type="button"
-                      onClick={() => setBrushWidth(w)}
-                      className={`px-2 py-0.5 rounded text-[10px] font-bold cursor-pointer ${
-                        brushWidth === w ? 'bg-[#2563eb] text-white' : 'bg-white/10 text-slate-300'
+                      onClick={() => setActiveDrawer((d) => (d === 'crop' ? 'none' : 'crop'))}
+                      className={`min-h-[48px] min-w-[62px] px-2.5 rounded-xl border flex flex-col items-center justify-center gap-1 shrink-0 cursor-pointer transition ${
+                        activeDrawer === 'crop'
+                          ? 'bg-[#18294a] border-blue-400 text-white'
+                          : 'bg-[#101729] hover:bg-[#17223d] border-white/10 text-slate-200'
                       }`}
                     >
-                      {w}px
+                      <Crop className="w-4 h-4 text-emerald-400" />
+                      <span className="text-[10px] font-semibold whitespace-nowrap">Crop</span>
                     </button>
-                  ))}
-                </div>
-              </div>
-            )}
 
-            {activeDrawer === 'bg' && mediaType === 'photo' && (
-              <div className="flex items-center gap-1.5 overflow-x-auto [&::-webkit-scrollbar]:hidden">
-                {BG_SWATCHES.map((bg) => (
-                  <button
-                    key={bg.color}
-                    type="button"
-                    onClick={() => commitPhotoState({ ...currentPhotoState, bgColor: bg.color })}
-                    className={`px-2.5 py-1 rounded-lg border text-[10px] font-bold flex items-center gap-1.5 shrink-0 cursor-pointer ${
-                      currentPhotoState.bgColor === bg.color
-                        ? 'border-blue-500 bg-[#23262d] text-white'
-                        : 'border-white/10 bg-[#1b1c20] text-slate-300'
-                    }`}
-                  >
-                    <span
-                      className="w-3 h-3 rounded-full border border-white/30"
-                      style={{ backgroundColor: bg.color }}
-                    />
-                    {bg.label}
-                  </button>
-                ))}
-              </div>
-            )}
+                    <button
+                      type="button"
+                      onClick={() => setActiveDrawer((d) => (d === 'adjust' ? 'none' : 'adjust'))}
+                      className={`min-h-[48px] min-w-[62px] px-2.5 rounded-xl border flex flex-col items-center justify-center gap-1 shrink-0 cursor-pointer transition ${
+                        activeDrawer === 'adjust'
+                          ? 'bg-[#18294a] border-blue-400 text-white'
+                          : 'bg-[#101729] hover:bg-[#17223d] border-white/10 text-slate-200'
+                      }`}
+                    >
+                      <Sliders className="w-4 h-4 text-sky-400" />
+                      <span className="text-[10px] font-semibold whitespace-nowrap">Adjust</span>
+                    </button>
 
-            {/* Extra compact quick tools when activeDrawer === 'trim' */}
-            {activeDrawer === 'trim' && mediaType === 'photo' && (
-              <div className="flex items-center gap-1.5 justify-center">
-                <button
-                  type="button"
-                  onClick={() => setActiveDrawer('crop')}
-                  className="px-3 py-1.5 rounded-lg bg-[#1b1c20] border border-white/10 text-[11px] font-semibold text-white flex items-center gap-1.5 cursor-pointer"
-                >
-                  <Crop className="w-3.5 h-3.5 text-emerald-400" /> Crop / Rotate
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveDrawer('draw')}
-                  className="px-3 py-1.5 rounded-lg bg-[#1b1c20] border border-white/10 text-[11px] font-semibold text-white flex items-center gap-1.5 cursor-pointer"
-                >
-                  <Pencil className="w-3.5 h-3.5 text-pink-400" /> Draw
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveDrawer('bg')}
-                  className="px-3 py-1.5 rounded-lg bg-[#1b1c20] border border-white/10 text-[11px] font-semibold text-white flex items-center gap-1.5 cursor-pointer"
-                >
-                  <Palette className="w-3.5 h-3.5 text-purple-400" /> BG
-                </button>
-              </div>
-            )}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        commitPhotoState({ ...currentPhotoState, flipX: !currentPhotoState.flipX })
+                      }
+                      className={`min-h-[48px] min-w-[62px] px-2.5 rounded-xl border flex flex-col items-center justify-center gap-1 shrink-0 cursor-pointer transition ${
+                        effectivePhotoState.flipX
+                          ? 'bg-[#18294a] border-blue-400 text-white'
+                          : 'bg-[#101729] hover:bg-[#17223d] border-white/10 text-slate-200'
+                      }`}
+                    >
+                      <FlipHorizontal2 className="w-4 h-4 text-blue-400" />
+                      <span className="text-[10px] font-semibold whitespace-nowrap">Flip H</span>
+                    </button>
 
-            {activeDrawer === 'trim' && mediaType === 'video' && (
-              <div className="bg-[#1b1c20] border border-white/10 rounded-xl p-2.5 flex items-center justify-between gap-2 text-[11px]">
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => handleTrimStartChange(trimStartSec - 0.5)}
-                    className="px-2 py-1 rounded bg-white/10 text-white font-semibold cursor-pointer"
-                  >
-                    Start -
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleTrimStartChange(trimStartSec + 0.5)}
-                    className="px-2 py-1 rounded bg-white/10 text-white font-semibold cursor-pointer"
-                  >
-                    Start +
-                  </button>
-                </div>
-                <span className="text-amber-400 font-bold tabular-nums">
-                  Clip {formatSec(trimmedDurationSec)}
-                </span>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => handleTrimEndChange(trimEndSec - 0.5)}
-                    className="px-2 py-1 rounded bg-white/10 text-white font-semibold cursor-pointer"
-                  >
-                    End -
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleTrimEndChange(trimEndSec + 0.5)}
-                    className="px-2 py-1 rounded bg-white/10 text-white font-semibold cursor-pointer"
-                  >
-                    End +
-                  </button>
-                </div>
-              </div>
-            )}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        commitPhotoState({ ...currentPhotoState, flipY: !currentPhotoState.flipY })
+                      }
+                      className={`min-h-[48px] min-w-[62px] px-2.5 rounded-xl border flex flex-col items-center justify-center gap-1 shrink-0 cursor-pointer transition ${
+                        effectivePhotoState.flipY
+                          ? 'bg-[#18294a] border-blue-400 text-white'
+                          : 'bg-[#101729] hover:bg-[#17223d] border-white/10 text-slate-200'
+                      }`}
+                    >
+                      <FlipVertical2 className="w-4 h-4 text-blue-400" />
+                      <span className="text-[10px] font-semibold whitespace-nowrap">Flip V</span>
+                    </button>
 
-            {/* 2. TABS ROW: Featured (Green active pill), Styles, Moods, Lighting */}
-            <div className="flex items-center justify-center gap-2 pt-0.5">
-              {EFFECT_TABS.map((tab) => {
-                const isActive = activeTab === tab;
-                return (
-                  <button
-                    key={tab}
-                    type="button"
-                    onClick={() => setActiveTab(tab)}
-                    className={`px-3.5 py-1.5 rounded-full text-[11px] font-medium transition cursor-pointer whitespace-nowrap ${
-                      isActive
-                        ? 'bg-[#3b8744] text-white shadow-sm'
-                        : 'bg-[#202227] text-[#d1d5db] hover:text-white'
-                    }`}
-                  >
-                    {tab}
-                  </button>
-                );
-              })}
-            </div>
+                    <button
+                      type="button"
+                      onClick={() => setActiveDrawer((d) => (d === 'filters' ? 'none' : 'filters'))}
+                      className={`min-h-[48px] min-w-[62px] px-2.5 rounded-xl border flex flex-col items-center justify-center gap-1 shrink-0 cursor-pointer transition ${
+                        activeDrawer === 'filters' || effectiveFilterCss !== 'none'
+                          ? 'bg-[#18294a] border-emerald-400/70 text-white'
+                          : 'bg-[#101729] hover:bg-[#17223d] border-white/10 text-slate-200'
+                      }`}
+                    >
+                      <Sparkles className="w-4 h-4 text-amber-300" />
+                      <span className="text-[10px] font-semibold whitespace-nowrap">Filters</span>
+                    </button>
 
-            {/* 3. THREE EFFECT CARDS ROW: Anime, Low-poly, 3D */}
-            <div className="grid grid-cols-3 gap-2">
-              {tabPresets.map((card) => {
-                const isSelected = selectedEffectId === card.id;
-                return (
-                  <button
-                    key={card.id}
-                    type="button"
-                    onClick={() => toggleEffectPreset(card)}
-                    className={`rounded-2xl p-2 flex flex-col items-center gap-1.5 border transition cursor-pointer ${
-                      isSelected
-                        ? 'bg-[#232730] border-[#3b8744]'
-                        : 'bg-[#1a1b1f] hover:bg-[#212328] border-white/[0.05]'
-                    }`}
-                  >
-                    <div className="w-[70px] h-[70px] sm:w-[74px] sm:h-[74px] rounded-xl overflow-hidden shrink-0">
-                      <EffectThumbnailArtwork kind={card.thumbKind} />
-                    </div>
-                    <span className="text-[11px] font-medium text-slate-200 truncate max-w-full">
-                      {card.label}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
+                    <button
+                      type="button"
+                      onClick={() => setActiveDrawer((d) => (d === 'draw' ? 'none' : 'draw'))}
+                      className={`min-h-[48px] min-w-[62px] px-2.5 rounded-xl border flex flex-col items-center justify-center gap-1 shrink-0 cursor-pointer transition ${
+                        activeDrawer === 'draw'
+                          ? 'bg-[#18294a] border-blue-400 text-white'
+                          : 'bg-[#101729] hover:bg-[#17223d] border-white/10 text-slate-200'
+                      }`}
+                    >
+                      <Pencil className="w-4 h-4 text-pink-400" />
+                      <span className="text-[10px] font-semibold whitespace-nowrap">Draw</span>
+                    </button>
 
-            {/* 4. FOUR EDITING TOOL CARDS: Add Text, Emoji, Background Music, Trim */}
-            <div className="grid grid-cols-4 gap-2">
-              <button
-                type="button"
-                onClick={openNewTextComposer}
-                className="min-h-[60px] rounded-xl bg-[#1b1c20] hover:bg-[#23252a] border border-white/[0.05] flex flex-col items-center justify-center gap-1 px-1 py-2 text-center cursor-pointer transition"
-              >
-                <svg viewBox="0 0 24 24" className="w-[19px] h-[19px] text-white shrink-0" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="M5 6h11" />
-                  <path d="M10.5 6v12" />
-                  <path d="M8 18h4" />
-                  <path d="M14.5 17.5l4-4 1.8 1.8-4 4-2.3.5.5-2.3z" />
-                </svg>
-                <span className="text-[10px] font-medium text-slate-200 leading-[1.15]">
-                  Add Text
-                </span>
-              </button>
+                    <button
+                      type="button"
+                      onClick={() => setActiveDrawer((d) => (d === 'bg' ? 'none' : 'bg'))}
+                      className={`min-h-[48px] min-w-[62px] px-2.5 rounded-xl border flex flex-col items-center justify-center gap-1 shrink-0 cursor-pointer transition ${
+                        activeDrawer === 'bg'
+                          ? 'bg-[#18294a] border-blue-400 text-white'
+                          : 'bg-[#101729] hover:bg-[#17223d] border-white/10 text-slate-200'
+                      }`}
+                    >
+                      <Palette className="w-4 h-4 text-purple-400" />
+                      <span className="text-[10px] font-semibold whitespace-nowrap">BG</span>
+                    </button>
 
-              <button
-                type="button"
-                onClick={() => setActiveDrawer((d) => (d === 'emoji' ? 'none' : 'emoji'))}
-                className={`min-h-[60px] rounded-xl border flex flex-col items-center justify-center gap-1 px-1 py-2 text-center cursor-pointer transition ${
-                  activeDrawer === 'emoji'
-                    ? 'bg-[#242834] border-blue-500/60 text-white'
-                    : 'bg-[#1b1c20] hover:bg-[#23252a] border-white/[0.05] text-slate-200'
-                }`}
-              >
-                <Smile className="w-[19px] h-[19px] text-white" strokeWidth={1.8} />
-                <span className="text-[10px] font-medium leading-[1.15]">Emoji</span>
-              </button>
+                    <button
+                      type="button"
+                      onClick={openNewTextComposer}
+                      className="min-h-[48px] min-w-[66px] px-2.5 rounded-xl bg-[#101729] hover:bg-[#17223d] border border-white/10 flex flex-col items-center justify-center gap-1 shrink-0 cursor-pointer transition text-slate-200"
+                    >
+                      <svg viewBox="0 0 24 24" className="w-4 h-4 text-white shrink-0" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M5 6h11" />
+                        <path d="M10.5 6v12" />
+                        <path d="M8 18h4" />
+                        <path d="M14.5 17.5l4-4 1.8 1.8-4 4-2.3.5.5-2.3z" />
+                      </svg>
+                      <span className="text-[10px] font-semibold whitespace-nowrap">Add Text</span>
+                    </button>
 
-              <button
-                type="button"
-                onClick={() => setActiveDrawer((d) => (d === 'music' ? 'none' : 'music'))}
-                className={`min-h-[60px] rounded-xl border flex flex-col items-center justify-center gap-1 px-1 py-2 text-center cursor-pointer transition ${
-                  activeDrawer === 'music' || selectedMusicId
-                    ? 'bg-[#242834] border-emerald-500/60 text-white'
-                    : 'bg-[#1b1c20] hover:bg-[#23252a] border-white/[0.05] text-slate-200'
-                }`}
-              >
-                <Music className="w-[19px] h-[19px] text-white" strokeWidth={1.8} />
-                <span className="text-[10px] font-medium leading-[1.15]">
-                  Background Music
-                </span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveDrawer((d) => (d === 'trim' ? 'none' : 'trim'))}
-                className={`min-h-[60px] rounded-xl border flex flex-col items-center justify-center gap-1 px-1 py-2 text-center cursor-pointer transition ${
-                  activeDrawer === 'trim' || activeDrawer === 'crop' || activeDrawer === 'draw' || activeDrawer === 'bg'
-                    ? 'bg-[#242834] border-amber-400/60 text-white'
-                    : 'bg-[#1b1c20] hover:bg-[#23252a] border-white/[0.05] text-slate-200'
-                }`}
-              >
-                <Scissors className="w-[19px] h-[19px] text-white" strokeWidth={1.8} />
-                <span className="text-[10px] font-medium leading-[1.15]">Trim</span>
-              </button>
-            </div>
-
-            {/* 4B. KING AI STUDIO LAUNCHER BAR (Relocated from top header to bottom tools section) */}
-            <button
-              type="button"
-              disabled={isPublishing || !sourceFile}
-              onClick={() => {
-                setSelectedOverlayId(null);
-                setShowAiWorkspace(true);
-              }}
-              className="w-full min-h-[44px] px-3.5 py-2 rounded-xl bg-gradient-to-r from-[#0d1526] via-[#13213e] to-[#0d1526] hover:brightness-110 border border-blue-500/45 shadow-[0_0_16px_rgba(37,99,235,0.28)] flex items-center justify-between gap-2.5 cursor-pointer disabled:opacity-45 transition active:scale-[0.99]"
-            >
-              <div className="flex items-center gap-2.5 min-w-0">
-                <span className="w-7 h-7 rounded-lg bg-[#091224] border border-blue-400/45 shadow-[0_0_10px_rgba(59,130,246,0.4)] flex items-center justify-center shrink-0">
-                  <KingAiPetalIcon className="w-4 h-4" />
-                </span>
-                <div className="text-left min-w-0">
-                  <div className="text-xs font-bold tracking-wide text-white flex items-center gap-1.5">
-                    <span>KING AI</span>
-                    {hasAiApplied && (
-                      <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/35">
-                        Edited
+                    <button
+                      type="button"
+                      onClick={() => setActiveDrawer((d) => (d === 'emoji' ? 'none' : 'emoji'))}
+                      className={`min-h-[48px] min-w-[62px] px-2.5 rounded-xl border flex flex-col items-center justify-center gap-1 shrink-0 cursor-pointer transition ${
+                        activeDrawer === 'emoji'
+                          ? 'bg-[#18294a] border-blue-400 text-white'
+                          : 'bg-[#101729] hover:bg-[#17223d] border-white/10 text-slate-200'
+                      }`}
+                    >
+                      <Smile className="w-4 h-4 text-yellow-300" />
+                      <span className="text-[10px] font-semibold whitespace-nowrap">Emoji</span>
+                    </button>
+                  </div>
+                ) : (
+                  /* VIDEO TOOL STRIP: Preserves Add Text, Emoji, Background Music, Trim order + Cover Frame */
+                  <div className="grid grid-cols-5 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={openNewTextComposer}
+                      className="min-h-[52px] rounded-xl bg-[#101729] hover:bg-[#17223d] border border-white/10 flex flex-col items-center justify-center gap-1 px-1 py-1.5 text-center cursor-pointer transition"
+                    >
+                      <svg viewBox="0 0 24 24" className="w-[18px] h-[18px] text-white shrink-0" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M5 6h11" />
+                        <path d="M10.5 6v12" />
+                        <path d="M8 18h4" />
+                        <path d="M14.5 17.5l4-4 1.8 1.8-4 4-2.3.5.5-2.3z" />
+                      </svg>
+                      <span className="text-[10px] font-semibold text-slate-200 leading-tight whitespace-nowrap">
+                        Add Text
                       </span>
-                    )}
-                  </div>
-                  <div className="text-[10px] text-blue-300/90 truncate">
-                    {mediaType === 'photo'
-                      ? 'Prompt Edit, Enhance Quality, Remove BG & Lighting'
-                      : 'Check Video AI Status & Quick Video Tools'}
-                  </div>
-                </div>
-              </div>
-              <span className="px-2.5 py-1 rounded-lg bg-[#2563eb]/25 border border-blue-400/45 text-[10px] font-bold text-blue-200 shrink-0">
-                AI EDIT
-              </span>
-            </button>
+                    </button>
 
-            {/* 5. VIDEO TIMELINE WITH START / END CONTROLS & DURATION LABELS */}
-            <div className="space-y-1 px-0.5 pt-0.5">
-              <div className="flex items-center justify-between text-[10px] text-[#9ca3af] tabular-nums">
-                <span>{formatSec(trimStartSec)}</span>
-                <span>{formatSec(trimEndSec)}</span>
-              </div>
+                    <button
+                      type="button"
+                      onClick={() => setActiveDrawer((d) => (d === 'emoji' ? 'none' : 'emoji'))}
+                      className={`min-h-[52px] rounded-xl border flex flex-col items-center justify-center gap-1 px-1 py-1.5 text-center cursor-pointer transition ${
+                        activeDrawer === 'emoji'
+                          ? 'bg-[#18294a] border-blue-400 text-white'
+                          : 'bg-[#101729] hover:bg-[#17223d] border-white/10 text-slate-200'
+                      }`}
+                    >
+                      <Smile className="w-[18px] h-[18px] text-white" strokeWidth={1.8} />
+                      <span className="text-[10px] font-semibold leading-tight whitespace-nowrap">Emoji</span>
+                    </button>
 
-              <div
-                ref={timelineTrackRef}
-                onPointerDown={(e) => handleTimelinePointerDown(e, 'seek')}
-                onPointerMove={handleTimelinePointerMove}
-                onPointerUp={handleTimelinePointerUp}
-                onPointerCancel={handleTimelinePointerUp}
-                className="relative h-6 flex items-center select-none touch-none cursor-pointer"
-              >
-                {/* Base horizontal line */}
-                <div className="w-full h-[2px] bg-[#2c2e34] rounded-full relative">
-                  {/* Active trimmed segment */}
-                  <div
-                    className="absolute top-0 bottom-0 bg-[#c99b2c]"
-                    style={{
-                      left: `${startPct}%`,
-                      right: `${Math.max(0, 100 - endPct)}%`,
+                    <button
+                      type="button"
+                      onClick={() => setActiveDrawer((d) => (d === 'music' ? 'none' : 'music'))}
+                      className={`min-h-[52px] rounded-xl border flex flex-col items-center justify-center gap-1 px-1 py-1.5 text-center cursor-pointer transition ${
+                        activeDrawer === 'music' || selectedMusicId
+                          ? 'bg-[#18294a] border-emerald-400/70 text-white'
+                          : 'bg-[#101729] hover:bg-[#17223d] border-white/10 text-slate-200'
+                      }`}
+                    >
+                      <Music className="w-[18px] h-[18px] text-white" strokeWidth={1.8} />
+                      <span className="text-[10px] font-semibold leading-tight truncate max-w-full">
+                        Music
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setActiveDrawer((d) => (d === 'trim' ? 'none' : 'trim'))}
+                      className={`min-h-[52px] rounded-xl border flex flex-col items-center justify-center gap-1 px-1 py-1.5 text-center cursor-pointer transition ${
+                        activeDrawer === 'trim'
+                          ? 'bg-[#18294a] border-amber-400/70 text-white'
+                          : 'bg-[#101729] hover:bg-[#17223d] border-white/10 text-slate-200'
+                      }`}
+                    >
+                      <Scissors className="w-[18px] h-[18px] text-white" strokeWidth={1.8} />
+                      <span className="text-[10px] font-semibold leading-tight whitespace-nowrap">Trim</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setActiveDrawer((d) => (d === 'cover' ? 'none' : 'cover'))}
+                      className={`min-h-[52px] rounded-xl border flex flex-col items-center justify-center gap-1 px-1 py-1.5 text-center cursor-pointer transition ${
+                        activeDrawer === 'cover' || customVideoThumbnail
+                          ? 'bg-[#18294a] border-blue-400 text-white'
+                          : 'bg-[#101729] hover:bg-[#17223d] border-white/10 text-slate-200'
+                      }`}
+                    >
+                      <ImageIcon className="w-[18px] h-[18px] text-sky-400" strokeWidth={1.8} />
+                      <span className="text-[10px] font-semibold leading-tight whitespace-nowrap">Cover</span>
+                    </button>
+                  </div>
+                )}
+
+                {/* BOTTOM ACTION ROW: Retake + Continue */}
+                <div className="flex items-center gap-2.5 pt-0.5">
+                  <button
+                    type="button"
+                    disabled={isPublishing}
+                    onClick={() => {
+                      stopBackgroundMusic();
+                      onRetake();
                     }}
-                  />
-                </div>
+                    className="min-h-[44px] px-4 rounded-xl bg-[#101729] hover:bg-[#17223d] border border-white/15 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-40 transition"
+                  >
+                    <Camera className="w-4 h-4 text-sky-300" />
+                    <span>Retake</span>
+                  </button>
 
-                {/* Playhead Pin Indicator */}
-                <div
-                  className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 flex flex-col items-center pointer-events-none"
-                  style={{ left: `${playheadPct}%` }}
-                >
-                  <span className="w-1.5 h-1.5 rounded-full bg-[#facc15] -mt-3 block" />
-                  <span className="w-[1.5px] h-3.5 bg-[#facc15] block" />
-                </div>
-
-                {/* Left Amber Trim Handle (draggable across full bar) */}
-                <div
-                  role="slider"
-                  tabIndex={0}
-                  aria-label="Trim start time"
-                  aria-valuemin={0}
-                  aria-valuemax={Math.max(0, timelineMaxSec - 1)}
-                  aria-valuenow={trimStartSec}
-                  onPointerDown={(e) => handleTimelinePointerDown(e, 'start')}
-                  onPointerMove={handleTimelinePointerMove}
-                  onPointerUp={handleTimelinePointerUp}
-                  onPointerCancel={handleTimelinePointerUp}
-                  className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-5 h-5 flex items-center justify-center cursor-ew-resize z-10 touch-none"
-                  style={{ left: `${Math.max(2, startPct)}%` }}
-                >
-                  <span className="w-3.5 h-2 rounded-[3px] bg-[#b4831f] border border-[#eab308] flex items-center justify-center">
-                    <span className="w-1.5 h-[1.5px] bg-[#fde047] block" />
-                  </span>
-                </div>
-
-                {/* Right Amber Trim Handle (draggable across full bar) */}
-                <div
-                  role="slider"
-                  tabIndex={0}
-                  aria-label="Trim end time"
-                  aria-valuemin={Math.min(timelineMaxSec, trimStartSec + 1)}
-                  aria-valuemax={timelineMaxSec}
-                  aria-valuenow={trimEndSec}
-                  onPointerDown={(e) => handleTimelinePointerDown(e, 'end')}
-                  onPointerMove={handleTimelinePointerMove}
-                  onPointerUp={handleTimelinePointerUp}
-                  onPointerCancel={handleTimelinePointerUp}
-                  className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-5 h-5 flex items-center justify-center cursor-ew-resize z-10 touch-none"
-                  style={{ left: `${Math.min(98, endPct)}%` }}
-                >
-                  <span className="w-3.5 h-2 rounded-[3px] bg-[#b4831f] border border-[#eab308] flex items-center justify-center">
-                    <span className="w-1.5 h-[1.5px] bg-[#fde047] block" />
-                  </span>
+                  <button
+                    type="button"
+                    disabled={isPublishing || !sourceFile}
+                    onClick={handleProceedToDetails}
+                    className="flex-1 min-h-[44px] px-5 rounded-xl bg-[#2563eb] hover:bg-[#1d4ed8] text-white text-xs font-extrabold flex items-center justify-center gap-1.5 shadow-[0_0_20px_rgba(37,99,235,0.45)] active:scale-[0.98] cursor-pointer disabled:opacity-50 transition"
+                  >
+                    <span>Continue</span>
+                    <ArrowRight className="w-4 h-4" />
+                  </button>
                 </div>
               </div>
             </div>
-
-            {/* Real Upload Progress (only shown during publishing) */}
-            {isPublishing && (
-              <div className="space-y-1.5 bg-[#192233] border border-[#2563eb]/40 rounded-xl p-2.5">
-                <div className="flex items-center justify-between text-[11px] font-bold text-blue-300">
-                  <span className="flex items-center gap-1.5 truncate">
-                    <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
-                    <span className="truncate">{progressLabel || 'Publishing...'}</span>
+          )}
+        </div>
+      ) : (
+        /* ================= CLEAN FULL-SCREEN POST DETAILS SCREEN ================= */
+        <div className="flex-1 min-h-0 w-full flex flex-col overflow-hidden bg-[#050811]">
+          <div className="flex-1 overflow-y-auto px-4 py-4">
+            <div className="max-w-2xl mx-auto w-full space-y-4">
+              {/* Final Media Preview + Caption */}
+              <div className="flex flex-col sm:flex-row gap-3.5 items-stretch bg-[#0b1222] border border-blue-500/20 rounded-2xl p-3.5">
+                <div className="relative w-full sm:w-36 aspect-[4/5] sm:aspect-[3/4] rounded-xl overflow-hidden bg-black border border-white/10 shrink-0 flex items-center justify-center">
+                  {mediaType === 'photo' ? (
+                    <img
+                      src={editedPreviewDataUrl || objectUrl}
+                      alt="Final edited post preview"
+                      className="w-full h-full object-contain"
+                    />
+                  ) : customVideoThumbnail ? (
+                    <img
+                      src={customVideoThumbnail}
+                      alt="Selected video cover preview"
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <video
+                      src={objectUrl}
+                      playsInline
+                      muted
+                      className="w-full h-full object-cover"
+                    />
+                  )}
+                  <span className="absolute bottom-2 right-2 px-2 py-0.5 rounded bg-black/80 text-[10px] font-bold text-white uppercase tabular-nums">
+                    {mediaType === 'video' ? formatSec(trimmedDurationSec) : 'Photo'}
                   </span>
-                  <span className="tabular-nums">{progressPct}%</span>
                 </div>
-                <div className="w-full h-1.5 bg-slate-900 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-[#2563eb] transition-all duration-200"
-                    style={{ width: `${Math.max(5, progressPct)}%` }}
+
+                <div className="flex-1 min-w-0 flex flex-col justify-between gap-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-bold text-white">
+                      {mediaType === 'photo' ? 'Ready to Post Photo' : 'Ready to Post Video'}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={isPublishing}
+                      onClick={() => setEditorStep('edit')}
+                      className="text-xs font-bold text-sky-400 hover:text-sky-300 cursor-pointer"
+                    >
+                      Edit Media
+                    </button>
+                  </div>
+
+                  <textarea
+                    rows={4}
+                    maxLength={480}
+                    value={caption}
+                    onChange={(e) => setCaption(e.target.value)}
+                    placeholder="Write a caption, add #hashtags or @mentions..."
+                    className="w-full flex-1 bg-[#10182b] border border-white/10 focus:border-blue-500 rounded-xl p-3 text-sm text-white placeholder:text-slate-500 resize-none focus:outline-none"
                   />
+
+                  <div className="flex items-center justify-between gap-2 text-[11px] text-slate-400">
+                    <div className="flex items-center gap-1.5 overflow-x-auto [&::-webkit-scrollbar]:hidden">
+                      {['#KING', '#Trending', '#Gaming', '#Viral', '#Reels'].map((tag) => (
+                        <button
+                          key={tag}
+                          type="button"
+                          onClick={() =>
+                            setCaption((prev) => {
+                              if (prev.includes(tag)) return prev;
+                              const next = prev.trim() ? `${prev.trim()} ${tag}` : tag;
+                              return next.slice(0, 480);
+                            })
+                          }
+                          className="min-h-[30px] px-2.5 rounded-lg bg-white/10 hover:bg-white/20 text-slate-200 font-semibold cursor-pointer shrink-0"
+                        >
+                          {tag}
+                        </button>
+                      ))}
+                    </div>
+                    <span className="tabular-nums shrink-0">{caption.length}/480</span>
+                  </div>
                 </div>
               </div>
-            )}
 
-            {/* 6. BOTTOM ACTION BUTTONS: Retake + Blue Publish to KING */}
-            <div className="flex items-center justify-center gap-2.5 pt-0.5">
+              {/* Where to Share: KING Feed vs 24h Story */}
+              <div className="bg-[#0b1222] border border-blue-500/20 rounded-2xl p-3.5 space-y-2.5">
+                <div className="text-xs font-bold text-slate-200">Where to Share</div>
+                <div className="grid grid-cols-2 gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => setShareToFeed((v) => !v)}
+                    className={`min-h-[56px] px-3.5 py-2.5 rounded-xl border text-left transition cursor-pointer ${
+                      shareToFeed
+                        ? 'bg-blue-600/20 border-blue-500 text-white shadow-[0_0_14px_rgba(37,99,235,0.2)]'
+                        : 'bg-[#10182b] border-white/10 text-slate-400'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold">KING Feed</span>
+                      {shareToFeed && <Check className="w-4 h-4 text-blue-400" />}
+                    </div>
+                    <div className="text-[11px] text-slate-400 mt-0.5">
+                      Home feed{mediaType === 'video' ? ' & Videos' : ''}
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setShareToStory((v) => !v)}
+                    className={`min-h-[56px] px-3.5 py-2.5 rounded-xl border text-left transition cursor-pointer ${
+                      shareToStory
+                        ? 'bg-amber-500/20 border-amber-400 text-white'
+                        : 'bg-[#10182b] border-white/10 text-slate-400'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold">24h Story</span>
+                      {shareToStory && <Check className="w-4 h-4 text-amber-400" />}
+                    </div>
+                    <div className="text-[11px] text-slate-400 mt-0.5">
+                      Visible in Stories bar
+                    </div>
+                  </button>
+                </div>
+              </div>
+
+              {/* Honest Visibility Scope (No misleading Feed privacy controls) */}
+              <div className="bg-[#0b1222] border border-blue-500/20 rounded-2xl p-3.5 space-y-2.5">
+                {shareToStory ? (
+                  <>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-bold text-slate-200">24h Story Visibility</span>
+                      <span className="text-[11px] text-slate-400">
+                        {shareToFeed ? 'KING Feed posts are always Public' : 'Applies to your 24h Story'}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { id: 'public' as const, label: 'Public', Icon: Globe },
+                        { id: 'friends' as const, label: 'Friends', Icon: Users },
+                        { id: 'private' as const, label: 'Only Me', Icon: Lock },
+                      ].map(({ id, label, Icon }) => {
+                        const active = postPrivacy === id;
+                        return (
+                          <button
+                            key={id}
+                            type="button"
+                            onClick={() => setPostPrivacy(id)}
+                            className={`min-h-[44px] px-2.5 py-2 rounded-xl border text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition ${
+                              active
+                                ? 'bg-[#2563eb]/25 border-blue-400 text-white'
+                                : 'bg-[#10182b] border-white/10 text-slate-300 hover:text-white'
+                            }`}
+                          >
+                            <Icon className="w-3.5 h-3.5" />
+                            <span>{label}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </>
+                ) : (
+                  <div className="flex items-center gap-2 text-xs text-slate-300">
+                    <Globe className="w-4 h-4 text-blue-400 shrink-0" />
+                    <span>KING Feed posts are public to all KING users.</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Optional Location, Link & WhatsApp CTA */}
+              <div className="bg-[#0b1222] border border-blue-500/20 rounded-2xl overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setShowOptionalMeta((v) => !v)}
+                  className="w-full min-h-[48px] px-3.5 py-2.5 flex items-center justify-between text-xs font-bold text-slate-200 hover:bg-white/5 cursor-pointer transition"
+                >
+                  <span className="flex items-center gap-2">
+                    <MapPin className="w-4 h-4 text-rose-400" />
+                    <span>Location, Link &amp; WhatsApp (Optional)</span>
+                  </span>
+                  {showOptionalMeta ? (
+                    <ChevronUp className="w-4 h-4 text-slate-400" />
+                  ) : (
+                    <ChevronDown className="w-4 h-4 text-slate-400" />
+                  )}
+                </button>
+
+                {showOptionalMeta && (
+                  <div className="px-3.5 pb-3.5 pt-1 space-y-2.5 border-t border-white/10">
+                    <input
+                      type="text"
+                      maxLength={80}
+                      value={postLocation}
+                      onChange={(e) => setPostLocation(e.target.value)}
+                      placeholder="Add city or place..."
+                      className="w-full bg-[#10182b] border border-white/10 focus:border-blue-500 rounded-xl px-3 py-2.5 text-xs text-white placeholder:text-slate-500 focus:outline-none"
+                    />
+                    <div className="flex items-center gap-2">
+                      <Link2 className="w-4 h-4 text-slate-400 shrink-0" />
+                      <input
+                        type="url"
+                        value={linkInput}
+                        onChange={(e) => setLinkInput(e.target.value)}
+                        maxLength={140}
+                        placeholder="Add external link (https://...)"
+                        className="flex-1 bg-[#10182b] border border-white/10 focus:border-blue-500 rounded-xl px-3 py-2.5 text-xs text-white placeholder:text-slate-500 focus:outline-none"
+                      />
+                    </div>
+                    <div className="space-y-2 pt-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold text-slate-300">WhatsApp Button</span>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={whatsappEnabled}
+                          onClick={() => setWhatsappEnabled((v) => !v)}
+                          className={`px-3 py-1 rounded-full text-[11px] font-bold cursor-pointer transition ${
+                            whatsappEnabled ? 'bg-[#25D366] text-white' : 'bg-white/10 text-slate-300'
+                          }`}
+                        >
+                          {whatsappEnabled ? 'ON' : 'OFF'}
+                        </button>
+                      </div>
+                      {whatsappEnabled && (
+                        <input
+                          type="text"
+                          value={whatsappInput}
+                          onChange={(e) => setWhatsappInput(e.target.value)}
+                          placeholder="+923001234567 or https://wa.me/..."
+                          className="w-full bg-[#10182b] border border-white/10 focus:border-[#25D366] rounded-xl px-3 py-2.5 text-xs text-white placeholder:text-slate-500 focus:outline-none"
+                        />
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Real Upload Progress */}
+              {isPublishing && (
+                <div className="space-y-1.5 bg-[#0e1a33] border border-[#2563eb]/40 rounded-xl p-3">
+                  <div className="flex items-center justify-between text-xs font-bold text-blue-300">
+                    <span className="flex items-center gap-1.5 truncate">
+                      <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                      <span className="truncate">{progressLabel || 'Publishing...'}</span>
+                    </span>
+                    <span className="tabular-nums">{progressPct}%</span>
+                  </div>
+                  <div className="w-full h-2 bg-slate-900 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-[#2563eb] transition-all duration-200"
+                      style={{ width: `${Math.max(5, progressPct)}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* STICKY BOTTOM PUBLISH BAR */}
+          <div className="shrink-0 w-full border-t border-blue-500/20 bg-[#080d1a]/95 backdrop-blur-xl px-4 py-3 pb-[max(14px,env(safe-area-inset-bottom))]">
+            <div className="max-w-2xl mx-auto w-full flex items-center gap-2.5">
               <button
                 type="button"
                 disabled={isPublishing}
-                onClick={onRetake}
-                className="min-h-[38px] px-4 rounded-xl bg-[#18191d] hover:bg-[#23252b] border border-white/[0.14] text-white text-[12px] font-medium flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-40 transition"
+                onClick={() => setEditorStep('edit')}
+                className="min-h-[46px] px-4 rounded-xl bg-[#10182b] hover:bg-[#17233f] border border-white/15 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-40 transition"
               >
-                <Camera className="w-3.5 h-3.5 text-slate-200" />
-                <span>Retake</span>
+                <ArrowLeft className="w-4 h-4" />
+                <span>Back</span>
               </button>
 
               <button
                 type="button"
-                disabled={isPublishing || !sourceFile}
+                disabled={isPublishing || !sourceFile || (!shareToFeed && !shareToStory)}
                 onClick={handlePublishPost}
-                className="min-h-[38px] px-4 rounded-xl bg-[#2563eb] hover:bg-[#1d4ed8] text-white text-[12px] font-semibold flex items-center justify-center gap-1.5 shadow-lg shadow-blue-600/25 active:scale-[0.98] cursor-pointer disabled:opacity-50 transition"
+                className="flex-1 min-h-[46px] px-5 rounded-xl bg-[#2563eb] hover:bg-[#1d4ed8] text-white text-sm font-extrabold flex items-center justify-center gap-2 shadow-[0_0_24px_rgba(37,99,235,0.45)] active:scale-[0.98] cursor-pointer disabled:opacity-50 transition"
               >
                 {isPublishing ? (
                   <>
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <Loader2 className="w-4 h-4 animate-spin" />
                     <span>Publishing...</span>
                   </>
                 ) : (
                   <>
-                    <Share className="w-3.5 h-3.5" />
-                    <span>Publish to KING</span>
+                    <Share className="w-4 h-4" />
+                    <span>
+                      {shareToFeed && shareToStory
+                        ? 'Publish Post & Story'
+                        : shareToStory
+                        ? 'Share to Story'
+                        : 'Publish Post'}
+                    </span>
                   </>
                 )}
               </button>
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* TEXT OVERLAY COMPOSER MODAL */}
       {showTextComposer && (

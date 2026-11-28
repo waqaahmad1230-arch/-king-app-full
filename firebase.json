@@ -1,6 +1,15 @@
 {
   "firestore": {
-    "rules": "firestore.rules"
+    "database": "ai-studio-king-4e115b8f-6ca5-4501-8ff0-73c2c7c21a47",
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
+  "emulators": {
+    "firestore": {
+      "host": "127.0.0.1",
+      "port": 8088
+    },
+    "singleProjectMode": true
   },
   "hosting": {
     "public": "dist",

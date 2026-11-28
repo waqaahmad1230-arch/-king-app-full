@@ -14,6 +14,7 @@ import {
   X,
 } from 'lucide-react';
 import CreatorAvatar, { CreatorDisplayName } from './CreatorAvatar';
+import { formatCreatorHandle } from '../services/creatorProfileService';
 import {
   acceptFriendRequest,
   blockUser,
@@ -27,6 +28,7 @@ import {
   removeFriend,
   resolveSocialErrorMessage,
   saveStatusPrivacy,
+  searchUsersPaged,
   sendFriendRequest,
   subscribeMyBlockedUsers,
   subscribeMyFollowers,
@@ -71,10 +73,12 @@ export function ProfileRelationshipBar({
     isBlockedByMe: false,
   });
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [confirmMode, setConfirmMode] = useState<'none' | 'unfriend' | 'block'>('none');
+  const [confirmMode, setConfirmMode] = useState<'none' | 'unfriend' | 'unfollow' | 'block'>('none');
+  const [interactionBlocked, setInteractionBlocked] = useState(false);
 
   useEffect(() => {
     setConfirmMode('none');
+    setInteractionBlocked(false);
     if (!currentUid || !targetUid || currentUid === targetUid) {
       setRel({
         friendState: 'none',
@@ -97,8 +101,12 @@ export function ProfileRelationshipBar({
     try {
       await fn();
       setConfirmMode('none');
+      setInteractionBlocked(false);
       onShowToast(successMsg);
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.code === 'permission-denied' && (key === 'follow' || key === 'add_friend')) {
+        setInteractionBlocked(true);
+      }
       onShowToast(resolveSocialErrorMessage(err));
     } finally {
       setBusyAction(null);
@@ -220,33 +228,45 @@ export function ProfileRelationshipBar({
           </button>
         )}
 
-        {/* Follow / Unfollow Button */}
-        <button
-          type="button"
-          disabled={busyAction !== null}
-          onClick={() =>
-            rel.isFollowing
-              ? runAction('unfollow', () => unfollowUser(currentUid!, targetUid), `Unfollowed ${targetName}`)
-              : runAction('follow', () => followUser(currentUid!, targetUid), `Following ${targetName}`)
-          }
-          className={`px-4 py-2 text-xs font-bold rounded-xl flex items-center gap-1.5 transition active:scale-95 cursor-pointer disabled:opacity-50 ${
-            rel.isFollowing
-              ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600'
-              : 'bg-blue-600 hover:bg-blue-500 text-white shadow-md shadow-blue-600/25'
-          }`}
-        >
-          {rel.isFollowing ? (
-            <>
-              <Check className="w-3.5 h-3.5" />
-              {busyAction === 'unfollow' ? 'Updating...' : 'Following'}
-            </>
-          ) : (
-            <>
-              <PlusIcon />
-              {busyAction === 'follow' ? 'Updating...' : 'Follow'}
-            </>
-          )}
-        </button>
+        {/* Follow / Follow Back / Following Button */}
+        {!interactionBlocked && (
+          <button
+            type="button"
+            disabled={busyAction !== null}
+            onClick={() => {
+              if (!currentUid) {
+                onRequireAuth();
+                return;
+              }
+              if (rel.isFollowing) {
+                setConfirmMode(confirmMode === 'unfollow' ? 'none' : 'unfollow');
+              } else {
+                runAction('follow', () => followUser(currentUid, targetUid), `Following ${targetName}`);
+              }
+            }}
+            className={`px-4 py-2 text-xs font-bold rounded-xl flex items-center gap-1.5 transition active:scale-95 cursor-pointer disabled:opacity-50 ${
+              rel.isFollowing
+                ? 'bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-600'
+                : 'bg-blue-600 hover:bg-blue-500 text-white shadow-md shadow-blue-600/25'
+            }`}
+          >
+            {rel.isFollowing ? (
+              <>
+                <Check className="w-3.5 h-3.5" />
+                {busyAction === 'unfollow' ? 'Updating...' : 'Following'}
+              </>
+            ) : (
+              <>
+                <PlusIcon />
+                {busyAction === 'follow'
+                  ? 'Updating...'
+                  : rel.isFollowedBy
+                  ? 'Follow Back'
+                  : 'Follow'}
+              </>
+            )}
+          </button>
+        )}
 
         {/* Block Button */}
         <button
@@ -267,7 +287,13 @@ export function ProfileRelationshipBar({
         </button>
       </div>
 
-      {rel.isFollowedBy && (
+      {interactionBlocked && (
+        <div className="text-center text-[11px] text-amber-300 bg-amber-950/30 border border-amber-500/30 rounded-xl py-1.5 px-3">
+          Follow & friend actions are unavailable for this account.
+        </div>
+      )}
+
+      {rel.isFollowedBy && !interactionBlocked && (
         <div className="flex justify-center">
           <span className="text-[10px] font-bold text-cyan-300 bg-cyan-500/10 border border-cyan-500/25 px-2.5 py-0.5 rounded-full">
             Follows you
@@ -276,6 +302,30 @@ export function ProfileRelationshipBar({
       )}
 
       {/* Inline Confirmations (no window.confirm) */}
+      {confirmMode === 'unfollow' && (
+        <div className="p-3 bg-[#0c1424] border border-cyan-500/40 rounded-2xl flex items-center justify-between gap-2">
+          <span className="text-xs text-slate-200">Unfollow {targetName}?</span>
+          <div className="flex gap-1.5">
+            <button
+              type="button"
+              onClick={() => setConfirmMode('none')}
+              className="px-2.5 py-1 bg-slate-800 text-slate-300 text-[11px] font-bold rounded-lg cursor-pointer"
+            >
+              Keep
+            </button>
+            <button
+              type="button"
+              disabled={busyAction !== null}
+              onClick={() =>
+                runAction('unfollow', () => unfollowUser(currentUid!, targetUid), `Unfollowed ${targetName}`)
+              }
+              className="px-2.5 py-1 bg-red-600 hover:bg-red-500 text-white text-[11px] font-bold rounded-lg cursor-pointer"
+            >
+              Unfollow
+            </button>
+          </div>
+        </div>
+      )}
       {confirmMode === 'unfriend' && (
         <div className="p-3 bg-[#0c1424] border border-amber-500/40 rounded-2xl flex items-center justify-between gap-2">
           <span className="text-xs text-slate-200">Remove {targetName} from Friends?</span>
@@ -428,21 +478,29 @@ export function SocialHubSection({
 
   useEffect(() => {
     let active = true;
-    setLoadingDiscover(true);
-    fetchDiscoverableUsers(currentUid, 60)
-      .then((list) => {
-        if (active) setDiscoverUsers(list);
-      })
-      .catch((err) => {
-        console.warn('[SocialHubSection] fetchDiscoverableUsers notice:', err);
-      })
-      .finally(() => {
-        if (active) setLoadingDiscover(false);
-      });
+    const trimmed = searchTerm.trim();
+    const timer = setTimeout(() => {
+      setLoadingDiscover(true);
+      const loader = trimmed
+        ? searchUsersPaged(trimmed, currentUid, 25)
+        : fetchDiscoverableUsers(currentUid, 30);
+      loader
+        .then((list) => {
+          if (active) setDiscoverUsers(list);
+        })
+        .catch((err) => {
+          console.warn('[SocialHubSection] search/fetch users notice:', err);
+        })
+        .finally(() => {
+          if (active) setLoadingDiscover(false);
+        });
+    }, trimmed ? 220 : 0);
+
     return () => {
       active = false;
+      clearTimeout(timer);
     };
-  }, [currentUid]);
+  }, [currentUid, searchTerm]);
 
   const acceptedFriends = useMemo(
     () => friendships.filter((f) => f.status === 'accepted'),
@@ -468,6 +526,7 @@ export function SocialHubSection({
 
   const blockedUidSet = useMemo(() => new Set(blocked.map((b) => b.blockedUid)), [blocked]);
   const followingUidSet = useMemo(() => new Set(following.map((f) => f.targetUid)), [following]);
+  const followerUidSet = useMemo(() => new Set(followers.map((f) => f.followerUid)), [followers]);
 
   const friendshipMapByOtherUid = useMemo(() => {
     const map = new Map<string, FriendshipRecord>();
@@ -480,13 +539,8 @@ export function SocialHubSection({
   }, [friendships, currentUid]);
 
   const filteredDiscover = useMemo(() => {
-    const q = searchTerm.trim().toLowerCase();
-    return discoverUsers.filter((u) => {
-      if (blockedUidSet.has(u.uid)) return false;
-      if (!q) return true;
-      return u.displayName.toLowerCase().includes(q) || u.uid.toLowerCase().includes(q);
-    });
-  }, [discoverUsers, blockedUidSet, searchTerm]);
+    return discoverUsers.filter((u) => !blockedUidSet.has(u.uid));
+  }, [discoverUsers, blockedUidSet]);
 
   const runSocialAction = async (key: string, fn: () => Promise<void>, successMsg: string) => {
     if (!currentUid) {
@@ -795,9 +849,20 @@ export function SocialHubSection({
                         Follow Back
                       </button>
                     ) : (
-                      <span className="px-2.5 py-1.5 bg-slate-800/80 text-cyan-300 text-[11px] font-bold rounded-lg">
+                      <button
+                        type="button"
+                        disabled={busyKey !== null}
+                        onClick={() =>
+                          runSocialAction(
+                            `unf_${otherUid}`,
+                            () => unfollowUser(currentUid, otherUid),
+                            'Unfollowed user'
+                          )
+                        }
+                        className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-cyan-300 text-[11px] font-bold rounded-lg cursor-pointer"
+                      >
                         Following
-                      </span>
+                      </button>
                     )}
                     <button
                       type="button"
@@ -887,13 +952,13 @@ export function SocialHubSection({
               type="text"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              placeholder="Search KING App users by name..."
+              placeholder="Search KING users by name or @username..."
               className="w-full bg-[#060a14] border border-gray-800 focus:border-cyan-500 text-white text-xs pl-8 pr-3 py-2 rounded-xl focus:outline-none"
             />
           </div>
 
           {loadingDiscover ? (
-            <div className="text-center text-xs text-slate-400 py-4">Loading creators...</div>
+            <div className="text-center text-xs text-slate-400 py-4">Searching creators...</div>
           ) : filteredDiscover.length === 0 ? (
             <div className="p-5 bg-[#0a0e1f] border border-dashed border-gray-800 rounded-xl text-center text-xs text-slate-400">
               No matching users found.
@@ -903,6 +968,7 @@ export function SocialHubSection({
               {filteredDiscover.map((u) => {
                 const fr = friendshipMapByOtherUid.get(u.uid);
                 const isFollow = followingUidSet.has(u.uid);
+                const followsMe = followerUidSet.has(u.uid);
 
                 return (
                   <div
@@ -922,7 +988,9 @@ export function SocialHubSection({
                       />
                       <div className="min-w-0">
                         <div className="text-xs font-bold text-white truncate">{u.displayName}</div>
-                        <div className="text-[10px] text-slate-400">Tap to open channel</div>
+                        <div className="text-[10px] text-slate-400 truncate">
+                          {formatCreatorHandle(u)}
+                        </div>
                       </div>
                     </button>
 
@@ -999,11 +1067,11 @@ export function SocialHubSection({
                         }
                         className={`px-2.5 py-1.5 text-[11px] font-bold rounded-lg cursor-pointer ${
                           isFollow
-                            ? 'bg-slate-800 text-slate-300'
+                            ? 'bg-slate-800 text-cyan-300'
                             : 'bg-blue-600 hover:bg-blue-500 text-white'
                         }`}
                       >
-                        {isFollow ? 'Following' : 'Follow'}
+                        {isFollow ? 'Following' : followsMe ? 'Follow Back' : 'Follow'}
                       </button>
                     </div>
                   </div>

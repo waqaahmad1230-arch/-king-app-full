@@ -15,18 +15,24 @@ import {
   fetchLiveModelsFromGoogleApi,
   getAdminAiStateAsync,
   getPublicAiCapabilityStatusAsync,
+  handleAdminAddFalKey,
   handleAdminAddKey,
+  handleAdminDeleteFalKey,
   handleAdminDeleteKey,
+  handleAdminUpdateFalConfig,
+  handleAdminUpdateFalKey,
   handleAdminUpdateKey,
   handleAdminUpdateModels,
   handleAutoRoutedAiRequest,
   handlePostAiPhotoEdit,
   handlePostAiTextGenerate,
   sendNormalizedAiJson,
+  testSpecificFalKeyLive,
   testSpecificKeyLive,
   testSpecificModelLive,
 } from './server/aiBackend.ts';
 import { scrubSecretText } from './server/aiVault.ts';
+import { registerKingShopRoutes } from './server/kingShopBackend.ts';
 
 const app = express();
 app.set('trust proxy', 1);
@@ -698,6 +704,100 @@ app.get(
   }
 );
 
+// --- ADMIN fal.ai KEY VAULT, BILLING & FAILOVER ENDPOINTS (Super Admin Only) ---
+app.post(
+  '/api/admin/ai/fal/config',
+  generalApiRateLimiter,
+  express.json({ limit: '64kb' }),
+  authenticateFirebaseToken,
+  requireSuperAdmin,
+  async (req, res) => {
+    try {
+      const result = await handleAdminUpdateFalConfig(req.body || {});
+      return res.status(200).json(result);
+    } catch (err: any) {
+      return res.status(400).json({ ok: false, error: scrubSecretText(err?.message || 'Invalid fal.ai configuration') });
+    }
+  }
+);
+
+app.post(
+  '/api/admin/ai/fal/keys',
+  generalApiRateLimiter,
+  express.json({ limit: '64kb' }),
+  authenticateFirebaseToken,
+  requireSuperAdmin,
+  async (req, res) => {
+    try {
+      const result = await handleAdminAddFalKey({
+        label: String(req.body?.label || ''),
+        apiKey: String(req.body?.apiKey || ''),
+        priority: req.body?.priority !== undefined ? Number(req.body.priority) : undefined,
+      });
+      return res.status(201).json(result);
+    } catch (err: any) {
+      return res.status(400).json({ ok: false, error: scrubSecretText(err?.message || 'Could not save fal.ai API key.') });
+    }
+  }
+);
+
+app.patch(
+  '/api/admin/ai/fal/keys/:id',
+  generalApiRateLimiter,
+  express.json({ limit: '64kb' }),
+  authenticateFirebaseToken,
+  requireSuperAdmin,
+  async (req, res) => {
+    try {
+      const result = await handleAdminUpdateFalKey(String(req.params.id || ''), req.body || {});
+      if (!result) {
+        return res.status(404).json({ ok: false, error: 'fal.ai key slot not found.' });
+      }
+      return res.status(200).json(result);
+    } catch (err: any) {
+      return res.status(400).json({ ok: false, error: scrubSecretText(err?.message || 'Could not update fal.ai API key.') });
+    }
+  }
+);
+
+app.delete(
+  '/api/admin/ai/fal/keys/:id',
+  generalApiRateLimiter,
+  authenticateFirebaseToken,
+  requireSuperAdmin,
+  async (req, res) => {
+    try {
+      const result = await handleAdminDeleteFalKey(String(req.params.id || ''));
+      if (!result) {
+        return res.status(404).json({ ok: false, error: 'fal.ai key slot not found.' });
+      }
+      return res.status(200).json(result);
+    } catch (err: any) {
+      return res.status(400).json({ ok: false, error: scrubSecretText(err?.message || 'Could not delete fal.ai API key.') });
+    }
+  }
+);
+
+app.post(
+  '/api/admin/ai/fal/test-key',
+  generalApiRateLimiter,
+  express.json({ limit: '16kb' }),
+  authenticateFirebaseToken,
+  requireSuperAdmin,
+  async (req, res) => {
+    try {
+      const keyId = String(req.body?.keyId || '').trim();
+      if (!keyId) {
+        return res.status(400).json({ ok: false, error: 'keyId is required.' });
+      }
+      const result = await testSpecificFalKeyLive(keyId);
+      return res.status(result.status).json({ ...result.payload, state: await getAdminAiStateAsync() });
+    } catch (err: any) {
+      return res.status(500).json({ ok: false, error: scrubSecretText(err?.message || 'fal.ai key test failed.') });
+    }
+  }
+);
+
 // Serve GamePix ads.txt directly with Content-Type text/plain
 app.get('/ads.txt', (_req, res) => {
   const adsPath = path.resolve(process.cwd(), 'public/ads.txt');
@@ -1047,6 +1147,9 @@ app.post('/api/meta/disconnect', authenticateFirebaseToken, async (req, res) => 
     return res.status(500).json({ error: { message: err.message || 'Failed to disconnect meta account' } });
   }
 });
+
+// --- REGISTER KING SHOP REWARDS & WALLET API ROUTES ---
+registerKingShopRoutes(app, adminApp, authenticateFirebaseToken, requireSuperAdmin, generalApiRateLimiter);
 
 // Ensure Express API middleware errors (e.g., malformed JSON or oversized payload) ALWAYS return JSON, never HTML/plain-text
 app.use('/api', (err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {

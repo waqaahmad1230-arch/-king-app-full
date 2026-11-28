@@ -2,14 +2,13 @@ import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   AlertCircle,
-  ArrowLeft,
   Camera,
-  Check,
   ImagePlus,
   Loader2,
   RefreshCw,
-  RotateCcw,
+  Sparkles,
   SwitchCamera,
+  Timer,
   X,
   Zap,
   ZapOff,
@@ -21,10 +20,26 @@ import PostAiWorkspaceModal, { KingAiPetalIcon } from './PostAiWorkspaceModal';
 interface PostMediaPickerModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onMediaSelected: (file: File) => void;
+  onMediaSelected: (file: File, creationType?: 'post' | 'story') => void;
 }
 
 type CameraMode = 'photo' | 'video';
+
+interface CameraFilter {
+  id: string;
+  label: string;
+  css: string;
+}
+
+const CAMERA_FILTERS: CameraFilter[] = [
+  { id: 'normal', label: 'Normal', css: 'none' },
+  { id: 'warm', label: 'Warm', css: 'sepia(0.24) saturate(1.25) brightness(1.03)' },
+  { id: 'cinema', label: 'Cinema', css: 'contrast(1.2) saturate(0.9) brightness(0.95)' },
+  { id: 'vivid', label: 'Vivid', css: 'saturate(1.45) contrast(1.12)' },
+  { id: 'noir', label: 'Noir', css: 'grayscale(1) contrast(1.22)' },
+  { id: 'sunset', label: 'Golden', css: 'sepia(0.3) saturate(1.35) brightness(1.06)' },
+  { id: 'neon', label: 'Neon', css: 'saturate(1.5) contrast(1.18) hue-rotate(15deg)' },
+];
 
 function formatDuration(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -42,22 +57,25 @@ export default function PostMediaPickerModal({
   const nativeCamFallbackId = `${uid}-native-cam`;
 
   const [mode, setMode] = useState<CameraMode>('photo');
+  const [creationType, setCreationType] = useState<'post' | 'story'>('post');
   const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
   const [hasTorch, setHasTorch] = useState<boolean>(false);
   const [flashOn, setFlashOn] = useState<boolean>(false);
+  const [timerMode, setTimerMode] = useState<0 | 3 | 10>(0);
+  const [countdown, setCountdown] = useState<number | null>(null);
+  const [activeFilterId, setActiveFilterId] = useState<string>('normal');
+  const [showFilterDrawer, setShowFilterDrawer] = useState<boolean>(false);
   const [isLoadingCamera, setIsLoadingCamera] = useState<boolean>(false);
   const [cameraReady, setCameraReady] = useState<boolean>(false);
-  const [cameraError, setCameraError] = useState<string | null>(null);
   const [flashNotice, setFlashNotice] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [recordingSeconds, setRecordingSeconds] = useState<number>(0);
 
-  const [previewFile, setPreviewFile] = useState<File | null>(null);
-  const [previewOriginalFile, setPreviewOriginalFile] = useState<File | null>(null);
-  const [previewUrl, setPreviewUrl] = useState<string>('');
-  const [previewType, setPreviewType] = useState<FeedContentType>('photo');
+  const [aiDraftFile, setAiDraftFile] = useState<File | null>(null);
+  const [aiDraftOriginalFile, setAiDraftOriginalFile] = useState<File | null>(null);
+  const [aiDraftUrl, setAiDraftUrl] = useState<string>('');
   const [hasAiApplied, setHasAiApplied] = useState<boolean>(false);
   const [showAiWorkspace, setShowAiWorkspace] = useState<boolean>(false);
 
@@ -66,19 +84,22 @@ export default function PostMediaPickerModal({
   const cameraSessionRef = useRef<number>(0);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
+  const filterRecordRafRef = useRef<number | null>(null);
+  const filterCaptureStreamRef = useRef<MediaStream | null>(null);
   const timerIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const countdownIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const activePreviewUrlRef = useRef<string>('');
   const galleryInputRef = useRef<HTMLInputElement | null>(null);
   const nativeCamFallbackRef = useRef<HTMLInputElement | null>(null);
 
-  const revokePreviewUrl = useCallback(() => {
+  const revokeAiDraftUrl = useCallback(() => {
     if (activePreviewUrlRef.current) {
       try {
         URL.revokeObjectURL(activePreviewUrlRef.current);
       } catch {}
       activePreviewUrlRef.current = '';
     }
-    setPreviewUrl('');
+    setAiDraftUrl('');
   }, []);
 
   const clearRecordTimer = useCallback(() => {
@@ -88,9 +109,33 @@ export default function PostMediaPickerModal({
     }
   }, []);
 
+  const stopFilterRecordingPipeline = useCallback(() => {
+    if (filterRecordRafRef.current !== null) {
+      cancelAnimationFrame(filterRecordRafRef.current);
+      filterRecordRafRef.current = null;
+    }
+    if (filterCaptureStreamRef.current) {
+      filterCaptureStreamRef.current.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch {}
+      });
+      filterCaptureStreamRef.current = null;
+    }
+  }, []);
+
+  const cancelCountdown = useCallback(() => {
+    if (countdownIntervalRef.current) {
+      clearInterval(countdownIntervalRef.current);
+      countdownIntervalRef.current = null;
+    }
+    setCountdown(null);
+  }, []);
+
   const stopStream = useCallback(() => {
     cameraSessionRef.current += 1;
     clearRecordTimer();
+    cancelCountdown();
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       try {
         mediaRecorderRef.current.ondataavailable = null;
@@ -100,6 +145,7 @@ export default function PostMediaPickerModal({
     }
     mediaRecorderRef.current = null;
     recordedChunksRef.current = [];
+    stopFilterRecordingPipeline();
     setIsRecording(false);
     setRecordingSeconds(0);
 
@@ -119,7 +165,7 @@ export default function PostMediaPickerModal({
     setCameraReady(false);
     setFlashOn(false);
     setHasTorch(false);
-  }, [clearRecordTimer]);
+  }, [clearRecordTimer, cancelCountdown, stopFilterRecordingPipeline]);
 
   const startCamera = useCallback(
     async (targetFacing: 'environment' | 'user', targetMode: CameraMode) => {
@@ -133,14 +179,13 @@ export default function PostMediaPickerModal({
       ) {
         setIsLoadingCamera(false);
         setCameraReady(false);
-        setCameraError(
+        setErrorMsg(
           'Live camera is not supported in this browser. You can still choose a photo or video from your gallery.'
         );
         return;
       }
 
       setIsLoadingCamera(true);
-      setCameraError(null);
       setErrorMsg(null);
 
       let newStream: MediaStream | null = null;
@@ -209,18 +254,19 @@ export default function PostMediaPickerModal({
         if (cameraSessionRef.current !== sessionId) return;
         const errName = err?.name || '';
         if (errName === 'NotAllowedError' || errName === 'PermissionDeniedError') {
-          setCameraError(
-            'Camera permission was denied. Allow camera access or choose media from your phone gallery.'
+          setErrorMsg(
+            'Camera permission was denied. Please enable camera permission in your browser settings (Settings > Site Settings > Camera) or use your phone gallery.'
           );
         } else if (errName === 'NotFoundError' || errName === 'DevicesNotFoundError') {
-          setCameraError(
+          setErrorMsg(
             'No camera hardware was detected on this device. Choose a photo or video from your gallery.'
           );
         } else {
-          setCameraError(
-            'Could not start live camera preview. Retry camera or choose media from your gallery.'
+          setErrorMsg(
+            'Could not start live camera preview. Please check camera permissions in browser settings or choose media from your gallery.'
           );
         }
+        setCameraReady(false);
       } finally {
         if (cameraSessionRef.current === sessionId) {
           setIsLoadingCamera(false);
@@ -234,20 +280,23 @@ export default function PostMediaPickerModal({
   useEffect(() => {
     if (!isOpen) {
       stopStream();
-      revokePreviewUrl();
-      setPreviewFile(null);
-      setPreviewOriginalFile(null);
+      revokeAiDraftUrl();
+      setAiDraftFile(null);
+      setAiDraftOriginalFile(null);
       setHasAiApplied(false);
       setShowAiWorkspace(false);
       setErrorMsg(null);
-      setCameraError(null);
       setFlashNotice(null);
       setMode('photo');
+      setCreationType('post');
       setFacingMode('environment');
+      setTimerMode(0);
+      setActiveFilterId('normal');
+      setShowFilterDrawer(false);
       return;
     }
 
-    if (previewFile || showAiWorkspace) {
+    if (showAiWorkspace) {
       stopStream();
       return;
     }
@@ -256,38 +305,47 @@ export default function PostMediaPickerModal({
     return () => {
       stopStream();
     };
-  }, [isOpen, previewFile, showAiWorkspace, facingMode, mode, startCamera, stopStream, revokePreviewUrl]);
+  }, [isOpen, showAiWorkspace, facingMode, mode, startCamera, stopStream, revokeAiDraftUrl]);
 
   // Ensure tracks and URLs are always cleaned up on unmount
   useEffect(() => {
     return () => {
       stopStream();
-      revokePreviewUrl();
+      revokeAiDraftUrl();
     };
-  }, [stopStream, revokePreviewUrl]);
+  }, [stopStream, revokeAiDraftUrl]);
 
   if (!isOpen) return null;
 
-  const setLoadedPreview = (file: File, type: FeedContentType, keepOriginalBackup = false) => {
-    stopStream();
-    revokePreviewUrl();
+  const setAiDraftMedia = (file: File, keepOriginalBackup = false) => {
+    revokeAiDraftUrl();
     const nextUrl = URL.createObjectURL(file);
     activePreviewUrlRef.current = nextUrl;
-    setPreviewUrl(nextUrl);
-    setPreviewFile(file);
-    setPreviewType(type);
+    setAiDraftUrl(nextUrl);
+    setAiDraftFile(file);
     if (!keepOriginalBackup) {
-      setPreviewOriginalFile(file);
+      setAiDraftOriginalFile(file);
       setHasAiApplied(false);
     }
     setErrorMsg(null);
   };
 
+  const handoffToEditor = (file: File) => {
+    stopStream();
+    revokeAiDraftUrl();
+    setAiDraftFile(null);
+    setAiDraftOriginalFile(null);
+    setHasAiApplied(false);
+    setShowAiWorkspace(false);
+    setErrorMsg(null);
+    onMediaSelected(file, creationType);
+  };
+
   const handleCloseModal = () => {
     stopStream();
-    revokePreviewUrl();
-    setPreviewFile(null);
-    setPreviewOriginalFile(null);
+    revokeAiDraftUrl();
+    setAiDraftFile(null);
+    setAiDraftOriginalFile(null);
     setHasAiApplied(false);
     setShowAiWorkspace(false);
     setErrorMsg(null);
@@ -351,6 +409,11 @@ export default function PostMediaPickerModal({
       ctx.translate(width, 0);
       ctx.scale(-1, 1);
     }
+
+    const currentFilter = CAMERA_FILTERS.find((f) => f.id === activeFilterId);
+    if (currentFilter && currentFilter.css !== 'none') {
+      ctx.filter = currentFilter.css;
+    }
     ctx.drawImage(videoEl, 0, 0, width, height);
 
     canvas.toBlob(
@@ -365,7 +428,7 @@ export default function PostMediaPickerModal({
           setErrorMsg(check.error || 'Captured photo could not be processed.');
           return;
         }
-        setLoadedPreview(check.file, 'photo');
+        handoffToEditor(check.file);
       },
       'image/jpeg',
       0.93
@@ -379,15 +442,18 @@ export default function PostMediaPickerModal({
       try {
         recorder.stop();
       } catch {
+        stopFilterRecordingPipeline();
         setIsRecording(false);
       }
     } else {
+      stopFilterRecordingPipeline();
       setIsRecording(false);
     }
   };
 
   const startVideoRecording = () => {
     const stream = mediaStreamRef.current;
+    const videoEl = videoRef.current;
     if (!stream || !cameraReady) {
       setErrorMsg('Camera is still starting. Please wait a moment.');
       return;
@@ -399,6 +465,51 @@ export default function PostMediaPickerModal({
 
     try {
       recordedChunksRef.current = [];
+      stopFilterRecordingPipeline();
+
+      let streamToRecord: MediaStream = stream;
+      const currentFilter = CAMERA_FILTERS.find((f) => f.id === activeFilterId);
+      const needsMirror = facingMode === 'user';
+      const hasLiveFilter = Boolean(currentFilter && currentFilter.css !== 'none');
+
+      if (
+        videoEl &&
+        videoEl.videoWidth > 0 &&
+        videoEl.videoHeight > 0 &&
+        (hasLiveFilter || needsMirror) &&
+        typeof HTMLCanvasElement !== 'undefined' &&
+        typeof (document.createElement('canvas') as any).captureStream === 'function'
+      ) {
+        try {
+          const recCanvas = document.createElement('canvas');
+          recCanvas.width = Math.min(1280, videoEl.videoWidth);
+          recCanvas.height = Math.round((recCanvas.width / videoEl.videoWidth) * videoEl.videoHeight);
+          const recCtx = recCanvas.getContext('2d');
+          if (recCtx) {
+            const drawLoop = () => {
+              if (!mediaRecorderRef.current || mediaRecorderRef.current.state === 'inactive') return;
+              recCtx.save();
+              if (needsMirror) {
+                recCtx.translate(recCanvas.width, 0);
+                recCtx.scale(-1, 1);
+              }
+              recCtx.filter = hasLiveFilter && currentFilter ? currentFilter.css : 'none';
+              recCtx.drawImage(videoEl, 0, 0, recCanvas.width, recCanvas.height);
+              recCtx.restore();
+              filterRecordRafRef.current = requestAnimationFrame(drawLoop);
+            };
+            const captured = (recCanvas as any).captureStream(30) as MediaStream;
+            stream.getAudioTracks().forEach((at) => captured.addTrack(at));
+            filterCaptureStreamRef.current = captured;
+            streamToRecord = captured;
+            filterRecordRafRef.current = requestAnimationFrame(drawLoop);
+          }
+        } catch {
+          stopFilterRecordingPipeline();
+          streamToRecord = stream;
+        }
+      }
+
       const candidateMimes = [
         'video/webm;codecs=vp9,opus',
         'video/webm;codecs=vp8,opus',
@@ -414,8 +525,8 @@ export default function PostMediaPickerModal({
       }
 
       const recorder = chosenMime
-        ? new MediaRecorder(stream, { mimeType: chosenMime })
-        : new MediaRecorder(stream);
+        ? new MediaRecorder(streamToRecord, { mimeType: chosenMime })
+        : new MediaRecorder(streamToRecord);
 
       mediaRecorderRef.current = recorder;
 
@@ -427,6 +538,7 @@ export default function PostMediaPickerModal({
 
       recorder.onstop = () => {
         clearRecordTimer();
+        stopFilterRecordingPipeline();
         setIsRecording(false);
         const mime = recorder.mimeType || chosenMime || 'video/webm';
         const fullBlob = new Blob(recordedChunksRef.current, { type: mime });
@@ -445,7 +557,7 @@ export default function PostMediaPickerModal({
           setErrorMsg(check.error || 'Recorded video could not be processed.');
           return;
         }
-        setLoadedPreview(check.file, 'video');
+        handoffToEditor(check.file);
       };
 
       recorder.start(250);
@@ -464,16 +576,46 @@ export default function PostMediaPickerModal({
         }
       }, 250);
     } catch {
+      stopFilterRecordingPipeline();
       setIsRecording(false);
       setErrorMsg('Video recording could not start on this browser. You can select a video from Gallery.');
     }
   };
 
+  const handleCycleTimer = () => {
+    setTimerMode((prev) => (prev === 0 ? 3 : prev === 3 ? 10 : 0));
+  };
+
   const handleShutterAction = () => {
+    if (isRecording) {
+      stopVideoRecording();
+      return;
+    }
+    if (countdown !== null) {
+      cancelCountdown();
+      return;
+    }
+    if (timerMode > 0) {
+      setCountdown(timerMode);
+      let remaining = timerMode;
+      countdownIntervalRef.current = setInterval(() => {
+        remaining -= 1;
+        if (remaining <= 0) {
+          cancelCountdown();
+          if (mode === 'photo') {
+            handleCapturePhoto();
+          } else {
+            startVideoRecording();
+          }
+        } else {
+          setCountdown(remaining);
+        }
+      }, 1000);
+      return;
+    }
+
     if (mode === 'photo') {
       handleCapturePhoto();
-    } else if (isRecording) {
-      stopVideoRecording();
     } else {
       startVideoRecording();
     }
@@ -493,26 +635,7 @@ export default function PostMediaPickerModal({
       return;
     }
 
-    setLoadedPreview(check.file, check.mediaType);
-  };
-
-  const handleRetake = () => {
-    revokePreviewUrl();
-    setPreviewFile(null);
-    setPreviewOriginalFile(null);
-    setHasAiApplied(false);
-    setErrorMsg(null);
-  };
-
-  const handleContinueToEditor = () => {
-    if (!previewFile) return;
-    const selected = previewFile;
-    stopStream();
-    revokePreviewUrl();
-    setPreviewFile(null);
-    setPreviewOriginalFile(null);
-    setHasAiApplied(false);
-    onMediaSelected(selected);
+    handoffToEditor(check.file);
   };
 
   const handleOpenAiWorkspace = () => {
@@ -526,7 +649,7 @@ export default function PostMediaPickerModal({
       className="fixed inset-0 z-[160] bg-black text-white flex flex-col h-[100dvh] w-full overflow-hidden select-none animate-in fade-in duration-150"
       role="dialog"
       aria-modal="true"
-      aria-label={previewFile ? 'KING Media Preview' : 'KING Camera'}
+      aria-label="KING Camera"
     >
       {/* Hidden Android/WebView-safe gallery & native camera inputs */}
       <input
@@ -557,22 +680,30 @@ export default function PostMediaPickerModal({
         aria-label="Open device camera app"
       />
 
-      {!previewFile ? (
-        /* ================= LIVE KING CAMERA SCREEN ================= */
-        <>
+      {/* ================= LIVE KING CAMERA SCREEN ================= */}
+      <>
           {/* Viewfinder */}
           <div className="relative flex-1 w-full bg-[#05070e] overflow-hidden flex items-center justify-center">
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className={`w-full h-full object-cover transition-transform duration-200 ${
-                facingMode === 'user' ? 'scale-x-[-1]' : ''
-              }`}
-            />
+            {(() => {
+              const currentFilter = CAMERA_FILTERS.find((f) => f.id === activeFilterId);
+              const liveFilterCss = currentFilter ? currentFilter.css : 'none';
+              return (
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className={`w-full h-full object-cover transition-transform duration-200 ${
+                    facingMode === 'user' ? 'scale-x-[-1]' : ''
+                  }`}
+                  style={{
+                    filter: liveFilterCss !== 'none' ? liveFilterCss : undefined,
+                  }}
+                />
+              );
+            })()}
 
-            {/* Top Overlay Controls */}
+            {/* Top Overlay Controls: Close | Status Pill | Flash | Timer | Effects */}
             <div className="absolute top-0 inset-x-0 z-30 px-3.5 pt-[max(12px,env(safe-area-inset-top))] pb-5 bg-gradient-to-b from-black/80 via-black/35 to-transparent flex items-center justify-between gap-2">
               <button
                 type="button"
@@ -594,37 +725,126 @@ export default function PostMediaPickerModal({
                 </div>
               )}
 
-              <button
-                type="button"
-                onClick={handleToggleFlash}
-                aria-label={
-                  !hasTorch
-                    ? 'Flash unavailable on this camera'
-                    : flashOn
-                    ? 'Turn flash off'
-                    : 'Turn flash on'
-                }
-                title={hasTorch ? 'Toggle Flash' : 'Flash not supported on this camera'}
-                className={`w-10 h-10 rounded-full backdrop-blur-md border flex items-center justify-center cursor-pointer active:scale-95 transition ${
-                  flashOn && hasTorch
-                    ? 'bg-amber-400 text-black border-amber-300 shadow-[0_0_16px_rgba(251,191,36,0.6)]'
-                    : hasTorch
-                    ? 'bg-black/55 hover:bg-black/75 text-white border-white/15'
-                    : 'bg-black/40 text-white/45 border-white/10'
-                }`}
-              >
-                {flashOn && hasTorch ? (
-                  <Zap className="w-5 h-5 fill-black" />
-                ) : (
-                  <ZapOff className="w-5 h-5" />
-                )}
-              </button>
+              <div className="flex items-center gap-1.5">
+                {/* Timer Control: Off / 3s / 10s */}
+                <button
+                  type="button"
+                  disabled={isRecording}
+                  onClick={handleCycleTimer}
+                  aria-label={`Timer: ${timerMode === 0 ? 'Off' : `${timerMode}s`}`}
+                  title="Camera Timer"
+                  className={`h-10 px-2.5 rounded-full backdrop-blur-md border flex items-center justify-center gap-1 cursor-pointer active:scale-95 transition ${
+                    timerMode > 0
+                      ? 'bg-amber-400 text-black border-amber-300 font-bold shadow-[0_0_14px_rgba(251,191,36,0.5)]'
+                      : 'bg-black/55 hover:bg-black/75 text-white border-white/15'
+                  }`}
+                >
+                  <Timer className="w-4 h-4" />
+                  <span className="text-[11px] font-black">{timerMode === 0 ? 'Off' : `${timerMode}s`}</span>
+                </button>
+
+                {/* Filter / Effects Drawer Toggle */}
+                <button
+                  type="button"
+                  disabled={isRecording}
+                  onClick={() => setShowFilterDrawer((prev) => !prev)}
+                  aria-label="Camera Effects & Filters"
+                  title="Effects & Filters"
+                  className={`w-10 h-10 rounded-full backdrop-blur-md border flex items-center justify-center cursor-pointer active:scale-95 transition ${
+                    activeFilterId !== 'normal' || showFilterDrawer
+                      ? 'bg-gradient-to-r from-purple-500 to-pink-500 text-white border-pink-400 shadow-[0_0_14px_rgba(236,72,153,0.5)]'
+                      : 'bg-black/55 hover:bg-black/75 text-white border-white/15'
+                  }`}
+                >
+                  <Sparkles className="w-4 h-4" />
+                </button>
+
+                {/* Flash Toggle */}
+                <button
+                  type="button"
+                  onClick={handleToggleFlash}
+                  aria-label={
+                    !hasTorch
+                      ? 'Flash unavailable on this camera'
+                      : flashOn
+                      ? 'Turn flash off'
+                      : 'Turn flash on'
+                  }
+                  title={hasTorch ? 'Toggle Flash' : 'Flash not supported on this camera'}
+                  className={`w-10 h-10 rounded-full backdrop-blur-md border flex items-center justify-center cursor-pointer active:scale-95 transition ${
+                    flashOn && hasTorch
+                      ? 'bg-amber-400 text-black border-amber-300 shadow-[0_0_16px_rgba(251,191,36,0.6)]'
+                      : hasTorch
+                      ? 'bg-black/55 hover:bg-black/75 text-white border-white/15'
+                      : 'bg-black/40 text-white/45 border-white/10'
+                  }`}
+                >
+                  {flashOn && hasTorch ? (
+                    <Zap className="w-4 h-4 fill-black" />
+                  ) : (
+                    <ZapOff className="w-4 h-4" />
+                  )}
+                </button>
+              </div>
             </div>
 
             {/* Flash Unsupported Notice */}
             {flashNotice && (
               <div className="absolute top-[max(62px,calc(env(safe-area-inset-top)+50px))] left-1/2 -translate-x-1/2 z-30 px-3 py-1.5 rounded-full bg-black/80 border border-white/15 text-[11px] font-medium text-slate-200 whitespace-nowrap shadow-lg">
                 {flashNotice}
+              </div>
+            )}
+
+            {/* Countdown Overlay */}
+            {countdown !== null && (
+              <div
+                onClick={cancelCountdown}
+                className="absolute inset-0 z-40 bg-black/60 backdrop-blur-sm flex flex-col items-center justify-center cursor-pointer select-none"
+              >
+                <div className="w-28 h-28 rounded-full border-4 border-white/90 bg-black/70 flex items-center justify-center shadow-[0_0_40px_rgba(255,255,255,0.4)] animate-pulse">
+                  <span className="text-6xl font-black text-white">{countdown}</span>
+                </div>
+                <p className="mt-4 text-xs font-bold text-slate-200 uppercase tracking-widest bg-black/80 px-4 py-1.5 rounded-full border border-white/20">
+                  Tap anywhere to cancel
+                </p>
+              </div>
+            )}
+
+            {/* Camera Filters Drawer */}
+            {showFilterDrawer && (
+              <div className="absolute bottom-3 inset-x-3 z-30 bg-black/85 backdrop-blur-md border border-white/15 rounded-2xl p-2.5 shadow-2xl">
+                <div className="flex items-center justify-between px-1 pb-2 text-[11px] font-bold text-slate-300">
+                  <span className="flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-pink-400" />
+                    <span>Live Camera Filters</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setShowFilterDrawer(false)}
+                    className="text-slate-400 hover:text-white text-xs cursor-pointer"
+                  >
+                    Done
+                  </button>
+                </div>
+                <div className="flex items-center gap-1.5 overflow-x-auto py-1 px-0.5 [&::-webkit-scrollbar]:hidden">
+                  {CAMERA_FILTERS.map((f) => {
+                    const isSelected = activeFilterId === f.id;
+                    return (
+                      <button
+                        key={f.id}
+                        type="button"
+                        onClick={() => setActiveFilterId(f.id)}
+                        className={`px-3 py-1 rounded-xl text-xs font-bold shrink-0 transition cursor-pointer ${
+                          isSelected
+                            ? 'bg-gradient-to-r from-pink-500 to-purple-600 text-white shadow'
+                            : 'bg-white/10 hover:bg-white/20 text-slate-300'
+                        }`}
+                      >
+                        {f.label}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             )}
 
@@ -636,47 +856,44 @@ export default function PostMediaPickerModal({
               </div>
             )}
 
-            {/* Camera Permission / Device Unavailable Fallback */}
-            {cameraError && !isLoadingCamera && (
-              <div className="absolute inset-0 z-20 bg-gradient-to-b from-[#070b14] via-[#04060c] to-black flex flex-col items-center justify-center p-6 text-center space-y-4">
-                <div className="w-16 h-16 rounded-2xl bg-blue-500/15 border border-blue-500/35 text-blue-400 flex items-center justify-center shadow-[0_0_24px_rgba(37,99,235,0.25)]">
-                  <Camera className="w-8 h-8" />
+            {/* Camera Unavailable Fallback Actions */}
+            {!cameraReady && !isLoadingCamera && (
+              <div className="absolute inset-0 z-20 flex flex-col items-center justify-center px-6 text-center gap-3 pointer-events-auto">
+                <div className="w-14 h-14 rounded-2xl bg-white/10 border border-white/15 flex items-center justify-center">
+                  <Camera className="w-7 h-7 text-slate-300" />
                 </div>
-                <div className="space-y-1.5 max-w-xs">
-                  <h3 className="text-sm font-bold text-white">Camera Access Needed</h3>
-                  <p className="text-xs text-slate-300 leading-relaxed">{cameraError}</p>
-                </div>
-                <div className="flex flex-col gap-2 w-full max-w-xs">
+                <p className="text-xs text-slate-300 max-w-xs leading-relaxed">
+                  {errorMsg || 'Start live camera or choose a photo or video directly from your gallery.'}
+                </p>
+                <div className="flex flex-wrap items-center justify-center gap-2">
                   <label
                     htmlFor={galleryInputId}
-                    className="w-full min-h-[42px] px-4 rounded-xl bg-[#2563eb] hover:bg-[#1d4ed8] text-white text-xs font-bold flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-blue-600/30 transition"
+                    className="px-4 py-2.5 rounded-xl bg-[#2563eb] hover:bg-[#1d4ed8] text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-lg transition"
                   >
                     <ImagePlus className="w-4 h-4" />
                     <span>Choose from Gallery</span>
                   </label>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => startCamera(facingMode, mode)}
-                      className="min-h-[38px] px-3 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 text-white text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer transition"
-                    >
-                      <RefreshCw className="w-3.5 h-3.5" />
-                      <span>Retry Camera</span>
-                    </button>
-                    <label
-                      htmlFor={nativeCamFallbackId}
-                      className="min-h-[38px] px-3 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 text-white text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer transition"
-                    >
-                      <Camera className="w-3.5 h-3.5" />
-                      <span>Device Cam</span>
-                    </label>
-                  </div>
+                  <label
+                    htmlFor={nativeCamFallbackId}
+                    className="px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/15 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer transition"
+                  >
+                    <Camera className="w-4 h-4" />
+                    <span>Device Camera</span>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => startCamera(facingMode, mode)}
+                    className="px-3 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/15 text-slate-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Retry</span>
+                  </button>
                 </div>
               </div>
             )}
 
             {/* Inline Error Banner */}
-            {errorMsg && (
+            {errorMsg && cameraReady && (
               <div className="absolute bottom-3 inset-x-3 z-30 px-3 py-2 rounded-xl bg-rose-950/90 border border-rose-500/40 text-rose-200 text-xs flex items-center justify-between gap-2 shadow-xl">
                 <div className="flex items-center gap-2 min-w-0">
                   <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
@@ -694,7 +911,33 @@ export default function PostMediaPickerModal({
           </div>
 
           {/* Bottom Camera Controls Deck */}
-          <div className="shrink-0 bg-[#05070e] border-t border-white/10 px-4 pt-3.5 pb-[max(18px,env(safe-area-inset-bottom))] space-y-3.5">
+          <div className="shrink-0 bg-[#05070e] border-t border-white/10 px-4 pt-3 pb-[max(18px,env(safe-area-inset-bottom))] space-y-3">
+            {/* Story vs Post Mode Switcher */}
+            <div className="flex items-center justify-center gap-6 text-xs font-black tracking-wider uppercase">
+              <button
+                type="button"
+                onClick={() => setCreationType('post')}
+                className={`transition cursor-pointer ${
+                  creationType === 'post'
+                    ? 'text-white border-b-2 border-blue-500 pb-0.5'
+                    : 'text-slate-500 hover:text-slate-300'
+                }`}
+              >
+                POST
+              </button>
+              <button
+                type="button"
+                onClick={() => setCreationType('story')}
+                className={`transition cursor-pointer ${
+                  creationType === 'story'
+                    ? 'text-amber-400 border-b-2 border-amber-400 pb-0.5'
+                    : 'text-slate-500 hover:text-slate-300'
+                }`}
+              >
+                STORY
+              </button>
+            </div>
+
             {/* Main Row: Choose from Gallery | Central Shutter | Switch Front/Back */}
             <div className="max-w-sm mx-auto w-full flex items-center justify-between gap-3">
               <label
@@ -793,121 +1036,31 @@ export default function PostMediaPickerModal({
             </div>
           </div>
         </>
-      ) : (
-        /* ================= MEDIA PREVIEW SCREEN ================= */
-        <>
-          {/* Top Preview Header Overlay */}
-          <div className="shrink-0 px-3.5 pt-[max(12px,env(safe-area-inset-top))] pb-2.5 bg-[#070a12] border-b border-white/10 flex items-center justify-between gap-2">
-            <button
-              type="button"
-              onClick={handleRetake}
-              aria-label="Back to Camera"
-              className="h-9 px-3 rounded-xl bg-[#111624] hover:bg-[#192034] border border-white/10 text-slate-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition"
-            >
-              <ArrowLeft className="w-4 h-4" />
-              <span>Camera</span>
-            </button>
-
-            <div className="flex items-center gap-1.5">
-              <span className="text-xs font-bold text-white">
-                {previewType === 'photo' ? 'Photo Preview' : 'Video Preview'}
-              </span>
-              {hasAiApplied && (
-                <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-emerald-500/20 border border-emerald-500/35 text-emerald-300">
-                  AI Edited
-                </span>
-              )}
-            </div>
-
-            <button
-              type="button"
-              onClick={handleCloseModal}
-              aria-label="Close Preview"
-              className="w-9 h-9 rounded-full bg-[#111624] hover:bg-[#192034] border border-white/10 text-white flex items-center justify-center cursor-pointer transition"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-
-          {/* Large Uncropped Media Preview */}
-          <div className="relative flex-1 w-full bg-black flex items-center justify-center overflow-hidden">
-            {previewType === 'photo' ? (
-              <img
-                src={previewUrl}
-                alt="Selected photo preview"
-                className="w-full h-full object-contain bg-black"
-              />
-            ) : (
-              <video
-                src={previewUrl}
-                controls
-                playsInline
-                autoPlay
-                loop
-                className="w-full h-full object-contain bg-black"
-              />
-            )}
-          </div>
-
-          {/* Bottom Preview Action Bar: Retake | KING AI | Continue */}
-          <div className="shrink-0 bg-[#070a12] border-t border-white/10 px-3.5 pt-3 pb-[max(16px,env(safe-area-inset-bottom))]">
-            <div className="max-w-md mx-auto w-full flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleRetake}
-                className="min-h-[44px] px-3.5 rounded-xl bg-[#141824] hover:bg-[#1b2133] border border-white/15 text-white text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 transition"
-              >
-                <RotateCcw className="w-4 h-4 text-slate-200" />
-                <span>Retake</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={handleOpenAiWorkspace}
-                className="min-h-[44px] px-3.5 rounded-xl bg-gradient-to-r from-[#0d1930] to-[#15284c] hover:brightness-110 border border-blue-400/50 shadow-[0_0_16px_rgba(37,99,235,0.35)] text-white text-xs font-extrabold flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 transition"
-              >
-                <KingAiPetalIcon className="w-4 h-4" />
-                <span>KING AI</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={handleContinueToEditor}
-                className="flex-1 min-h-[44px] px-4 rounded-xl bg-[#2563eb] hover:bg-[#1d4ed8] text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-[0_0_18px_rgba(37,99,235,0.45)] cursor-pointer active:scale-95 transition"
-              >
-                <Check className="w-4 h-4 stroke-[2.5]" />
-                <span>Continue</span>
-              </button>
-            </div>
-          </div>
-        </>
-      )}
 
       {/* EXISTING KING AI STUDIO WORKSPACE */}
       <PostAiWorkspaceModal
         isOpen={showAiWorkspace}
-        mediaType={previewFile ? previewType : mode}
-        currentFile={previewFile}
-        currentMediaUrl={previewUrl}
-        hasOriginalBackup={Boolean(hasAiApplied && previewOriginalFile)}
-        onClose={() => setShowAiWorkspace(false)}
+        mediaType="photo"
+        currentFile={aiDraftFile}
+        currentMediaUrl={aiDraftUrl}
+        hasOriginalBackup={Boolean(hasAiApplied && aiDraftOriginalFile)}
+        onClose={() => {
+          setShowAiWorkspace(false);
+          revokeAiDraftUrl();
+          setAiDraftFile(null);
+          setAiDraftOriginalFile(null);
+          setHasAiApplied(false);
+        }}
         onPickPhotoFile={(pickedFile) => {
-          setLoadedPreview(pickedFile, 'photo');
+          setAiDraftMedia(pickedFile);
         }}
         onApplyPhoto={(editedFile) => {
-          setLoadedPreview(editedFile, 'photo', Boolean(previewOriginalFile));
-          setHasAiApplied(true);
+          handoffToEditor(editedFile);
         }}
         onRestoreOriginal={() => {
-          if (previewOriginalFile) {
-            setLoadedPreview(previewOriginalFile, previewType, true);
+          if (aiDraftOriginalFile) {
+            setAiDraftMedia(aiDraftOriginalFile, true);
             setHasAiApplied(false);
-          }
-        }}
-        onJumpToVideoTool={() => {
-          setShowAiWorkspace(false);
-          if (previewFile) {
-            handleContinueToEditor();
           }
         }}
       />

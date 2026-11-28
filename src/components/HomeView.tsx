@@ -55,6 +55,7 @@ interface HomeViewProps {
   onOpenWatchVideo?: (videoId: string) => void;
   onOpenTab: (tab: 'home' | 'games' | 'videos' | 'library' | 'CATALOG') => void;
   onFullScreenOverlayChange?: (isOpen: boolean) => void;
+  onOpenCreatorProfile?: (uid: string) => void;
 }
 
 interface ShareTarget {
@@ -88,9 +89,11 @@ function formatRelativeTime(ts: any): string {
 function FeedCommentsDrawer({
   item,
   onToast,
+  onOpenCreatorProfile,
 }: {
   item: CentralFeedItem;
   onToast: (msg: string) => void;
+  onOpenCreatorProfile?: (uid: string) => void;
 }) {
   const { user, openAuthModal } = useAuth();
   const [comments, setComments] = useState<ContentComment[]>([]);
@@ -173,7 +176,16 @@ function FeedCommentsDrawer({
                 key={c.id}
                 className="flex items-start justify-between gap-2 bg-white border border-slate-200/80 rounded-2xl p-2.5"
               >
-                <div className="flex items-start gap-2 min-w-0">
+                <div
+                  onClick={() => {
+                    if (c.authorUid && onOpenCreatorProfile) {
+                      onOpenCreatorProfile(c.authorUid);
+                    }
+                  }}
+                  className={`flex items-start gap-2 min-w-0 ${
+                    c.authorUid && onOpenCreatorProfile ? 'cursor-pointer group/commentAuthor' : ''
+                  }`}
+                >
                   <CreatorAvatar
                     uid={c.authorUid}
                     fallbackPhoto={c.authorPhoto}
@@ -182,7 +194,9 @@ function FeedCommentsDrawer({
                   />
                   <div className="min-w-0">
                     <div className="flex items-center gap-1.5 text-[11px]">
-                      <span className="font-bold text-slate-900 truncate">{c.authorName}</span>
+                      <span className="font-bold text-slate-900 truncate group-hover/commentAuthor:text-[#1877F2]">
+                        {c.authorName}
+                      </span>
                       <span className="text-slate-400">{formatRelativeTime(c.createdAt)}</span>
                     </div>
                     <p className="text-xs text-slate-700 break-words mt-0.5">{c.text}</p>
@@ -276,6 +290,7 @@ export default function HomeView({
   onOpenWatchVideo,
   onOpenTab,
   onFullScreenOverlayChange,
+  onOpenCreatorProfile,
 }: HomeViewProps) {
   const { user } = useAuth();
   const [toastMsg, setToastMsg] = useState<string | null>(null);
@@ -590,7 +605,17 @@ export default function HomeView({
         {isPlayingHere ? (
           <div className="p-3 space-y-2.5" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2 min-w-0">
+              <div
+                onClick={(e) => {
+                  if (item.authorUid && onOpenCreatorProfile) {
+                    e.stopPropagation();
+                    onOpenCreatorProfile(item.authorUid);
+                  }
+                }}
+                className={`flex items-center gap-2 min-w-0 ${
+                  item.authorUid && onOpenCreatorProfile ? 'cursor-pointer hover:opacity-85' : ''
+                }`}
+              >
                 <CreatorAvatar
                   uid={item.authorUid}
                   fallbackPhoto={item.authorPhoto}
@@ -635,15 +660,25 @@ export default function HomeView({
             {/* Left Side: User Name, Title, Description */}
             <div className="flex-1 min-w-0 space-y-1.5">
               <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 min-w-0">
+                <div
+                  onClick={(e) => {
+                    if (item.authorUid && onOpenCreatorProfile) {
+                      e.stopPropagation();
+                      onOpenCreatorProfile(item.authorUid);
+                    }
+                  }}
+                  className={`flex items-center gap-2 min-w-0 ${
+                    item.authorUid && onOpenCreatorProfile ? 'cursor-pointer group/author' : ''
+                  }`}
+                >
                   <CreatorAvatar
                     uid={item.authorUid}
                     fallbackPhoto={item.authorPhoto}
                     fallbackName={item.authorName}
-                    className="w-8 h-8 rounded-full shrink-0 overflow-hidden border border-slate-200"
+                    className="w-8 h-8 rounded-full shrink-0 overflow-hidden border border-slate-200 group-hover/author:ring-2 group-hover/author:ring-blue-400 transition"
                   />
                   <div className="min-w-0">
-                    <div className="text-xs font-bold text-slate-900 truncate">
+                    <div className="text-xs font-bold text-slate-900 truncate group-hover/author:text-[#1877F2]">
                       <CreatorDisplayName uid={item.authorUid} fallback={item.authorName} />
                     </div>
                     <div className="text-[11px] text-slate-500 flex items-center gap-1">
@@ -820,7 +855,13 @@ export default function HomeView({
           )}
         </div>
 
-        {commentsOpen && <FeedCommentsDrawer item={item} onToast={showToast} />}
+        {commentsOpen && (
+          <FeedCommentsDrawer
+            item={item}
+            onToast={showToast}
+            onOpenCreatorProfile={onOpenCreatorProfile}
+          />
+        )}
       </article>
     );
   };
@@ -1116,7 +1157,11 @@ export default function HomeView({
       )}
 
       {/* 1. KING 24h Status Stories Bar (Top below Fixed Home Header) */}
-      <StatusBar lightMode={true} onOverlayChange={setStatusOverlayOpen} />
+      <StatusBar
+        lightMode={true}
+        onOverlayChange={setStatusOverlayOpen}
+        onOpenCreatorProfile={onOpenCreatorProfile}
+      />
 
       {/* 2. Unified "Latest on KING" Feed (Directly Below StatusBar) */}
       <section id="latest-on-king-section" className="px-3.5 pt-1 space-y-3">
@@ -1449,7 +1494,17 @@ export default function HomeView({
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between gap-2 p-3.5 border-b border-slate-200">
-              <div className="flex items-center gap-2.5 min-w-0">
+              <div
+                onClick={() => {
+                  if (liveActivePhotoModal.authorUid && onOpenCreatorProfile) {
+                    setActivePhotoModal(null);
+                    onOpenCreatorProfile(liveActivePhotoModal.authorUid);
+                  }
+                }}
+                className={`flex items-center gap-2.5 min-w-0 ${
+                  liveActivePhotoModal.authorUid && onOpenCreatorProfile ? 'cursor-pointer hover:opacity-85' : ''
+                }`}
+              >
                 <CreatorAvatar
                   uid={liveActivePhotoModal.authorUid}
                   fallbackPhoto={liveActivePhotoModal.authorPhoto}
@@ -1507,7 +1562,11 @@ export default function HomeView({
               </div>
             </div>
 
-            <FeedCommentsDrawer item={liveActivePhotoModal} onToast={showToast} />
+            <FeedCommentsDrawer
+              item={liveActivePhotoModal}
+              onToast={showToast}
+              onOpenCreatorProfile={onOpenCreatorProfile}
+            />
           </div>
         </div>
       )}

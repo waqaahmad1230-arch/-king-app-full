@@ -1,10 +1,17 @@
 import {
+  getFalConfig,
   getModelConfig,
+  listFalModelHealthSummaries,
   listProjectHealthSummaries,
+  listResolvedFalKeys,
   listResolvedKeys,
+  listSafeFalKeySummaries,
   scrubSecretText,
   syncVaultFromRemote,
+  VERIFIED_FAL_MODELS,
   VERIFIED_GEMINI_MODELS,
+  type FalModelHealthRecord,
+  type FalQuotaScope,
   type ImageSelectionPolicy,
   type ProjectHealthRecord,
   type QuotaScope,
@@ -26,6 +33,16 @@ export interface KeyDiagnosticStatus {
   source: 'admin_vault' | 'runtime_env';
   status: 'Ready' | 'Disabled' | 'Not Configured' | 'Quota Exhausted' | 'Invalid Key' | 'Error';
   quotaScope?: QuotaScope;
+}
+
+export interface FalPublicKeyStatus {
+  keyIndex: number;
+  id: string;
+  label: string;
+  enabled: boolean;
+  source: 'admin_vault' | 'runtime_env';
+  status: KeyDiagnosticStatus['status'];
+  quotaScope?: FalQuotaScope;
 }
 
 export interface PublicAiCapabilityStatus {
@@ -63,6 +80,13 @@ export interface PublicAiCapabilityStatus {
   healthyKeyCount: number;
   keyStatuses: KeyDiagnosticStatus[];
   projects?: ProjectHealthRecord[];
+  falConfigured?: boolean;
+  falImageSupported?: boolean;
+  falVideoSupported?: boolean;
+  falActiveKeyCount?: number;
+  falHealthyKeyCount?: number;
+  falKeyStatuses?: FalPublicKeyStatus[];
+  falModelHealth?: FalModelHealthRecord[];
 }
 
 function mapStatusLabel(s: ResolvedExecutableKey['status']): KeyDiagnosticStatus['status'] {
@@ -76,11 +100,23 @@ function mapStatusLabel(s: ResolvedExecutableKey['status']): KeyDiagnosticStatus
 export function getPublicAiCapabilityStatus(): PublicAiCapabilityStatus {
   const keys = listResolvedKeys();
   const modelConfig = getModelConfig();
+  const falKeys = listSafeFalKeySummaries();
+  const falConfig = getFalConfig();
+  const now = Date.now();
 
   const activeKeys = keys.filter((k) => k.enabled && k.status !== 'invalid');
   const healthyKeys = activeKeys.filter(
-    (k) => k.status === 'ready' && (!k.cooldownUntil || k.cooldownUntil <= Date.now())
+    (k) => k.status === 'ready' && (!k.cooldownUntil || k.cooldownUntil <= now)
   );
+
+  const falActiveKeys = falKeys.filter((k) => k.enabled && k.status !== 'invalid');
+  const falHealthyKeys = falActiveKeys.filter(
+    (k) => k.status === 'ready' && (!k.cooldownUntil || k.cooldownUntil <= now)
+  );
+  const falConfigured = falActiveKeys.length > 0;
+  const falImageSupported = falConfigured && falConfig.enableFalImageFallback;
+  const falVideoSupported =
+    falConfigured && (falConfig.enableFalVideoFallback || falConfig.preferFalForVideo);
 
   const verifiedModels = VERIFIED_GEMINI_MODELS.map((spec) => ({
     ...spec,
@@ -110,8 +146,10 @@ export function getPublicAiCapabilityStatus(): PublicAiCapabilityStatus {
     enabledVideoModels[0]?.id ||
     'gemini-omni-1.2-flash';
 
-  const configured = activeKeys.length > 0;
-  const videoSupported = configured && enabledVideoModels.length > 0;
+  const geminiConfigured = activeKeys.length > 0;
+  const configured = geminiConfigured || falConfigured;
+  const geminiVideoSupported = geminiConfigured && enabledVideoModels.length > 0;
+  const videoSupported = geminiVideoSupported || falVideoSupported;
 
   return {
     ok: true,
@@ -120,12 +158,17 @@ export function getPublicAiCapabilityStatus(): PublicAiCapabilityStatus {
     backendHost: getBackendHost(),
     autoRoutingEnabled: modelConfig.enableAutoRouting,
     imageSelectionPolicy: modelConfig.imageSelectionPolicy,
-    photoSupported: configured && enabledImageModels.length > 0,
-    textSupported: configured && enabledTextModels.length > 0,
+    photoSupported: (geminiConfigured && enabledImageModels.length > 0) || falImageSupported,
+    textSupported: geminiConfigured && enabledTextModels.length > 0,
     photoModel: primaryImageModel,
     textModel: primaryTextModel,
-    videoModel: primaryVideoModel,
-    supportedModels: enabledImageModels.map((m) => m.id),
+    videoModel: falVideoSupported && !geminiVideoSupported ? falConfig.primaryFalVideoModel : primaryVideoModel,
+    supportedModels: [
+      ...enabledImageModels.map((m) => m.id),
+      ...(falImageSupported
+        ? VERIFIED_FAL_MODELS.filter((m) => m.capability === 'image' || m.capability === 'image_edit').map((m) => m.id)
+        : []),
+    ],
     verifiedModels,
     routingArchitecture: {
       assistantPreferred: primaryTextModel,
@@ -134,12 +177,16 @@ export function getPublicAiCapabilityStatus(): PublicAiCapabilityStatus {
         standard: enabledImageModels.find((m) => m.qualityTier === 'standard')?.id || null,
         pro: enabledImageModels.find((m) => m.qualityTier === 'pro')?.id || null,
       },
-      videoExclusive: enabledVideoModels[0]?.id || null,
+      videoExclusive: enabledVideoModels[0]?.id || (falVideoSupported ? falConfig.primaryFalVideoModel : null),
     },
     videoSupported,
-    videoReason: videoSupported
-      ? `Gemini Omni (${primaryVideoModel}) is configured for video routing via /api/ai/route. Interactive timeline editing tools (Trim, Filters, Music, Text) are available in Post Editor.`
-      : 'Video AI requires an active paid-tier Gemini API key and an enabled Gemini Omni model in Admin Panel → AI Model Manager.',
+    videoReason: geminiVideoSupported
+      ? `Gemini Omni (${primaryVideoModel}) is configured for video routing via /api/ai/route${
+          falVideoSupported ? ` (with fal.ai ${falConfig.primaryFalVideoModel} failover ready)` : ''
+        }. Interactive timeline editing tools (Trim, Filters, Music, Text) are available in Post Editor.`
+      : falVideoSupported
+      ? `fal.ai (${falConfig.primaryFalVideoModel}) is configured for video routing via /api/ai/route.`
+      : 'Video AI requires an active Gemini API key with Gemini Omni or an active fal.ai API key in Admin Panel → AI Model Manager.',
     missingEnv: configured ? [] : ['ADMIN_VAULT_OR_SERVER_KEY'],
     activeKeyCount: activeKeys.length,
     healthyKeyCount: healthyKeys.length,
@@ -155,6 +202,21 @@ export function getPublicAiCapabilityStatus(): PublicAiCapabilityStatus {
       quotaScope: k.quotaScope,
     })),
     projects: listProjectHealthSummaries(),
+    falConfigured,
+    falImageSupported,
+    falVideoSupported,
+    falActiveKeyCount: falActiveKeys.length,
+    falHealthyKeyCount: falHealthyKeys.length,
+    falKeyStatuses: falKeys.map((k, idx) => ({
+      keyIndex: idx + 1,
+      id: k.id,
+      label: k.source === 'admin_vault' ? `fal.ai Slot ${idx + 1}` : `Server fal.ai Key ${idx + 1}`,
+      enabled: k.enabled,
+      source: k.source,
+      status: mapStatusLabel(k.status),
+      quotaScope: k.quotaScope,
+    })),
+    falModelHealth: listFalModelHealthSummaries(),
   };
 }
 
@@ -164,3 +226,4 @@ export async function getPublicAiCapabilityStatusAsync(): Promise<PublicAiCapabi
 }
 
 export { scrubSecretText };
+

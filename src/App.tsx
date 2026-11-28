@@ -104,6 +104,7 @@ export default function App() {
   const [isPostPickerOpen, setIsPostPickerOpen] = useState(false);
   const [isPostEditorOpen, setIsPostEditorOpen] = useState(false);
   const [postEditorInitialFile, setPostEditorInitialFile] = useState<File | null>(null);
+  const [postCreationType, setPostCreationType] = useState<'post' | 'story'>('post');
   const [postSelectionKey, setPostSelectionKey] = useState(0);
   const [postToastMsg, setPostToastMsg] = useState<string | null>(null);
 
@@ -120,9 +121,10 @@ export default function App() {
     setIsPostPickerOpen(true);
   };
 
-  const handlePostMediaSelected = (file: File) => {
+  const handlePostMediaSelected = (file: File, nextCreationType: 'post' | 'story' = 'post') => {
     setIsPostPickerOpen(false);
     setPostEditorInitialFile(file);
+    setPostCreationType(nextCreationType);
     setPostSelectionKey((k) => k + 1);
     setIsPostEditorOpen(true);
   };
@@ -162,6 +164,12 @@ export default function App() {
     }
   };
 
+  const handleOpenCreatorProfile = (creatorUid: string) => {
+    if (!creatorUid) return;
+    setViewingProfileUserId(creatorUid);
+    setIsProfileOpen(true);
+  };
+
   const renderContent = () => {
     switch (activeTab.toUpperCase()) {
       case 'HOME':
@@ -170,6 +178,7 @@ export default function App() {
             onOpenQR={() => setIsQROpen(true)}
             onOpenWatchVideo={handleOpenWatchFromHome}
             onFullScreenOverlayChange={setIsChildOverlayOpen}
+            onOpenCreatorProfile={handleOpenCreatorProfile}
             onOpenTab={(tab) => {
               setActiveTab(tab);
               if (tab.toUpperCase() === 'CATALOG' && window.location.pathname.toLowerCase() !== '/catalog') {
@@ -258,6 +267,7 @@ export default function App() {
             onOpenQR={() => setIsQROpen(true)}
             onOpenWatchVideo={handleOpenWatchFromHome}
             onFullScreenOverlayChange={setIsChildOverlayOpen}
+            onOpenCreatorProfile={handleOpenCreatorProfile}
             onOpenTab={(tab) => {
               setActiveTab(tab);
               if (tab.toUpperCase() === 'CATALOG' && window.location.pathname.toLowerCase() !== '/catalog') {
@@ -382,6 +392,10 @@ export default function App() {
       <SearchModal
         isOpen={isSearchOpen}
         onClose={() => setIsSearchOpen(false)}
+        onOpenCreatorProfile={(uid) => {
+          setIsSearchOpen(false);
+          handleOpenCreatorProfile(uid);
+        }}
         onOpenQR={() => {
           setIsSearchOpen(false);
           setIsQROpen(true);
@@ -478,11 +492,16 @@ export default function App() {
         isOpen={isPostEditorOpen}
         initialFile={postEditorInitialFile}
         selectionKey={postSelectionKey}
+        creationType={postCreationType}
         onClose={() => {
           setIsPostEditorOpen(false);
           setPostEditorInitialFile(null);
+          setPostCreationType('post');
         }}
         onRetake={() => {
+          setIsPostEditorOpen(false);
+          setPostEditorInitialFile(null);
+          setPostCreationType('post');
           setIsPostPickerOpen(true);
         }}
         onPublished={(info) => {

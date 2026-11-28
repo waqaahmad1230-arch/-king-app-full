@@ -82,9 +82,10 @@ function StatusCardMediaBackdrop({
 interface StatusBarProps {
   lightMode?: boolean;
   onOverlayChange?: (isOpen: boolean) => void;
+  onOpenCreatorProfile?: (uid: string) => void;
 }
 
-export default function StatusBar({ lightMode = false, onOverlayChange }: StatusBarProps) {
+export default function StatusBar({ lightMode = false, onOverlayChange, onOpenCreatorProfile }: StatusBarProps) {
   const { user, openAuthModal } = useAuth();
   const signedInUid = user?.uid || null;
 
@@ -616,6 +617,7 @@ export default function StatusBar({ lightMode = false, onOverlayChange }: Status
           onStatusReactionChanged={handleStatusReactionChanged}
           onStatusDeleted={handleStatusDeleted}
           onShowToast={showToast}
+          onOpenCreatorProfile={onOpenCreatorProfile}
         />
       )}
     </section>
